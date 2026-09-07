@@ -1,8 +1,8 @@
 # SpaceLens — Current Phase
 
 - **Current phase:** PHASE 0 — Product validation, foundation & engineering contract
-- **Status:** IN PROGRESS (scaffold build/test running; see PHASE_0_STATUS.md)
-- **Last updated:** 2026-09-07 (Phase 0 agent run)
+- **Status:** VERIFIED 2026-09-07 (see PHASE_0_STATUS.md — all critical criteria met)
+- **Last updated:** 2026-09-07 (Phase 0 complete; awaiting authorization)
 
 ## Completed work (this run)
 
@@ -14,7 +14,12 @@
 
 ## Verified work
 
-- (Updated after build/test runs complete — see PHASE_0_STATUS.md.)
+- Rust 1.98.1 GNU toolchain installed to D: (`rustc`/`cargo` both respond).
+- `cargo test -j 2 -p spacelens-core` → 6/6 pass (contract + SQLite bootstrap incl. WAL/FK/idempotence).
+- `npm install` → 73 packages; `npm run build` → tsc clean + vite emits dist/ (27 modules).
+- `cargo fmt --check` clean; `tauri.conf.json` + capabilities valid JSON; `tauri-cli 2.11.4`.
+- Independent verification: contract parity v1/v1, no user paths, no engine creep, no fs in UI, fresh green re-run.
+- Git: `main`, 2 commits, clean tree, 38 tracked files.
 
 ## Unverified work
 
@@ -40,4 +45,6 @@
 
 ## Last verification
 
-- Pending: cargo test + npm build results (background runs at time of writing).
+- 2026-09-07: `cargo test -j 2 -p spacelens-core` 6/6 green; `npm run build` green;
+  fmt/tauri-JSON/CLI checks green; hostile-reviewer greps clean; tree clean.
+  Full evidence in PHASE_0_STATUS.md. STOP — Phase 1 needs explicit authorization.
