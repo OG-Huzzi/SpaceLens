@@ -124,6 +124,12 @@ attempted yet (bundle icons / MSVC contract; documented in docs/SCANNER.md).
 6. **Symlink follow-modes** with dev/ino guard — future, opt-in only.
 7. **DB persistence of scan records** deferred until the Tauri service layer
    exists (keeps the engine DB-free per the Phase-1 boundary).
+8. **C: free space fluctuated 6.6 GB → 1.5 GB** during this run — post-hoc
+   audit confirmed SpaceLens artifacts are all on D: (CARGO_HOME, RUSTUP_HOME,
+   root `.cargo` cache, `target/`, npm cache); `C:\Users\DELL\.rustup` is an
+   empty 0 MB stub; the drop is from external system processes (OS updates /
+   Defender), outside the repo's control. C: remains small; the D:-redirect
+   configuration from Phase 0.5 is intact and re-verified.
 
 ## Phase-1 acceptance gate (all checked)
 
