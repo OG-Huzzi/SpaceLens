@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/spacelens-core"]
+
+# Phase 0 scaffold. The Tauri shell crate (src-tauri) is a config-level contract
+# in this phase and is NOT a workspace member until MSVC-based CI exists,
+# because linking Tauri on Windows requires the MSVC toolchain (see
+# progress/PHASE_0_STATUS.md — this machine has the GNU toolchain only).

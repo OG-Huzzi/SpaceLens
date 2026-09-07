@@ -1,0 +1,18 @@
+[package]
+name = "spacelens-core"
+version = "0.0.0"
+edition = "2021"
+description = "SpaceLens core engine — Phase 0 scaffold (IPC contract types + SQLite bootstrap only, no product engine)"
+license = "UNLICENSED"
+
+[lib]
+name = "spacelens_core"
+crate-type = ["lib"]
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

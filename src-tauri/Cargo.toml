@@ -1,0 +1,18 @@
+[package]
+name = "spacelens"
+version = "0.0.0"
+edition = "2021"
+description = "SpaceLens Tauri shell — Phase 0 config contract (compiled in MSVC CI from Phase 1; see progress/PHASE_0_STATUS.md)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+spacelens-core = { path = "../crates/spacelens-core" }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

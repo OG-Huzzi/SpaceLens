@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Phase 0: minimum capability set. Expanded per docs/API_CONTRACTS.md in Phase 1+.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
