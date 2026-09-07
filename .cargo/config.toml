@@ -1,0 +1,6 @@
+# Phase 0.5 — resource-conscious build defaults for the 8 GB RAM dev machine.
+# The canonical toolchain lives on D: (CARGO_HOME=D:/.cargo, RUSTUP_HOME=D:/.rustup);
+# this file only pins conservative parallelism so builds never exhaust RAM.
+# CI (Phase 1+) may override jobs via its own config or CARGO_BUILD_JOBS.
+[build]
+jobs = 2

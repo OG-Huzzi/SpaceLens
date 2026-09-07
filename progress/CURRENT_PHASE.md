@@ -1,41 +1,45 @@
 # SpaceLens — Current Phase
 
-- **Current phase:** PHASE 0 — Product validation, foundation & engineering contract
-- **Status:** VERIFIED 2026-09-07 (see PHASE_0_STATUS.md — all critical criteria met)
-- **Last updated:** 2026-09-07 (Phase 0 complete; awaiting authorization)
+- **Current phase:** PHASE 0.5 — Development environment & repository integrity
+- **Status:** VERIFIED 2026-09-07 (see PHASE_0_5_STATUS.md — all Phase 0.5 acceptance criteria passed)
+- **Last updated:** 2026-09-07 (Phase 0.5 complete; Phase 0 remains VERIFIED and untouched)
 
 ## Completed work (this run)
 
-- Environment + repo inspection (empty dir, no git; Windows 11 Pro x64).
-- Toolchain inventory; installed Rust 1.98.1 GNU to D: (C: full, no MSVC).
-- Competitive research (8+ products), brand-conflict check (collisions found, documented).
-- Product thesis, differentiation verdicts, UX/design/business/architecture/cross-platform/safety/perf/DB/API/testing/dev-rules docs (13 files).
-- Minimal scaffold: Rust workspace (`spacelens-core`), React+TS frontend, Tauri config contract.
+- Confirmed canonical path `D:\SpaceLens`; Git healthy on `main`, clean tree,
+  in sync with `origin/main` (GitHub already held verified Phase 0 history).
+- Repaired Rust toolchain activation: set user env vars `CARGO_HOME=D:\.cargo`,
+  `RUSTUP_HOME=D:\.rustup`, added `D:\.cargo\bin` to user PATH (toolchain was
+  already on D: but shims failed without the vars).
+- Redirected npm cache to `D:\.npm-cache` (user `.npmrc`); cleaned the stale
+  3.25 GB C: cache → C: free went 0.24 GB → 5.5 GB.
+- Added repo `.cargo/config.toml` pinning `build.jobs = 2` (8 GB RAM safety).
+- `.gitignore` audit: added `.env`, `.env.*`, `*.local`, `.npmrc`, `*.log`.
+- Secret audit of tracked content: clean (benign prose/package-name matches only).
+- Added `docs/DEVELOPMENT_SETUP.md` (reproducibility contract).
+- Verification re-run green: `cargo fmt --check`, `cargo test -j 2 -p
+  spacelens-core` (6/6), `npm run build`, `npx tauri --version` + config JSON
+  validation.
 
 ## Verified work
 
-- Rust 1.98.1 GNU toolchain installed to D: (`rustc`/`cargo` both respond).
-- `cargo test -j 2 -p spacelens-core` → 6/6 pass (contract + SQLite bootstrap incl. WAL/FK/idempotence).
-- `npm install` → 73 packages; `npm run build` → tsc clean + vite emits dist/ (27 modules).
-- `cargo fmt --check` clean; `tauri.conf.json` + capabilities valid JSON; `tauri-cli 2.11.4`.
-- Independent verification: contract parity v1/v1, no user paths, no engine creep, no fs in UI, fresh green re-run.
-- Git: `main`, 2 commits, clean tree, 38 tracked files.
+- See PHASE_0_5_STATUS.md for full evidence (commands + observed results).
 
 ## Unverified work
 
-- Full Tauri compile/bundle (blocked: no MSVC toolchain; needs CI).
-- macOS/Linux platform behavior (contract-only in Phase 0).
+- Full Tauri compile/bundle (blocked: no MSVC/Windows SDK; CI required — Phase 1).
+- macOS/Linux platform behavior (contract-only until CI runners exist).
 
 ## Known issues / blockers
 
-1. C: ~258 MB free — nothing may be installed on C:. All tooling lives on D:.
-2. No MSVC / Windows SDK — Tauri link/bundle impossible locally.
+1. No MSVC toolchain — Tauri link/bundle impossible locally; must run in CI.
+2. C: free space still small (~5.5 GB); keep all dev data on D:.
 3. Brand collisions ("SpaceLens" in adjacent spaces) — legal clearance needed pre-launch.
 
 ## Next authorized task
 
-- Finish Phase 0 verification (collect build/test results, independent audit),
-  then STOP. Do NOT start Phase 1 without explicit authorization.
+- STOP. Phase 0.5 is complete and awaiting external audit. Do NOT start
+  Phase 1 (Filesystem Engine) without explicit authorization.
 
 ## Forbidden tasks
 
@@ -45,6 +49,7 @@
 
 ## Last verification
 
-- 2026-09-07: `cargo test -j 2 -p spacelens-core` 6/6 green; `npm run build` green;
-  fmt/tauri-JSON/CLI checks green; hostile-reviewer greps clean; tree clean.
-  Full evidence in PHASE_0_STATUS.md. STOP — Phase 1 needs explicit authorization.
+- 2026-09-07: fmt clean; cargo test 6/6 green; npm build green; tauri CLI +
+  JSON configs green; secret grep clean; D:-based cache config verified.
+  Full evidence in PHASE_0_5_STATUS.md.
+

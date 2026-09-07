@@ -17,7 +17,15 @@ src-tauri/gen/
 *.db-wal
 *.db-shm
 
-# OS / editors
+# Secrets / local env — never commit
+.env
+.env.*
+*.local
+.npmrc
+
+# Logs
+*.log
+
 .DS_Store
 Thumbs.db
 .vscode/*
