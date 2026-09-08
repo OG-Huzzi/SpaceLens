@@ -134,12 +134,14 @@ fn path_mentions_user_profile(path: &Path, platform: Platform) -> bool {
     let Some(full) = path.to_str() else {
         return false;
     };
-    let marker = match platform {
-        Platform::Windows => "\\Users\\",
-        Platform::Mac => "/Users/",
-        Platform::Linux => "/home/",
+    let marker_options: &[&str] = match platform {
+        // Win32 accepts both separators; check both so synthetic and
+        // normalized paths are handled identically on every host.
+        Platform::Windows => &["\\Users\\", "/Users/"],
+        Platform::Mac => &["/Users/"],
+        Platform::Linux => &["/home/"],
     };
-    full.contains(marker)
+    marker_options.iter().any(|m| full.contains(m))
 }
 
 #[cfg(test)]
@@ -183,7 +185,10 @@ mod tests {
     #[test]
     fn downloads_installer_example_from_master_prompt() {
         // C:\Users\...\Downloads\setup.exe → Downloads / Installer / High.
-        let e = file(1, Some(9), r"C:\Users\me\Downloads\setup.exe");
+        // Forward slashes: valid on Windows and parse identically on every
+        // host (tests must be host-independent; backslash fixtures would
+        // break file_name() extraction on Unix hosts).
+        let e = file(1, Some(9), "C:/Users/me/Downloads/setup.exe");
         let c = classify(
             &e,
             &ParentContext {

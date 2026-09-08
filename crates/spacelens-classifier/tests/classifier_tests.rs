@@ -104,7 +104,7 @@ fn basic_directory_categories() {
             RuleId::TempDir,
         ),
         (
-            "C:\\Windows",
+            "C:/Windows",
             Platform::Windows,
             Category::SystemData,
             RuleId::WindowsSystemLocation,
@@ -134,7 +134,7 @@ fn basic_directory_categories() {
             RuleId::DownloadsDir,
         ),
         (
-            "C:\\Users\\u\\Documents",
+            "C:/Users/u/Documents",
             Platform::Windows,
             Category::UserData,
             RuleId::DocumentsDir,
@@ -228,7 +228,7 @@ fn confidence_bands_and_caps() {
     }
     // Authoritative locations are High.
     for (p, plat) in [
-        ("C:\\Program Files", Platform::Windows),
+        ("C:/Program Files", Platform::Windows),
         ("/usr", Platform::Linux),
         ("/Users/u/Library", Platform::Mac),
     ] {
@@ -314,11 +314,12 @@ fn nested_context_boosts_confidence_not_category() {
 fn downloads_subcategory_refinement() {
     // Inside Downloads, an .exe is an installer-like artifact: subcategory
     // refinement applies via parent context evidence.
+    // Forward-slash Windows paths: parse identically on every host.
     let mut tracker = ParentContextTracker::new();
-    let parent = dir(1, None, "C:\\Users\\u\\Downloads");
+    let parent = dir(1, None, "C:/Users/u/Downloads");
     let pc = classify_streaming(&parent, Platform::Windows, &mut tracker);
     assert_eq!(pc.category, Category::Downloads);
-    let child = file(2, Some(1), "C:\\Users\\u\\Downloads\\tool.exe");
+    let child = file(2, Some(1), "C:/Users/u/Downloads/tool.exe");
     let cc = classify_streaming(&child, Platform::Windows, &mut tracker);
     assert_eq!(cc.category, Category::Applications);
     assert!(cc.confidence >= Confidence::Medium);
@@ -398,7 +399,7 @@ fn hidden_dot_directories_on_unix() {
     assert_eq!(c.winning_rule, RuleId::XdgLocation);
     assert_eq!(c.category, Category::UserData);
     // Same name on Windows: no XDG rule → different outcome, no panic.
-    let c = classify_dir("C:\\Users\\u\\.cache", Platform::Windows);
+    let c = classify_dir("C:/Users/u/.cache", Platform::Windows);
     assert_ne!(c.winning_rule, RuleId::XdgLocation);
 }
 
@@ -424,7 +425,7 @@ fn invariant_deterministic_across_all_fixtures() {
         file(1, None, "/a/report.pdf"),
         file(2, None, "/a/SETUP.EXE"),
         dir(3, None, "/a/Node_Modules"),
-        dir(4, None, "C:\\Program Files\\App"),
+        dir(4, None, "C:/Program Files/App"),
         file(5, None, "/a/日本語のファイル.mp3"),
         file(6, None, "/a/x.tar.gz"),
         dir(7, None, "/a/tmp"),
