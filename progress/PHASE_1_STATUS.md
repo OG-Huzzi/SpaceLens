@@ -153,4 +153,70 @@ attempted yet (bundle icons / MSVC contract; documented in docs/SCANNER.md).
 
 ## Commit SHA
 
-Recorded after push in the final phase report.
+Phase 1 implementation: `d5c625e` · env note: `05887d1` · **Verification gate fix: `8ef3563`**
+
+## Cross-platform verification (Final Verification Gate, 2026-09-08)
+
+- **Defect found by CI:** the Unix-only code in
+  `crates/spacelens-engine/src/platform/unix.rs` used
+  `io::ErrorKind::FilesystemLoop`, which is an **unstable** std variant
+  (feature `io_error_more`) not available on stable Rust. This file is
+  excluded by `#[cfg(unix)]` on Windows, so the local (Windows-only) build
+  never compiled it. Both initial CI runs failed on Unix exactly here:
+  - Run #1 (`d5c625e`): Ubuntu job FAILED (`cargo test` step, exit 101).
+  - Run #2 (`05887d1`): macOS job FAILED (`cargo test` step, exit 101).
+  - Windows passed both times (incl. tests + perf smoke) — correctly
+    exercising the Windows-only code paths.
+- **Fix (`8ef3563`):** removed the `FilesystemLoop` arm; ELOOP now degrades
+  to `ErrorCategory::Other` (it cannot occur under lstat semantics). The
+  mapping is documented in-code.
+- **Local cross-target verification (this Windows box, GNU Rust 1.98.1):**
+  - `cargo check --target x86_64-unknown-linux-gnu -p spacelens-engine` → clean
+  - `cargo check --target x86_64-unknown-linux-gnu -p spacelens-engine --tests` → clean
+  - `cargo check --target x86_64-apple-darwin -p spacelens-engine --tests` → clean
+  (rustup targets installed locally; Unix code paths + tests now compile-verified.)
+- **Local regression (Windows):** `cargo fmt --check` 0 · `cargo clippy -j 2
+  --workspace --all-targets` 0 · `cargo test -j 2 --workspace` 48 passed /
+  0 failed / 1 ignored · perf smoke 10k files ≈ 251 ms (~39.8k files/sec) ·
+  `npm run build` exit 0.
+- **GitHub Actions run #3 (`34195483429`) on `8ef3563` — ALL GREEN:**
+  - `rust (windows-latest)` → **success** (fmt ✓, tests ✓, perf smoke ✓)
+  - `rust (ubuntu-latest)` → **success**
+  - `rust (macos-latest)` → **success**
+  - `frontend` → **success** (npm ci + npm run build)
+  - Workflow conclusion: **success** (fail-fast: false; all 4 jobs required).
+- **Final hostile audit (source):** all `cfg!`/`#[cfg(...)]` OS branching is
+  confined to `crates/spacelens-engine/src/platform/` — zero OS branching in
+  shared scanner code; no network/destructive/shell code anywhere in the
+  engine (2 false-positive doc-comment hits for the word “shell” — “never
+  shell-interpolated”, “Tauri shell”); no secrets; paths via Path/PathBuf.
+
+### Phase 1 verdict after the gate: **VERIFIED**
+
+## Independent re-verification (2026-09-08, second agent run)
+
+A fresh agent run re-verified every claim above from scratch (forensic
+inspection of git state + full source first, then re-execution). Results:
+
+- `cargo fmt --check` → exit 0.
+- `cargo clippy -j 2 --workspace --all-targets -- -D warnings` → exit 0.
+- `cargo test -j 2 --workspace` → **48 passed / 0 failed / 1 ignored**
+  (6 core + 11 engine unit + 6 cancel + 6 error + 5 link + 7 real-fs +
+  7 traversal).
+- Perf smoke (`cargo test -j 2 -p spacelens-engine -- --ignored --nocapture`)
+  → passed; 10k files in 685 ms (~14.6k files/sec) under concurrent load —
+  timing is machine/load-dependent and never a pass gate (correctness is
+  asserted inside the test and passed).
+- `npm ci` → exit 0 (0 vulnerabilities). `npm run build` → exit 0
+  (tsc clean + vite 27 modules).
+- **GitHub API check of run #3 (`34195483429`) on `8ef3563`:** status
+  `completed`, conclusion `success`; all 4 jobs `success` — `frontend`,
+  `rust (macos-latest)`, `rust (ubuntu-latest)`, `rust (windows-latest)` —
+  each with Format/Tests/Perf-smoke steps green (verified per-job via the
+  Actions jobs API, not from prior reports).
+- Security re-audit (grep-based): no network/telemetry/process-spawn/
+  destructive APIs anywhere in the engine; no secrets in tracked files
+  (remaining grep hits are doc comments and synthetic test fixture names).
+- Working tree at audit time: only this documentation change.
+
+No code changes were needed. Verdict stands: **VERIFIED**.

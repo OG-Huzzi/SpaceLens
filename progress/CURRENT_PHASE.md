@@ -58,7 +58,17 @@
 
 ## Last verification
 
-- 2026-09-07: fmt clean; clippy clean; workspace tests 48/48 green; perf
-  smoke printed; npm build green; secret scan clean; diff scoped to engine.
-  Full evidence in PHASE_1_STATUS.md.
+- 2026-09-08 (Final Verification Gate): a real Phase 1 Unix-only defect was
+  found by GitHub Actions (unstable `io::ErrorKind::FilesystemLoop` in
+  `platform/unix.rs` broke Linux + macOS builds) and fixed in `8ef3563`.
+- CI run #3 (`34195483429`) on `8ef3563`: **all green** — Windows ✓, Ubuntu ✓,
+  macOS ✓, frontend ✓ (fmt, `cargo test -j 2 --workspace`, perf smoke).
+- Local: fmt 0, clippy 0, tests 48/48, perf smoke ~40k files/sec,
+  npm build 0; Linux + macOS cross-target `cargo check` (lib + tests) clean.
+- Full evidence in PHASE_1_STATUS.md. **PHASE 1 — VERIFIED.**
+  STOP — Phase 2 requires explicit authorization.
+- 2026-09-08 (independent re-audit): a second agent run re-verified every
+  gate claim from scratch — fmt/clippy/tests/perf smoke/npm ci/npm build all
+  re-executed green, and CI run #3 confirmed all-green per-job via the
+  GitHub Actions API. No code changes needed. PHASE 1 remains VERIFIED.
 
