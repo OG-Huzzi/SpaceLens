@@ -1,7 +1,7 @@
 # SpaceLens — Phase 2 Status
 
 - **Phase:** 2 — System Intelligence Foundation (Entity Model + Deterministic Classification)
-- **Verdict:** VERIFIED LOCALLY (Windows) — CI matrix execution pending push
+- **Verdict:** VERIFIED — local (Windows) + GitHub CI matrix all green (run `34251905113`)
 - **Date:** 2026-09-08 · **Machine:** Windows 11 Pro x64, 8 GB RAM · **Agent run:** Phase 2
 
 ## Initial repository state (forensic inspection)
@@ -104,8 +104,12 @@ path/name/extension/metadata.
    excluded from video table (documented trade-off).
 4. Rule set deliberately small (~30 rules) — quality over quantity.
 5. Timestamps/size not yet evidence inputs (reserved for future phase).
-6. CI execution for this phase pending push; local verification is
-   Windows-only until then.
+6. ~~CI execution pending push~~ **Resolved:** first CI run (`34251196759` on
+   `d49609e`) failed on ubuntu/macos — Windows-path fixtures used backslashes
+   (separators only on Windows hosts), so Unix-host `file_name()` extraction
+   broke fixture matching. Fixed in `0827f84` (forward-slash Win32 paths +
+   separator-tolerant user-profile markers; both unix targets cross-compile
+   verified locally before push).
 
 ## Phase-2 acceptance gate
 
@@ -124,6 +128,13 @@ path/name/extension/metadata.
 - Performance: 1M-entry synthetic completes; memory bounded; deterministic ✓.
 - Regression: Phase 1 tests + perf smoke + clippy + fmt + frontend build ✓.
 
+## CI verification (GitHub Actions)
+
+| Run | Commit | Result |
+|---|---|---|
+| `34251196759` | `d49609e` (initial Phase 2) | failure — ubuntu + macos Tests step (host-dependent fixture path parsing; genuine defect, fixed) |
+| `34251905113` | `0827f84` (fix) | **success — all 4 jobs**: `rust (windows-latest)` ✓, `rust (ubuntu-latest)` ✓, `rust (macos-latest)` ✓, `frontend` ✓ (verified per-job via the Actions API) |
+
 ## Commit SHA
 
-Phase 2: recorded in `progress/CURRENT_PHASE.md` after commit.
+Phase 2 implementation: `d49609e` · CI-defect fix: `0827f84`

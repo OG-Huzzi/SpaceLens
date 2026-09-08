@@ -1,7 +1,7 @@
 # SpaceLens — Current Phase
 
 - **Current phase:** PHASE 2 — System Intelligence Foundation (Classification)
-- **Status:** IMPLEMENTED + VERIFIED LOCALLY (Windows) 2026-09-08; CI matrix pending push (see PHASE_2_STATUS.md)
+- **Status:** VERIFIED 2026-09-08 — local (Windows) + CI matrix all green, run `34251905113` (see PHASE_2_STATUS.md)
 - **Last updated:** 2026-09-08 (Phase 2 built on verified Phase 1; Phase 0 / 0.5 / 1 remain VERIFIED)
 
 ## Completed work (this run — Phase 2)
@@ -68,10 +68,8 @@
 
 ## Next authorized task
 
-- Push Phase 2 and confirm the CI matrix (Windows/Linux/macOS + frontend)
-  runs green; record run id in PHASE_2_STATUS.md. Then STOP — Phase 2 is
-  complete pending that CI confirmation. Do NOT start Phase 3 without
-  explicit authorization.
+- STOP. Phase 2 is complete and verified (local + CI). Do NOT start Phase 3
+  without explicit authorization.
 
 ## Forbidden tasks
 
@@ -87,8 +85,15 @@
   classifier perf smoke 1M entries ~8.9s (~113k entries/sec) ·
   Phase 1 perf smoke passes · `npm ci` 0 · `npm run build` 0.
   Security grep audit clean (crate performs zero I/O).
-  Full evidence in PHASE_2_STATUS.md. **PHASE 2 — VERIFIED LOCALLY;
-  CI confirmation pending first push of the phase.**
+  Full evidence in PHASE_2_STATUS.md. **PHASE 2 — VERIFIED LOCALLY;**
+  CI confirmation followed below.
+- 2026-09-08 (CI gate): first run `34251196759` on `d49609e` failed on
+  ubuntu/macos (host-dependent backslash fixtures broke Unix `file_name()`
+  extraction — genuine defect, not flakiness). Fixed in `0827f84` with
+  forward-slash Win32 fixtures + separator-tolerant markers; unix targets
+  cross-compile verified locally. Re-run **`34251905113` on `0827f84`:
+  all 4 jobs success** (windows/ubuntu/macos rust + frontend), verified
+  per-job via the Actions API. **PHASE 2 — VERIFIED.**
 - 2026-09-08 (Final Verification Gate): a real Phase 1 Unix-only defect was
   found by GitHub Actions (unstable `io::ErrorKind::FilesystemLoop` in
   `platform/unix.rs` broke Linux + macOS builds) and fixed in `8ef3563`.
