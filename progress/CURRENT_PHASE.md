@@ -1,8 +1,29 @@
 # SpaceLens — Current Phase
 
-- **Current phase:** PHASE 1 — Filesystem Engine
-- **Status:** VERIFIED 2026-09-07 (see PHASE_1_STATUS.md — all Phase 1 acceptance criteria passed)
-- **Last updated:** 2026-09-07 (Phase 1 complete; Phase 0 / 0.5 remain VERIFIED)
+- **Current phase:** PHASE 2 — System Intelligence Foundation (Classification)
+- **Status:** IMPLEMENTED + VERIFIED LOCALLY (Windows) 2026-09-08; CI matrix pending push (see PHASE_2_STATUS.md)
+- **Last updated:** 2026-09-08 (Phase 2 built on verified Phase 1; Phase 0 / 0.5 / 1 remain VERIFIED)
+
+## Completed work (this run — Phase 2)
+
+- New workspace crate `crates/spacelens-classifier` — pure, offline,
+  explainable classification layer over the Phase 1 engine.
+- Deterministic rule engine: 30-rule table, tiers 0–5, precedence
+  (tier → needle length → table order), conservative filename matching.
+- Typed evidence (11 kinds, 34 stable rule ids, bounded ≤8, never path text),
+  4-band confidence with test-enforced caps (extension-only ≤ Medium,
+  heuristics ≤ Low).
+- 17 semantic categories + 7 subcategories; Unknown strictly distinct from
+  Other; bucket entries never rescued by context.
+- Parent/child context: pure `ParentContext` + LRU-bounded streaming tracker;
+  context raises confidence one band, never changes category.
+- Streaming `CategoryAggregator`: u64 saturating, O(categories) memory,
+  canonical deterministic report order, coverage counters.
+- Platform handling as data (`Platform` enum; single `cfg!` site);
+  Windows/macOS case-insensitive vs Linux case-sensitive dir matching.
+- Tests: 79 classifier tests (57 unit + 22 integration) + ignored perf
+  benchmark (10k/100k/1M synthetic entries, ~113k entries/sec, deterministic).
+- `docs/CLASSIFICATION.md` written; Phase 1 suite re-run fully green.
 
 ## Completed work (this run)
 
@@ -47,17 +68,27 @@
 
 ## Next authorized task
 
-- STOP. Phase 1 is complete and awaiting external audit. Do NOT start
-  Phase 2 (Storage Analysis + Intelligence) without explicit authorization.
+- Push Phase 2 and confirm the CI matrix (Windows/Linux/macOS + frontend)
+  runs green; record run id in PHASE_2_STATUS.md. Then STOP — Phase 2 is
+  complete pending that CI confirmation. Do NOT start Phase 3 without
+  explicit authorization.
 
 ## Forbidden tasks
 
 - No hashing/duplicate detection (Phase 3). No cleanup/executor (Phase 4).
-- No recommendations (Phase 2/4). No full UI. No Phase 2 work.
-- No renames / no product-behavior changes outside the engine crate.
+- No recommendations. No history/snapshots. No full UI. No relationship graph.
+- No renames / no product-behavior changes outside the classifier crate.
 
 ## Last verification
 
+- 2026-09-08 (Phase 2 local verification): `cargo fmt --check` 0 ·
+  `cargo clippy -j 2 --workspace --all-targets -- -D warnings` 0 ·
+  `cargo test -j 2 --workspace` 127 passed / 0 failed / 1 ignored ·
+  classifier perf smoke 1M entries ~8.9s (~113k entries/sec) ·
+  Phase 1 perf smoke passes · `npm ci` 0 · `npm run build` 0.
+  Security grep audit clean (crate performs zero I/O).
+  Full evidence in PHASE_2_STATUS.md. **PHASE 2 — VERIFIED LOCALLY;
+  CI confirmation pending first push of the phase.**
 - 2026-09-08 (Final Verification Gate): a real Phase 1 Unix-only defect was
   found by GitHub Actions (unstable `io::ErrorKind::FilesystemLoop` in
   `platform/unix.rs` broke Linux + macOS builds) and fixed in `8ef3563`.

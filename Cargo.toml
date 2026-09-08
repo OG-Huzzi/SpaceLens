@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/spacelens-core", "crates/spacelens-engine"]
+members = ["crates/spacelens-core", "crates/spacelens-engine", "crates/spacelens-classifier"]
 
 # The Tauri shell crate (src-tauri) is a config-level contract and is NOT a
 # workspace member until MSVC-based CI exists, because linking Tauri on
