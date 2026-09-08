@@ -24,11 +24,13 @@ pub(super) fn categorize(err: &io::Error) -> ErrorCategory {
     match err.kind() {
         io::ErrorKind::PermissionDenied => ErrorCategory::PermissionDenied,
         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => ErrorCategory::NotFound,
-        io::ErrorKind::FilesystemLoop => ErrorCategory::Unsupported,
         io::ErrorKind::Interrupted => ErrorCategory::Transient,
         _ => {
             // EIO (5), EBUSY (16), EAGAIN (11) are identical across Linux,
             // macOS and the BSDs — the only raw codes we match on Unix.
+            // (ELOOP is intentionally not matched here: its raw value
+            // differs per OS and it cannot occur under lstat semantics;
+            // a stray FilesystemLoop degrades to `Other`.)
             match err.raw_os_error() {
                 Some(5) | Some(16) | Some(11) => ErrorCategory::Transient,
                 _ => ErrorCategory::Other,
