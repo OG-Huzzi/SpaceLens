@@ -54,12 +54,21 @@ pub(crate) fn scan_dir(root: &Path) -> Recording {
 }
 
 /// Creates a symlink that works on the current OS; returns false when the
-/// OS refuses (missing privilege) so callers can skip gracefully.
+/// environment cannot really produce one, so callers can skip gracefully.
+///
+/// The existence re-check matters: some Windows hosts (filter drivers, AV,
+/// certain Dev Drive configurations) report `symlink_file` as successful
+/// without a reparse point ever appearing on disk. Trusting the return value
+/// alone made this suite fail on such hosts even though the engine behaved
+/// correctly, so "created" is defined as "the link is observably there".
 pub(crate) fn create_link(target: &Path, link: &Path, dir_link: bool) -> bool {
     #[cfg(unix)]
     {
         let _ = dir_link;
         std::os::unix::fs::symlink(target, link).is_ok()
+            && std::fs::symlink_metadata(link)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
     }
     #[cfg(windows)]
     {
@@ -69,6 +78,9 @@ pub(crate) fn create_link(target: &Path, link: &Path, dir_link: bool) -> bool {
             std::os::windows::fs::symlink_file(target, link)
         };
         result.is_ok()
+            && std::fs::symlink_metadata(link)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
     }
     #[cfg(not(any(unix, windows)))]
     {

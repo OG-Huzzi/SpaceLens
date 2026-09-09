@@ -5,10 +5,14 @@
 //! the engine contract stays stable and versioned (`spacelens.v1.*` naming
 //! convention, docs/API_CONTRACTS.md).
 //!
-//! `Unknown` and `Other` are deliberately distinct:
-//! - [`Category::Unknown`] = insufficient evidence to classify confidently.
-//! - [`Category::Other`] = understood enough, but no more useful primary
-//!   category applies. Never a dumping ground for failure to classify.
+//! `Unknown` and `Other` are deliberately distinct — see
+//! docs/CLASSIFICATION.md for the full contract:
+//! - [`Category::Unknown`] = SpaceLens cannot establish even a basic semantic
+//!   interpretation of the observation (unusable name, incomplete metadata,
+//!   uninterpretable entry kind).
+//! - [`Category::Other`] = the entry is understood at a basic level (a regular
+//!   file, a directory) but no more useful primary category applies. Never a
+//!   dumping ground for failure to classify.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +21,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Category {
+    /// Installed application *code* (Program Files, /Applications, /opt).
     Applications,
+    /// Data owned by an application: per-user (AppData, ~/Library/Application
+    /// Support, ~/.config) or machine-wide (ProgramData). Deliberately NOT
+    /// [`Category::Applications`] — SpaceLens must be able to say "this is how
+    /// much space this application uses" without conflating the program with
+    /// the data it produced.
+    ApplicationData,
     Games,
     Documents,
     Images,
@@ -41,6 +52,7 @@ impl Category {
     pub fn code(self) -> &'static str {
         match self {
             Category::Applications => "APPLICATIONS",
+            Category::ApplicationData => "APPLICATION_DATA",
             Category::Games => "GAMES",
             Category::Documents => "DOCUMENTS",
             Category::Images => "IMAGES",
@@ -60,9 +72,14 @@ impl Category {
         }
     }
 
+    /// Number of primary categories. Kept explicit so aggregation arrays and
+    /// `Category::ALL` cannot silently drift apart.
+    pub const COUNT: usize = 18;
+
     /// All categories in the canonical (report/aggregation) order.
-    pub const ALL: [Category; 17] = [
+    pub const ALL: [Category; 18] = [
         Category::Applications,
+        Category::ApplicationData,
         Category::Games,
         Category::Documents,
         Category::Images,
@@ -135,7 +152,17 @@ mod tests {
             assert!(!code.is_empty());
             assert!(seen.insert(code), "duplicate category code: {code}");
         }
-        assert_eq!(Category::ALL.len(), 17);
+        assert_eq!(Category::ALL.len(), 18);
+        assert_eq!(Category::ALL.len(), Category::COUNT);
+    }
+
+    #[test]
+    fn application_data_is_not_applications() {
+        // Finding 2: installation location and application-owned data must
+        // never be conflated — "how much space does this app use?" depends on
+        // it. They are distinct codes and only one is an application.
+        assert_ne!(Category::Applications, Category::ApplicationData);
+        assert_eq!(Category::ApplicationData.code(), "APPLICATION_DATA");
     }
 
     #[test]
@@ -144,6 +171,7 @@ mod tests {
         assert!(Category::Unknown.is_bucket());
         assert!(Category::Other.is_bucket());
         assert!(!Category::Cache.is_bucket());
+        assert!(!Category::ApplicationData.is_bucket());
     }
 
     #[test]

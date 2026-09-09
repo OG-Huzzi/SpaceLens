@@ -242,20 +242,63 @@ fn confidence_bands_and_caps() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn conflict_strong_path_beats_weak_extension() {
-    // A directory named Cache containing... nothing — extension n/a. The real
-    // conflict case: a *file* whose name matches an installer pattern while
-    // its extension says something else (setup.zip).
+fn conflict_installer_name_does_not_steal_archive_semantics() {
+    // Finding 1: a filename rule must not beat a more meaningful extension
+    // merely because its tier is numerically stronger. `setup.zip` outside a
+    // download location keeps its archive semantics.
     let e = file(1, None, "/w/setup.zip");
     let c = classify(&e, &ParentContext::default(), Platform::Windows);
-    // InstallerName (tier 3) wins over ArchiveExtension (tier 4).
-    assert_eq!(c.winning_rule, RuleId::InstallerName);
-    assert!(c.matched_rules.contains(&RuleId::ArchiveExtension));
-    // But the losing evidence is retained.
+    assert_eq!(c.winning_rule, RuleId::ArchiveExtension);
+    assert_eq!(c.category, Category::Archives);
+    assert_eq!(c.subcategory, Some(Subcategory::Archive));
+    // The competing name signal is still recorded — with its true kind.
+    assert!(c.matched_rules.contains(&RuleId::InstallerName));
     assert!(c
         .evidence
         .iter()
-        .any(|ev| ev.rule == RuleId::ArchiveExtension));
+        .any(|ev| ev.rule == RuleId::InstallerName && ev.kind == EvidenceKind::FilenamePattern));
+    assert!(c
+        .evidence
+        .iter()
+        .any(|ev| ev.rule == RuleId::ArchiveExtension && ev.kind == EvidenceKind::Extension));
+}
+
+#[test]
+fn conflict_installer_name_wins_only_inside_a_download_location() {
+    // `setup.exe` in Downloads: the name is a *generic* signal (tier 5) and so
+    // is `.exe`, so the longer installer needle wins — and the download
+    // location corroborates it, which raises confidence to High.
+    let e = file(1, None, "C:/Users/u/Downloads/setup.exe");
+    let c = classify(&e, &ParentContext::default(), Platform::Windows);
+    assert_eq!(c.winning_rule, RuleId::InstallerName);
+    assert_eq!(c.category, Category::Downloads);
+    assert_eq!(c.subcategory, Some(Subcategory::Installer));
+    assert_eq!(c.confidence, Confidence::High);
+    assert!(c.matched_rules.contains(&RuleId::ExecutableExtension));
+}
+
+#[test]
+fn installer_name_never_beats_a_content_typed_extension() {
+    // A name that looks like an installer is weaker than a statement about
+    // what the bytes are — even inside Downloads. `setup.zip` is an archive
+    // everywhere; the installer signal survives as truthful evidence.
+    for p in [
+        "/home/u/project/setup.zip",
+        "C:/Users/u/Downloads/setup.zip",
+        "C:/Program Files/App/setup.zip",
+        "/Users/u/Library/Application Support/App/setup.zip",
+    ] {
+        let platform = if p.starts_with('/') && !p.starts_with("/Users") {
+            Platform::Linux
+        } else if p.starts_with("/Users") {
+            Platform::Mac
+        } else {
+            Platform::Windows
+        };
+        let c = classify_file(p, platform);
+        assert_eq!(c.category, Category::Archives, "path {p}");
+        assert_eq!(c.winning_rule, RuleId::ArchiveExtension, "path {p}");
+    }
 }
 
 #[test]
@@ -394,10 +437,14 @@ fn hidden_dot_directories_on_unix() {
     let c = classify_dir("/home/u/.cache", Platform::Linux);
     assert_eq!(c.category, Category::Cache);
     assert_eq!(c.winning_rule, RuleId::CacheDir);
-    // Generic XDG locations classify as UserData.
+    // XDG config/data locations are *owned by applications*, not authored by
+    // the user (Finding 2): they must answer "how much space does this
+    // application use?", so they are ApplicationData rather than UserData.
     let c = classify_dir("/home/u/.config", Platform::Linux);
     assert_eq!(c.winning_rule, RuleId::XdgLocation);
-    assert_eq!(c.category, Category::UserData);
+    assert_eq!(c.category, Category::ApplicationData);
+    let c = classify_dir("/home/u/.local/share", Platform::Linux);
+    assert_eq!(c.category, Category::ApplicationData);
     // Same name on Windows: no XDG rule → different outcome, no panic.
     let c = classify_dir("C:/Users/u/.cache", Platform::Windows);
     assert_ne!(c.winning_rule, RuleId::XdgLocation);

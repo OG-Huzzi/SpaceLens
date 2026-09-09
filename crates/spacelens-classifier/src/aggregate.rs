@@ -29,7 +29,7 @@ pub struct CategoryTotals {
 /// struct. Memory is O([`Category::ALL`].len()).
 #[derive(Debug, Clone, Default)]
 pub struct CategoryAggregator {
-    totals: [CategoryTotals; 17],
+    totals: [CategoryTotals; Category::COUNT],
     /// Entries whose classification was a bucket (Other/Unknown), tracked
     /// separately so consumers can measure classification coverage.
     unclassified_entries: u64,
@@ -39,7 +39,7 @@ pub struct CategoryAggregator {
 impl CategoryAggregator {
     pub fn new() -> Self {
         CategoryAggregator {
-            totals: [CategoryTotals::default(); 17],
+            totals: [CategoryTotals::default(); Category::COUNT],
             unclassified_entries: 0,
             classified_entries: 0,
         }
@@ -93,8 +93,17 @@ pub struct CategoryReport {
     pub unclassified_entries: u64,
 }
 
+/// Index of `c` in [`Category::ALL`]. Total by construction — every
+/// [`Category`] is in `ALL`, and the fallback (unreachable) is `Other` rather
+/// than a silent misattribution.
 fn category_index(c: Category) -> usize {
-    Category::ALL.iter().position(|x| *x == c).unwrap_or(15)
+    match Category::ALL.iter().position(|x| *x == c) {
+        Some(i) => i,
+        None => Category::ALL
+            .iter()
+            .position(|x| *x == Category::Other)
+            .unwrap_or(0),
+    }
 }
 
 #[cfg(test)]
@@ -166,8 +175,36 @@ mod tests {
     fn aggregator_does_not_grow_with_entries() {
         // Structural check: aggregator is fixed-size arrays + counters.
         let size = std::mem::size_of::<CategoryAggregator>();
-        let limit = std::mem::size_of::<[CategoryTotals; 17]>() + 32;
+        let limit = std::mem::size_of::<[CategoryTotals; Category::COUNT]>() + 32;
         assert!(size <= limit, "aggregator grew: {size} > {limit}");
+    }
+
+    #[test]
+    fn every_category_has_a_slot_and_report_is_complete() {
+        let mut agg = CategoryAggregator::new();
+        for c in Category::ALL {
+            agg.push(&classification(c), &EntryKind::File, 1);
+        }
+        let report = agg.report();
+        assert_eq!(report.categories.len(), Category::COUNT);
+        for (c, t) in &report.categories {
+            assert_eq!(t.entries, 1, "category {} lost its entry", c.code());
+        }
+        // Other + Unknown are the only buckets counted as unclassified.
+        assert_eq!(report.unclassified_entries, 2);
+    }
+
+    #[test]
+    fn application_data_is_aggregated_separately_from_applications() {
+        let mut agg = CategoryAggregator::new();
+        agg.push(&classification(Category::Applications), &EntryKind::Dir, 10);
+        agg.push(
+            &classification(Category::ApplicationData),
+            &EntryKind::Dir,
+            20,
+        );
+        assert_eq!(agg.totals(Category::Applications).logical_size, 10);
+        assert_eq!(agg.totals(Category::ApplicationData).logical_size, 20);
     }
 
     #[test]

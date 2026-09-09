@@ -118,8 +118,18 @@ pub enum RuleId {
     BackupDir,
     /// Windows system locations (Windows, Program Files…).
     WindowsSystemLocation,
+    /// Machine-wide application data (`C:/ProgramData`) — application-owned,
+    /// but shared by every user.
+    WindowsProgramData,
+    /// Rooted application *install* location on any platform
+    /// (Program Files, /Applications, /opt).
+    ApplicationInstallLocation,
+    /// A user home/profile root (`C:/Users/<u>`, `/Users/<u>`, `/home/<u>`).
+    UserProfile,
     /// Windows user-profile AppData trees.
     WindowsAppData,
+    /// macOS system locations (`/System`, `/private`).
+    MacSystemLocation,
     /// macOS Library/Application Support locations.
     MacApplicationSupport,
     /// macOS app bundles (.app).
@@ -170,7 +180,11 @@ impl RuleId {
             RuleId::DocumentsDir => "DOCUMENTS_DIR",
             RuleId::BackupDir => "BACKUP_DIR",
             RuleId::WindowsSystemLocation => "WINDOWS_SYSTEM_LOCATION",
+            RuleId::WindowsProgramData => "WINDOWS_PROGRAM_DATA",
+            RuleId::ApplicationInstallLocation => "APPLICATION_INSTALL_LOCATION",
+            RuleId::UserProfile => "USER_PROFILE",
             RuleId::WindowsAppData => "WINDOWS_APP_DATA",
+            RuleId::MacSystemLocation => "MAC_SYSTEM_LOCATION",
             RuleId::MacApplicationSupport => "MAC_APPLICATION_SUPPORT",
             RuleId::MacAppBundle => "MAC_APP_BUNDLE",
             RuleId::XdgLocation => "XDG_LOCATION",
@@ -294,7 +308,11 @@ mod tests {
             RuleId::DocumentsDir,
             RuleId::BackupDir,
             RuleId::WindowsSystemLocation,
+            RuleId::WindowsProgramData,
+            RuleId::ApplicationInstallLocation,
+            RuleId::UserProfile,
             RuleId::WindowsAppData,
+            RuleId::MacSystemLocation,
             RuleId::MacApplicationSupport,
             RuleId::MacAppBundle,
             RuleId::XdgLocation,

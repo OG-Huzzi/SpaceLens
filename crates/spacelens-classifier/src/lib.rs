@@ -15,9 +15,14 @@
 //!   streaming tracker and aggregator are capacity-bounded, never O(tree).
 //! - **Platform-neutral core**: platform knowledge is data
 //!   ([`platform::Platform`]); exactly one `cfg!` site exists.
-//! - **Honest uncertainty**: `Unknown` (insufficient evidence) is distinct
-//!   from `Other` (understood, no more useful category). Extension-only
-//!   evidence can never reach `High` confidence.
+//! - **Honest uncertainty**: `Unknown` (the observation itself is
+//!   uninterpretable) is distinct from `Other` (understood, no more useful
+//!   category). Extension-only evidence can never reach `High` confidence; a
+//!   pure heuristic can never reach `Medium`.
+//! - **Two strengths of knowledge**: rooted platform locations
+//!   (`pathctx::LOCATION_RULES`) are authoritative; bare names
+//!   (`build`, `cache`, `setup`) are heuristics and are gated or capped
+//!   accordingly.
 //!
 //! Contract namespace: `spacelens.v1.classification.*`
 //! (docs/API_CONTRACTS.md).
@@ -28,17 +33,19 @@ pub mod classify;
 pub mod confidence;
 pub mod context;
 pub mod evidence;
+pub mod pathctx;
 pub mod platform;
 pub mod rules;
 
 pub use aggregate::{CategoryAggregator, CategoryReport, CategoryTotals};
 pub use category::{Category, Subcategory};
 pub use classify::{classify, classify_streaming, Classification};
-pub use confidence::Confidence;
-pub use context::{ParentContext, ParentContextTracker};
+pub use confidence::{Confidence, RuleKind};
+pub use context::{apply_context, ParentContext, ParentContextTracker};
 pub use evidence::{Evidence, EvidenceKind, EvidenceList, RuleId, MAX_EVIDENCE};
+pub use pathctx::{LocationClass, LocationMatch, LocationRule, PathContext, LOCATION_RULES};
 pub use platform::Platform;
-pub use rules::{evaluate, rule_category, MatchOutcome, Rule, RULES};
+pub use rules::{evaluate, rule_by_id, rule_category, MatchOutcome, Rule, RuleGate, RULES};
 
 #[cfg(test)]
 mod tests {
@@ -91,5 +98,26 @@ mod tests {
         let c = classify(&e, &ParentContext::default(), Platform::Windows);
         assert_eq!(c.category, Category::Cache);
         assert_eq!(c.winning_rule, RuleId::CacheDir);
+        // A heuristic that is uncorroborated stays in the Low band.
+        assert_eq!(c.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn crate_never_panics_on_absurd_paths() {
+        let deep = "/".repeat(5000);
+        let long = "a".repeat(10_000);
+        for p in [
+            "C:\\",
+            "\\\\?\\C:\\huge",
+            deep.as_str(),
+            long.as_str(),
+            "\u{0}\u{1}",
+        ] {
+            for kind in [EntryKind::File, EntryKind::Dir] {
+                let e = entry(p, kind);
+                let _ = classify(&e, &ParentContext::default(), Platform::Windows);
+                let _ = classify(&e, &ParentContext::default(), Platform::Linux);
+            }
+        }
     }
 }

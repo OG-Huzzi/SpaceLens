@@ -1,10 +1,16 @@
-# SpaceLens CI — Phase 1.
+# SpaceLens CI — Phase 2.
 #
-# Verifies the Rust engine (spacelens-core + spacelens-engine) on all three
-# target platforms and the frontend scaffold. Native Tauri compilation is
-# intentionally NOT attempted yet: the shell crate is still a config-level
-# contract and its bundle icons do not exist until the packaging work
-# (see progress/PHASE_1_STATUS.md).
+# Verifies the Rust workspace (spacelens-core + spacelens-engine +
+# spacelens-classifier) on all three target platforms and the frontend
+# scaffold. Native Tauri compilation is intentionally NOT attempted yet: the
+# shell crate is still a config-level contract and its bundle icons do not
+# exist until the packaging work (see progress/PHASE_1_STATUS.md).
+#
+# Every Rust job runs the full quality gate: `cargo fmt --check`,
+# `cargo clippy -D warnings`, and `cargo test`. Clippy is part of the gate on
+# every platform — lint findings are OS-sensitive enough (and platform `cfg`
+# bugs silent enough) that a single-host lint job would not be equivalent.
+# Parallelism is capped at `-j 2` so the jobs stay inside an 8 GB runner.
 
 name: CI
 
@@ -25,18 +31,24 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
         run: cargo fmt --check
 
+      - name: Clippy (bounded parallelism, 8 GB-RAM-safe; warnings are errors)
+        run: cargo clippy -j 2 --workspace --all-targets -- -D warnings
+
       - name: Tests (bounded parallelism, 8 GB-RAM-safe)
         run: cargo test -j 2 --workspace
 
-      - name: Perf smoke (10k-file fixture; correctness asserted, timing reported)
+      - name: Phase 1 perf smoke (correctness asserted, timing reported)
         run: cargo test -j 2 -p spacelens-engine -- --ignored --nocapture
+
+      - name: Phase 2 perf smoke (10k/100k/1M synthetic; linear-scaling guard)
+        run: cargo test -j 2 -p spacelens-classifier -- --ignored --nocapture
 
   frontend:
     runs-on: ubuntu-latest
