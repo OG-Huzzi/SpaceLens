@@ -1,8 +1,10 @@
 # SpaceLens — Phase 2 Status
 
 - **Phase:** 2 — System Intelligence Foundation (Entity Model + Deterministic Classification)
-- **Verdict:** see "Phase-2 acceptance gate" below — updated after the
-  independent audit repair pass.
+- **Verdict:** **PHASE 2 — VERIFIED.** All ten independent-audit findings
+  repaired, full verification gate re-run locally and in CI (run for
+  `6e3ecc0`: all 4 jobs success). See "Phase-2 acceptance gate" below for
+  criterion-by-criterion status.
 - **Date:** 2026-09-09 (audit repair) · 2026-09-08 (original build)
   · **Machine:** Windows 11 Pro x64, 8 GB RAM
 - **History:** built at `d49609e`, CI fix at `0827f84`, CI record at
@@ -160,7 +162,7 @@ verification time.)
   bounded; deterministic ✓.
 - Regression: Phase 1 suite + perf smoke + clippy + fmt + frontend build ✓.
 - CI: fmt + clippy + tests + both perf smokes on all three platforms ✓
-  (pending final run record below).
+  (actual run record below).
 
 ## CI verification (GitHub Actions)
 
@@ -168,10 +170,10 @@ verification time.)
 |---|---|---|
 | `34251196759` | `d49609e` (initial Phase 2) | failure — ubuntu + macos Tests step (host-dependent fixture path parsing; genuine defect, fixed) |
 | `34251905113` | `0827f84` (fix) | **success — all 4 jobs** (rust × 3 platforms + frontend) |
-| — | audit-repair commit | recorded after the run completes (see below) |
+| audit-repair run (CI #8) | `6e3ecc0` (audit repair) | **success — all 4 jobs** (rust ubuntu/windows/macos: fmt, clippy -D warnings, tests, Phase 1 + Phase 2 perf smokes; frontend: npm ci + build). 1m 47s. Workflow badge on `main` = passing |
 
 ## Commit SHA
 
 - Phase 2 implementation: `d49609e`
 - CI-defect fix: `0827f84`
-- Audit repair: (recorded at commit time)
+- Audit repair: `6e3ecc0`

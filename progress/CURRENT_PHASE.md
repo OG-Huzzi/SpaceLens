@@ -1,8 +1,8 @@
 # SpaceLens — Current Phase
 
 - **Current phase:** PHASE 2 — System Intelligence Foundation (Classification)
-- **Status:** audit repair complete, final verification in progress — see
-  PHASE_2_STATUS.md for the authoritative record
+- **Status:** PHASE 2 — VERIFIED (independent audit repair executed, full
+  gate re-run, CI green — see PHASE_2_STATUS.md for the authoritative record)
 - **Last updated:** 2026-09-09 (independent audit repair pass)
 
 ## What happened (2026-09-09)
@@ -80,7 +80,9 @@ pre-existing on the pristine baseline).
   regression tests; three second-order defects fixed; docs rewritten to
   describe the implementation that actually exists. Local gate green
   (fmt/clippy/200 tests/perf smokes/npm). Final CI run recorded in
-  PHASE_2_STATUS.md.
+  PHASE_2_STATUS.md. Repair commit `6e3ecc0` pushed; CI run for that commit
+  **success — all 4 jobs** (fmt + clippy -D warnings + tests + both perf
+  smokes on ubuntu/windows/macos; npm ci + build). PHASE 2 — VERIFIED.
 - 2026-09-08 (Phase 2 original): built at `d49609e`, CI fix `0827f84`,
   CI record `a7bbf2f` (run `34251905113` all 4 jobs green). The audit
   superseded this verdict.
