@@ -22,7 +22,9 @@
 //! - **Two strengths of knowledge**: rooted platform locations
 //!   (`pathctx::LOCATION_RULES`) are authoritative; bare names
 //!   (`build`, `cache`, `setup`) are heuristics and are gated or capped
-//!   accordingly.
+//!   accordingly. Installer signals (name *and* extension) may only decide
+//!   inside an authoritative download location — an extension says what bytes
+//!   are, never where a file came from.
 //!
 //! Contract namespace: `spacelens.v1.classification.*`
 //! (docs/API_CONTRACTS.md).

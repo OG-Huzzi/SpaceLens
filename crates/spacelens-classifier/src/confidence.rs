@@ -124,7 +124,6 @@ impl Confidence {
     /// Raise at most one band (`Unknown→Low`, `Low→Medium`, `Medium→High`),
     /// then clamp to `cap`. This is the only way context may influence
     /// confidence, and it can never escape the ceiling.
-    /// Raise at most one band, then clamp to `cap`.
     pub fn raise_one_band_capped(self, cap: Confidence) -> Confidence {
         let raised = match self {
             Confidence::Unknown => Confidence::Low,

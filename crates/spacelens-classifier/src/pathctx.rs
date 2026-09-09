@@ -251,6 +251,15 @@ pub const LOCATION_RULES: &[LocationRule] = &[
         evidence: EvidenceKind::KnownApplicationLocation,
         patterns: &["/applications"],
     },
+    // The per-user install tree: `~/Applications/Foo.app` is as much an
+    // installed application as `/Applications/Foo.app` (Phase 2.1).
+    LocationRule {
+        id: RuleId::ApplicationInstallLocation,
+        platforms: &[Platform::Mac],
+        class: LocationClass::ApplicationInstall,
+        evidence: EvidenceKind::KnownApplicationLocation,
+        patterns: &["/users/*/applications"],
+    },
     LocationRule {
         id: RuleId::MacApplicationSupport,
         platforms: &[Platform::Mac],
@@ -261,6 +270,25 @@ pub const LOCATION_RULES: &[LocationRule] = &[
             "/users/*/library",
             "/users/*/library/application support",
         ],
+    },
+    // System-wide cache/log trees. The broad `/library` rule above says only
+    // "application data"; these more specific patterns must win by depth —
+    // without them, `/Library/Caches` would be misread as mere ApplicationData
+    // (Phase 2.1: same semantic treatment as the per-user `~/Library/...`
+    // siblings, no macOS-specific logic outside the rule table).
+    LocationRule {
+        id: RuleId::CacheDir,
+        platforms: &[Platform::Mac],
+        class: LocationClass::Cache,
+        evidence: EvidenceKind::KnownCacheLocation,
+        patterns: &["/library/caches"],
+    },
+    LocationRule {
+        id: RuleId::LogDir,
+        platforms: &[Platform::Mac],
+        class: LocationClass::Logs,
+        evidence: EvidenceKind::KnownPathPattern,
+        patterns: &["/library/logs"],
     },
     LocationRule {
         id: RuleId::UserProfile,
@@ -465,7 +493,11 @@ pub fn analyze(path: &Path, platform: Platform) -> PathContext {
     let mut parts: [&str; MAX_LOCATION_DEPTH] = [""; MAX_LOCATION_DEPTH];
     let mut len = 0usize;
     for part in raw.split(['/', '\\']) {
-        if part.is_empty() || is_drive_token(part) {
+        // Empty components come from repeated/leading/trailing separators, and
+        // `.` components are the current directory: both are transparent for
+        // anchored matching (`/Users/./u/Downloads` ≡ `/Users/u/Downloads`).
+        // `..` is deliberately NOT normalised — it changes meaning.
+        if part.is_empty() || part == "." || is_drive_token(part) {
             continue;
         }
         if len == MAX_LOCATION_DEPTH {

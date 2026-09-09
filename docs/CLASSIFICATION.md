@@ -129,6 +129,46 @@ confidence within its kind's ceiling, so the table cannot lie.
 classified into a semantic (non-bucket) category. Buckets are never rescued,
 categories never change, and `under_user_profile` alone is not corroboration.
 
+### Installer extensions are gated to Downloads (Phase 2.1)
+
+`InstallerExtension` (`.msi`, `.dmg`, `.pkg`, `.deb`, `.rpm`, `.apk`, `.msp`,
+`.msu`) is gated `Under(Downloads)`, exactly like `InstallerName`. The
+rationale: the extension says what the *bytes* are, but `Downloads` is a claim
+about where a file **came from** — an extension alone cannot make that claim.
+Consequently:
+
+- `C:/Users/u/Downloads/blob.msi` → `Downloads`/`Installer`/`High` (the
+  download location corroborates the gated winner).
+- `C:/Program Files/App/setup.msi` → `Applications` (install-tree location
+  wins; the installer signal survives as truthful evidence).
+- `/data/blob.msi` → `Other`/`Low` with the extension on the evidence record
+  (honest "understood but unclassified", never a guess).
+
+**`.appimage` moved to the executable table (Phase 2.1):** an AppImage *is*
+the application — it executes directly, with no installer step — so it now
+classifies as `Applications` via `ExecutableExtension` wherever it is found,
+and carries no `Installer` subcategory.
+
+### macOS Library hierarchy (Phase 2.1)
+
+Both Library tiers are recognised with their own specific patterns:
+
+- System-wide: `/Library/Caches` → `Cache`, `/Library/Logs` → `Logs` — the
+  broad `/library` (ApplicationData) rule says only "application-owned data"
+  and must not swallow the more specific trees. Most-specific-pattern-wins by
+  depth does the work; no macOS-specific logic exists outside the rule table.
+- Per-user: `~/Library/Caches`, `~/Library/Logs` unchanged.
+- `~/Applications` is now a rooted install location (`Applications`), matching
+  `/Applications` semantics for the per-user tree.
+
+### Path component handling (Phase 2.1)
+
+Empty components (leading/trailing/repeated separators) and `.` components are
+transparent for rooted location matching (`C:/Users/./u/Downloads` ≡
+`C:/Users/u/Downloads`). `..` is deliberately **not** normalised — resolving
+it would manufacture location knowledge the raw path does not assert, so an
+anchored match simply fails for such paths.
+
 ## Rule engine
 
 Two tables:
@@ -144,7 +184,7 @@ Two tables:
 |------|-----------------------------|------------------------------------|
 | 1    | Authoritative path pattern  | node_modules, .git, steamapps      |
 | 2    | Canonical user directory    | Downloads, Documents, Desktop      |
-| 4    | Content-typed extension     | .pdf, .png, .zip, .log, .rs        |
+| 4    | Content-typed extension     | .pdf, .png, .zip, .log, .rs, .msi (gated) |
 | 5    | Generic / weak file signal  | `setup`-style names (gated), `.exe` |
 | 6    | Authoritative container location | entry sits in `~/Library/Caches` |
 
@@ -164,10 +204,11 @@ tier tie.
 
 A rule may declare a `RuleGate`. A gated rule **matches** (and is retained as
 truthful evidence) but is **not eligible to win** unless its gate is satisfied.
-`InstallerName` is gated `Under(Downloads)`: an installer-ish name only decides
-the category when an authoritative download location vouches for it. A gated
-rule that wins is corroborated by construction — the location supplies the
-confidence, so the ceiling is `High` and one band is earned at win time.
+`InstallerName` and `InstallerExtension` are both gated `Under(Downloads)`: an
+installer signal only decides the category when an authoritative download
+location vouches for it. A gated rule that wins is corroborated by
+construction — the location supplies the confidence, so the ceiling is `High`
+and one band is earned at win time.
 
 ### Conflict resolution (deterministic, tested)
 
@@ -205,8 +246,11 @@ Two mechanisms, both memory-bounded:
   doubly-linked recency list over a fixed slot pool (`HashMap` index). A
   successful lookup *refreshes* recency, so the eviction victim is always the
   least recently used key — never merely the oldest inserted. O(1) operations,
-  O(capacity) memory (default 4096), never O(tree). The canonical proof test:
-  capacity 3, insert A B C, look up A, insert D → B is evicted, A survives.
+  O(capacity) memory (default 4096), never O(tree). The requested capacity is
+  clamped to the hard bound `MAX_ENTRIES` (Phase 2.1): a caller cannot defeat
+  the "hostile tree cannot grow this structure" guarantee by passing a huge
+  capacity. The canonical proof test: capacity 3, insert A B C, look up A,
+  insert D → B is evicted, A survives.
 
 Context effects (strictly limited, tested): confidence may rise one band
 inside the cap; buckets are never rescued; category never changes.
@@ -229,11 +273,12 @@ Rooted location knowledge per platform (selection):
   (ApplicationInstall), `/programdata`, `/users/*/appdata` (ApplicationData),
   `/users/*/appdata/local/temp`, `/windows/temp` (Temporary), `/users/*/downloads`,
   `/users/*/documents`, `/users/*/desktop`, `/users/*` (UserHome).
-- **macOS**: `/system`, `/private` (System), `/applications`
-  (ApplicationInstall), `/library`, `/users/*/library`,
-  `/users/*/library/application support` (ApplicationData),
-  `/users/*/library/caches` (Cache), `/users/*/library/logs` (Logs), `/tmp`,
-  `/var/folders` (Temporary), `/users/*` (UserHome).
+- **macOS**: `/system`, `/private` (System), `/applications`,
+  `/users/*/applications` (ApplicationInstall), `/library`,
+  `/users/*/library`, `/users/*/library/application support` (ApplicationData),
+  `/library/caches`, `/users/*/library/caches` (Cache), `/library/logs`,
+  `/users/*/library/logs` (Logs), `/tmp`, `/var/folders` (Temporary),
+  `/users/*` (UserHome).
 - **Linux**: `/usr`, `/etc`, `/var`, `/bin`, `/sbin`, `/lib`, `/lib64`
   (System — deliberately *not* collapsed with `/opt`), `/opt`, `/snap`
   (ApplicationInstall), `/var/log` (Logs), `/var/cache` (Cache), `/tmp`,
@@ -277,17 +322,13 @@ are completion, near-linear scaling, bounded memory, and correctness.
 
 ## Current limitations (honest)
 
-- **Installer extensions** (`.msi`, `.dmg`, `.pkg`, `.deb`, `.rpm`, …) map to
-  `Downloads`/`Installer` wherever they appear — inherited from the v1 table.
-  `C:/Program Files/App/installer.msi` is therefore `Downloads`, which is
-  semantically imperfect. Changing the mapping is a taxonomy decision (a
-  dedicated installer treatment) deferred by design; the behavior is pinned
-  by tests so it cannot silently drift.
-- **macOS `.app` bundles**: no table rule matches directory *suffixes* yet
-  (`.app` requires suffix matching, not exact-name matching). `/Applications`
-  is recognised as a rooted install location, so bundles there are
-  `Applications`; a bundle elsewhere falls through to name/extension logic.
-  Documented, tested not to panic.
+- **macOS `.app` bundles**: no table rule matches directory *suffixes* — a
+  bundle is an installed application because of **where it lives**
+  (`/Applications`, `~/Applications`), never because of its name. A `.app`
+  directory outside an install location is honestly `Other` (deliberate:
+  suffix-only classification would over-claim). Phase 2.1 pins the exact
+  semantics with tests, including `~/Applications` as a per-user install
+  location.
 - **Games** currently only triggers via `steamapps`/`steamlibrary` directory
   names; no platform game-store library coverage beyond Steam conventions.
 - **Ambiguous extensions** resolve deterministically rather than perfectly:
@@ -303,7 +344,9 @@ are completion, near-linear scaling, bounded memory, and correctness.
 
 ## Future extension points (not implemented)
 
-- Suffix-match rules for app bundles and archive-part patterns.
+- Archive-part patterns (`.part`, `.r00`-style multi-volume names). App-bundle
+  suffix matching is deliberately rejected (Phase 2.1): a bundle is an
+  installed application because of its location, not its name.
 - Ancestor-chain context (beyond immediate parent).
 - Application identity model (`ApplicationIdentity`: vendor/product/id) —
   infrastructure intent documented in the master prompt, not yet built.

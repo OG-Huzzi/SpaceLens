@@ -41,9 +41,17 @@
 //!
 //! A rule may declare a [`RuleGate`]: it *matches* (and is retained as
 //! evidence) but is **not eligible to win** unless the gate is satisfied.
-//! This is how installer-style names stay conservative: `update.exe` is a
-//! filename pattern that only means "downloaded installer" when an
-//! authoritative download location says so.
+//! This is how installer signals stay conservative:
+//!
+//! * `InstallerName` (`setup`, `update`, …) only decides inside an
+//!   authoritative download location — `update.exe` is application code in
+//!   `Program Files`, and nothing at all elsewhere.
+//! * `InstallerExtension` (`.msi`, `.dmg`, `.pkg`, …) is gated the same way
+//!   (Phase 2.1): the extension says what the bytes *are*, not where the file
+//!   came from. `Downloads` is a claim about origin, so the extension alone
+//!   cannot make it — `Program Files/App/setup.msi` is `Applications`, and a
+//!   bare `blob.msi` elsewhere is honestly unclassified. Inside a download
+//!   location the extension decides, corroborated to `High`.
 //!
 //! # Evidence fidelity
 //!
@@ -217,10 +225,11 @@ const EXT_AUDIO: &[&str] = &[
 const EXT_ARCHIVE: &[&str] = &[
     "zip", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "lz4", "tgz", "tbz2",
 ];
-const EXT_INSTALLER: &[&str] = &[
-    "msi", "dmg", "pkg", "deb", "rpm", "appimage", "apk", "msp", "msu",
-];
-const EXT_EXECUTABLE: &[&str] = &["exe", "app", "bat", "cmd", "com", "scr", "run"];
+// AppImage is deliberately NOT an installer extension: an AppImage *is* the
+// application (it executes directly, no installer step), so it sits in
+// EXT_EXECUTABLE and classifies as `Applications` wherever it is found.
+const EXT_INSTALLER: &[&str] = &["msi", "dmg", "pkg", "deb", "rpm", "apk", "msp", "msu"];
+const EXT_EXECUTABLE: &[&str] = &["exe", "app", "appimage", "bat", "cmd", "com", "scr", "run"];
 const EXT_DISK_IMAGE: &[&str] = &["iso", "img", "vhd", "vhdx", "vmdk"];
 const EXT_SOURCE: &[&str] = &[
     "rs", "go", "c", "h", "cpp", "hpp", "cc", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "java",
@@ -419,13 +428,17 @@ pub const RULES: &[Rule] = &[
     // a file *is* a zip, a PDF or a log is a stronger claim about what it is
     // than either a name that looks like an installer or the bare fact that it
     // is executable.
+    // Gated `Under(Downloads)`: the extension identifies installer-package
+    // bytes, but `Downloads` is a claim about *origin*. Outside an
+    // authoritative download location the match is retained as truthful
+    // evidence and the rule never decides the category.
     Rule {
         id: RuleId::InstallerExtension,
         tier: 4,
         platforms: &[],
         dir_rule: false,
         kind: RuleKind::Extension,
-        gate: None,
+        gate: Some(RuleGate::Under(&[LocationClass::Downloads])),
         subcategory: Some(Subcategory::Installer),
         confidence: Confidence::Medium,
         evidence: EvidenceKind::Extension,
@@ -537,9 +550,13 @@ pub const RULES: &[Rule] = &[
         extensions: EXT_LOG,
     },
     // -- Tier 5: weak signals (files) ---------------------------------------
-    // Both entries here are *generic*: neither says what the bytes are.
-    //   * `InstallerName` is a bare-name guess, and is additionally gated so
-    //     it may only decide inside an authoritative download location.
+    // Generic signals — none says what the bytes are:
+    //   * `InstallerName` is a bare-name guess, additionally gated so it may
+    //     only decide inside an authoritative download location.
+    //   * `InstallerExtension` says "this is some kind of package", which is a
+    //     statement about the bytes but *not* about the file's origin — so it
+    //     is gated `Under(Downloads)` too (Phase 2.1): `Downloads` is a claim
+    //     about where a file came from, which an extension cannot make alone.
     //   * `ExecutableExtension` says only "this is some program" — weaker than
     //     a concrete content type, so it yields to every tier-4 extension.
     // They sit after the content-typed extensions so that `setup.zip` stays an
@@ -1027,10 +1044,42 @@ mod tests {
     }
 
     #[test]
-    fn installer_extension_maps_to_downloads() {
+    fn installer_extension_is_gated_to_downloads() {
+        // Phase 2.1: an installer extension says what the bytes are, not where
+        // the file came from. Outside a download location it matches but never
+        // decides.
         let o = file_outcome("something.msi", Platform::Windows);
+        assert_ne!(o.winner, RuleId::InstallerExtension);
+        assert_ne!(o.category, Category::Downloads);
+        assert!(
+            o.matched
+                .iter()
+                .any(|m| m.rule == RuleId::InstallerExtension),
+            "the extension still matched and is retained as evidence"
+        );
+
+        // Inside a download location it decides, corroborated to High.
+        let o = file_outcome_in(
+            "something.msi",
+            Platform::Windows,
+            Some(LocationClass::Downloads),
+        );
         assert_eq!(o.winner, RuleId::InstallerExtension);
+        assert!(o.gate_satisfied);
         assert_eq!(o.category, Category::Downloads);
+        assert_eq!(o.confidence_cap(false), Confidence::AUTHORITATIVE_CAP);
+    }
+
+    #[test]
+    fn appimage_is_an_executable_not_an_installer() {
+        // An AppImage *is* the application: it must never be claimed by the
+        // installer table.
+        let o = file_outcome("Tool.appimage", Platform::Linux);
+        assert_eq!(o.winner, RuleId::ExecutableExtension);
+        assert!(!o
+            .matched
+            .iter()
+            .any(|m| m.rule == RuleId::InstallerExtension));
     }
 
     #[test]

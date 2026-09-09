@@ -452,14 +452,28 @@ fn hidden_dot_directories_on_unix() {
 
 #[test]
 fn app_bundle_id_on_macos() {
-    // .app suffix is reserved (MacAppBundle) — directories ending in .app are
-    // NOT yet classified as Applications; documented limitation. Verify
-    // honest behavior: no panic, sensible fallback.
+    // `/Applications` is a rooted install location: a bundle there is
+    // Applications *by location*, never by suffix (no table rule matches the
+    // `.app` directory suffix — that is the deliberate, documented design;
+    // see docs/CLASSIFICATION.md). Phase 2.1 pins the exact semantics.
     let c = classify_dir("/Applications/Foo.app", Platform::Mac);
-    assert!(matches!(
-        c.category,
-        Category::Applications | Category::Other
-    ));
+    assert_eq!(c.category, Category::Applications);
+    assert_eq!(c.winning_rule, RuleId::ApplicationInstallLocation);
+    assert_eq!(c.confidence, Confidence::High);
+
+    // Away from any deciding location (a pure user-home container), a `.app`
+    // directory carries no name signal: the honest outcome is Other, not a
+    // suffix guess.
+    let c = classify_dir("/Users/u/Staging/Foo.app", Platform::Mac);
+    assert_eq!(c.category, Category::Other);
+    assert_eq!(c.winning_rule, RuleId::DirWithoutSignals);
+    assert_eq!(c.confidence, Confidence::Low);
+
+    // Inside a *deciding* location such as Downloads, the location — not the
+    // suffix — decides, like any other unremarkable content there.
+    let c = classify_dir("/Users/u/Downloads/Foo.app", Platform::Mac);
+    assert_eq!(c.category, Category::Downloads);
+    assert_eq!(c.winning_rule, RuleId::DownloadsDir);
 }
 
 // ---------------------------------------------------------------------------

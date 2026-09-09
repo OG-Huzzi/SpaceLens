@@ -93,13 +93,18 @@ impl ParentContextTracker {
         ParentContextTracker::with_capacity(Self::MAX_ENTRIES)
     }
 
+    /// Creates a tracker bounded to `min(capacity, [`Self::MAX_ENTRIES`])`.
+    ///
+    /// The hard bound is part of the tracker's contract: a caller passing a
+    /// huge capacity must not be able to defeat the "hostile tree cannot grow
+    /// this structure" guarantee (Phase 2.1).
     pub fn with_capacity(capacity: usize) -> Self {
         ParentContextTracker {
             index: HashMap::new(),
             nodes: Vec::new(),
             head: None,
             tail: None,
-            capacity,
+            capacity: capacity.min(Self::MAX_ENTRIES),
         }
     }
 
@@ -344,6 +349,14 @@ mod tests {
         assert_eq!(t.len(), 0);
         assert_eq!(t.parent_category(Some(1)), None);
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn capacity_is_clamped_to_the_hard_bound() {
+        // Phase 2.1: the documented hard bound cannot be bypassed by passing a
+        // huge capacity.
+        let t = ParentContextTracker::with_capacity(usize::MAX);
+        assert_eq!(t.capacity(), ParentContextTracker::MAX_ENTRIES);
     }
 
     #[test]
