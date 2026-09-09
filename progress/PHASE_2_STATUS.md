@@ -1,15 +1,79 @@
 # SpaceLens — Phase 2 Status
 
 - **Phase:** 2 — System Intelligence Foundation (Entity Model + Deterministic Classification)
-- **Verdict:** **PHASE 2 — VERIFIED.** All ten independent-audit findings
-  repaired, full verification gate re-run locally and in CI (run for
-  `6e3ecc0`: all 4 jobs success). See "Phase-2 acceptance gate" below for
-  criterion-by-criterion status.
-- **Date:** 2026-09-09 (audit repair) · 2026-09-08 (original build)
-  · **Machine:** Windows 11 Pro x64, 8 GB RAM
+- **Verdict:** **PHASE 2.1 — VERIFIED** (semantic-hardening pass on top of the
+  verified Phase 2; see "Phase 2.1" below). Previously: **PHASE 2 — VERIFIED**
+  (all ten independent-audit findings repaired, run for `6e3ecc0`: all 4
+  jobs success).
+- **Date:** 2026-09-09 (Phase 2.1 hardening) · 2026-09-09 (audit repair)
+  · 2026-09-08 (original build) · **Machine:** Windows 11 Pro x64, 8 GB RAM
 - **History:** built at `d49609e`, CI fix at `0827f84`, CI record at
   `a7bbf2f`; an independent source-level audit then found substantive
-  semantic defects in the "VERIFIED" state, and a repair pass was executed.
+  semantic defects in the "VERIFIED" state, and a repair pass was executed
+  (`6e3ecc0`); Phase 2.1 semantic hardening at `bfb0452`.
+
+## Phase 2.1 — semantic hardening pass (2026-09-09, commit `bfb0452`)
+
+A focused, independent audit of the verified Phase 2 classifier against nine
+semantic-hardening targets. Confirmed defects were fixed; verified-correct
+behavior was pinned with tests and documented.
+
+**Changed behavior (each with regression coverage in
+`tests/phase21_tests.rs`):**
+
+1. **`InstallerExtension` gated `Under(Downloads)`** — the extension says
+   what the bytes are, not where a file came from. `Program Files/App/setup.msi`
+   → `Applications`; bare `blob.msi` elsewhere → honest `Other`/`Low` with the
+   match retained as evidence; `Downloads/blob.msi` → `Downloads`/`Installer`/
+   `High` (gate corroborated). Same principle the audit repair applied to
+   `InstallerName`.
+2. **`.appimage` moved to the executable table** — an AppImage *is* the
+   application (executes directly); it now classifies `Applications` via
+   `ExecutableExtension` and carries no `Installer` subcategory.
+3. **macOS `/Library/Caches` → `Cache`, `/Library/Logs` → `Logs`** — the
+   broad `/library` ApplicationData rule no longer swallows the system-wide
+   cache/log trees (most-specific-pattern-wins by depth).
+4. **macOS `~/Applications` is a per-user install location** →
+   `Applications`/`High`, matching `/Applications`.
+5. **`.` path components are transparent** in anchored location matching
+   (`C:/Users/./u/Downloads` ≡ `C:/Users/u/Downloads`); `..` deliberately not
+   normalised (resolving it would manufacture location knowledge).
+6. **`ParentContextTracker::with_capacity` clamps to `MAX_ENTRIES`** — a
+   hostile caller can no longer bypass the documented hard bound with a huge
+   capacity request.
+
+**Verified correct as-is (documented + pinned, not changed):** Unknown vs
+Other contract (exactly three detectable Unknown conditions); evidence
+fidelity (kinds captured at match time) and the single mechanically enforced
+confidence policy; rule precedence (tier → needle length → table order) —
+including the tier-1-name-over-tier-6-location case, which is the documented
+deliberate choice (`AppData/Local/App/cache` → `Cache`); the macOS `.app`
+suffix deliberately has no table rule (bundles are classified by location,
+never by name; `~/Staging/Foo.app` is honestly `Other`); LRU core behavior
+(capacity 0/1, refresh-on-hit, dedup, eviction order); host-independent path
+parsing; classifier purity (zero-I/O dependency set re-verified by grep +
+Cargo.toml inspection).
+
+**Performance attribution:** local throughput measured ~30–32k entries/s
+(debug) vs ~56k/s recorded at the previous verification. An A/B benchmark
+against the pristine baseline `8a2d5dc` in a throwaway worktree measured the
+**baseline at the same ~31–32k entries/s** — the difference is
+session/host-level (process environment), not the Phase 2.1 changes. Scaling
+remains linear 10k→1M and both perf smokes pass in CI on all platforms.
+
+**Verification gate (local, Windows):** `cargo fmt --check` clean;
+`cargo clippy -j 2 --workspace --all-targets -- -D warnings` clean;
+`cargo test -j 2 --workspace` → **204 passed / 0 failed / 2 ignored**
+(classifier lib 95, classifier_tests 24, phase21_tests 23, semantics_tests
+43, perf companion 1, Phase 1 suites green); classifier perf smoke passes
+(linear, deterministic, bounded); Phase 1 perf smoke passes.
+
+**CI:** run `34341554863` for `bfb0452` — **success, all 4 jobs**
+(rust ubuntu/windows/macos: fmt, clippy `-D warnings`, workspace tests, both
+perf smokes; frontend: npm ci + build). All four job conclusions verified
+individually via the GitHub API; Windows job's step list inspected in detail.
+
+## Independent audit repair (previous pass)
 
 ## Independent audit repair (this pass)
 
