@@ -19,6 +19,10 @@
 //! No pass/fail throughput gate — the requirements are that it completes,
 //! is deterministic, scaling stays approximately linear, and memory stays
 //! bounded. Timings are printed for the record only.
+//!
+//! Also home to `huge_file_streams_beyond_4gib` (ignored): the true >4 GiB
+//! streaming-contract proof, virtualized so no platform needs multi-GiB
+//! disk space to verify it.
 
 use spacelens_engine::{CancelHandle, FsEntry};
 use spacelens_identity::{
@@ -125,12 +129,20 @@ impl ContentReaderFactory for SyntheticReader {
     ) -> Result<(), ContentError> {
         let size = synthetic_size_of(path);
         let key = synthetic_key_of(path);
-        // 8-byte repeating pattern unique to the content key.
+        // 8-byte repeating pattern unique to the content key, expanded
+        // once into a fill buffer (pattern continuity across chunks falls
+        // out of the buffer length being a multiple of 8).
         let pattern = fnv1a(&key.to_le_bytes()).to_le_bytes();
+        let fill = pattern
+            .iter()
+            .cycle()
+            .take(4096)
+            .copied()
+            .collect::<Vec<u8>>();
         feed(&mut SyntheticChunks {
             size,
-            pattern,
             served: 0,
+            fill,
         })
         .map_err(ContentError::ReadFailed)
     }
@@ -138,10 +150,12 @@ impl ContentReaderFactory for SyntheticReader {
 
 /// Serves exactly `size` bytes of deterministic content derived from the
 /// path seed — the pipeline's length/mutation checks see an honest stream.
+/// Fill is a bulk patterned-buffer copy, not per-byte arithmetic, so debug
+/// builds run near the SHA-256 floor rather than the modulo floor.
 struct SyntheticChunks {
     size: u64,
-    pattern: [u8; 8],
     served: u64,
+    fill: Vec<u8>,
 }
 
 impl ContentReader for SyntheticChunks {
@@ -149,10 +163,12 @@ impl ContentReader for SyntheticChunks {
         if self.served >= self.size {
             return Ok(None);
         }
-        let n = buf.len().min(4096).min((self.size - self.served) as usize);
-        for (i, b) in buf[..n].iter_mut().enumerate() {
-            let idx = (self.served as usize + i) % 8;
-            *b = self.pattern[idx];
+        let n = buf.len().min((self.size - self.served) as usize);
+        let mut done = 0usize;
+        while done < n {
+            let take = (n - done).min(self.fill.len());
+            buf[done..done + take].copy_from_slice(&self.fill[..take]);
+            done += take;
         }
         self.served += n as u64;
         Ok(Some(n))
@@ -260,4 +276,130 @@ fn synthetic_pipeline_is_deterministic() {
     assert_eq!(a.groups, b.groups, "same input → identical groups");
     assert_eq!(a.stats.candidates_hashed, b.stats.candidates_hashed);
     assert_eq!(a.stats.files_hashed, b.stats.files_hashed);
+}
+
+/// The >4 GiB streaming-contract proof, opt-in (ignored) like the perf
+/// suite: a virtual 5 GiB file is served from an O(1)-memory repeating
+/// pattern — no disk space, no allocation that scales with size — exercising
+/// the streaming hasher's 64-bit length path and chunk-boundary handling on
+/// every platform. CI runs it via `cargo test -p spacelens-identity --
+/// --ignored`.
+#[test]
+#[ignore = "costly by design: streams 10 GiB of virtual content; CI runs --ignored"]
+fn huge_file_streams_beyond_4gib() {
+    let size: u64 = 5 * 1024 * 1024 * 1024 + 7; // > u32::MAX
+    let key = 0xA5A5_5A5A_A5A5_5A5Au64;
+    let make = |id: u64, sz: u64, name: &str| FsEntry {
+        id,
+        parent_id: None,
+        path: PathBuf::from(format!("/synthetic/huge/s{sz}.sbin/k{key:016}/{name}")),
+        kind: spacelens_engine::EntryKind::File,
+        size: sz,
+        allocated_size: None,
+        modified: None,
+        created: None,
+        accessed: None,
+        device: None,
+        inode: None,
+        hidden: false,
+        error: None,
+    };
+    let entries = vec![
+        make(1, size, "first.bin"),
+        make(2, size, "second.bin"),
+        // Same content pattern, one byte longer: different size ⇒ different
+        // candidacy bucket; must never join the group.
+        make(3, size + 1, "other.bin"),
+    ];
+    let reader = SyntheticReader::new();
+    let report = run_duplicates(
+        entries.into_iter(),
+        &DuplicateOptions::default(),
+        &CancelHandle::new(),
+        Some(&reader),
+        &mut |_| {},
+    );
+    assert_eq!(report.status, DuplicateStatus::Completed);
+    // Only the size-pair is hashed: `other.bin` has a unique size, so the
+    // candidate filter correctly never spends a hash on a singleton.
+    assert_eq!(report.stats.files_hashed, 2, "{report:?}");
+    assert_eq!(
+        report.stats.size_groups_without_duplicates, 0,
+        "the singleton was filtered before hashing, so no hashed group came back all-distinct"
+    );
+    assert_eq!(report.groups.len(), 1, "{report:?}");
+    let g = &report.groups[0];
+    assert_eq!(g.size, size, "sizes beyond 4 GiB must round-trip");
+    assert_eq!(g.member_count, 2);
+    assert_eq!(g.logical_duplicate_bytes, size);
+    assert_ne!(
+        g.content_hash,
+        spacelens_identity::ContentHash::empty(),
+        "a 5 GiB stream must not produce the empty-content identity"
+    );
+}
+
+/// u64 size plumbing across chunk boundaries — the cheap, always-on
+/// companion to `huge_file_streams_beyond_4gib`. Pairs sized exactly one
+/// chunk-below, exactly one chunk, and just past a chunk boundary must all
+/// group on content; singletons must never be hashed (candidate filter) and
+/// never group. Synthetic content: no disk, deterministic, milliseconds.
+#[test]
+fn u64_sizes_group_across_chunk_boundaries() {
+    use spacelens_identity::HASH_CHUNK_LEN;
+    let mk = |id: u64, sz: u64, key: u64, name: &str| FsEntry {
+        id,
+        parent_id: None,
+        path: PathBuf::from(format!("/synthetic/sizes/s{sz}.sbin/k{key:016}/{name}")),
+        kind: spacelens_engine::EntryKind::File,
+        size: sz,
+        allocated_size: None,
+        modified: None,
+        created: None,
+        accessed: None,
+        device: None,
+        inode: None,
+        hidden: false,
+        error: None,
+    };
+    let (below, exact, above) = (
+        (HASH_CHUNK_LEN - 1) as u64,
+        HASH_CHUNK_LEN as u64,
+        (HASH_CHUNK_LEN + 3) as u64,
+    );
+    let entries = vec![
+        mk(1, below, 11, "below-a.bin"),
+        mk(2, below, 11, "below-b.bin"),
+        mk(3, exact, 22, "exact-a.bin"),
+        mk(4, exact, 22, "exact-b.bin"),
+        mk(5, above, 33, "above-a.bin"),
+        mk(6, above, 33, "above-b.bin"),
+        mk(7, (2 * HASH_CHUNK_LEN + 1) as u64, 44, "singleton.bin"),
+    ];
+    let reader = SyntheticReader::new();
+    let report = run_duplicates(
+        entries.into_iter(),
+        &DuplicateOptions::default(),
+        &CancelHandle::new(),
+        Some(&reader),
+        &mut |_| {},
+    );
+    assert_eq!(report.status, DuplicateStatus::Completed);
+    assert_eq!(
+        report.stats.files_hashed, 6,
+        "singleton never hashed: {report:?}"
+    );
+    assert_eq!(report.groups.len(), 3, "{report:?}");
+    let mut hashes: Vec<_> = report.groups.iter().map(|g| g.content_hash).collect();
+    hashes.sort();
+    hashes.dedup();
+    assert_eq!(
+        hashes.len(),
+        3,
+        "different content keys → different digests"
+    );
+    for g in &report.groups {
+        assert_eq!(g.member_count, 2);
+        assert_ne!(g.content_hash, spacelens_identity::ContentHash::empty());
+    }
 }
