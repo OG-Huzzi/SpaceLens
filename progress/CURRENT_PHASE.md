@@ -1,12 +1,30 @@
 # SpaceLens — Current Phase
 
-- **Current phase:** PHASE 2.1 — Semantic hardening (on top of verified
-  Phase 2)
-- **Status:** PHASE 2.1 — VERIFIED (full local gate green, CI run
-  `34341554863` for `bfb0452` success — all 4 jobs; see PHASE_2_STATUS.md)
-- **Last updated:** 2026-09-09 (Phase 2.1 semantic hardening pass)
+- **Current phase:** PHASE 3 — File identity, hashing & duplicate
+  relationships (on top of verified Phases 1, 2, 2.1)
+- **Status:** PHASE 3 — VERIFIED (full local gate green; CI run
+  `34454636871` for `e453dd1` success — all 4 jobs; see PHASE_3_STATUS.md)
+- **Last updated:** 2026-09-10 (Phase 3 identity engine)
 
-## What happened (2026-09-09, Phase 2.1)
+## What happened (2026-09-10, Phase 3)
+
+The RELATE layer: content identity (streaming SHA-256 behind the new
+`PlatformFs::read_content` boundary), eligibility contract, size-group
+candidacy (singletons never hashed), bounded worker pool, mutation-checked
+hashing (`Changed`/`Vanished` typed, never a false relationship),
+deterministic duplicate groups, and honest storage accounting
+(`logical_duplicate_bytes` exact; `recoverable_bytes` only with provable
+object identity — hard-link aliases count zero). Zero-byte files are counted,
+not grouped, by default (explicit opt-in). Links are never followed. No DB,
+no UI, no recommendations — nothing beyond Identity → Relationships.
+53 new tests including a release-mode virtual >4 GiB streaming proof and a
+ci-enforced perf smoke (10k/100k/1M, 4 hostile workloads, linear-scaling
+guard). Commits `46b5dd1` → `929e400` → `15e3365` → `e453dd1`; CI green on
+the final SHA after three diagnosed-and-repaired failures (unix root-entry
+test counts, sparse-test hygiene, workflow YAML). Full record in
+PHASE_3_STATUS.md.
+
+## Previous pass (2026-09-09, Phase 2.1)
 
 A focused semantic-hardening pass over the verified Phase 2 classifier:
 `InstallerExtension` is now gated `Under(Downloads)` (an extension says what
