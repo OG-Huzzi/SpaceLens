@@ -54,7 +54,7 @@ jobs:
       - name: Phase 3 perf smoke (identity pipeline; 4 hostile workloads, linear-scaling guard)
         run: cargo test -j 2 -p spacelens-identity -- --ignored --nocapture --skip huge_file_streams_beyond_4gib
 
-      - name: Phase 3 >4 GiB streaming proof (release: real-speed SHA-256 over 10 GiB virtual content)
+      - name: Phase 3 >4 GiB streaming proof (release mode, real-speed SHA-256 over 10 GiB virtual content)
         run: cargo test -j 2 -p spacelens-identity --release --test perf_tests huge_file_streams_beyond_4gib -- --ignored --nocapture
 
   frontend:
