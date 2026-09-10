@@ -43,6 +43,18 @@ Typed everywhere: `{ code, message, detail? }`. Stable codes, e.g.
 UI renders `message` verbatim for known codes (copy reviewed with safety doc);
 unknown codes show a generic safe fallback, never a stack trace.
 
+## Identity contracts (Phase 3)
+
+Namespace: `spacelens.v1.identity.*` (engine-side in `crates/spacelens-identity`;
+IPC payload shapes follow the same camelCase + bytes-as-integers rules as
+above). Content identity = SHA-256 (`HashAlgorithm::Sha256`, tag `"sha256"`);
+a content identity is meaningless without its algorithm tag. Duplicate groups
+report `logicalDuplicateBytes` exactly and `recoverableBytes` only with
+`Exact`/`Estimated` accounting evidence — see docs/IDENTITY.md for the full
+semantics (hard links, mutation policy, zero-byte policy, deterministic
+ordering). No IPC command surfaces these yet; the types are the contract for
+future phases and are covered by engine tests.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

@@ -1,10 +1,11 @@
-# SpaceLens CI — Phase 2.
+# SpaceLens CI — Phase 3.
 #
 # Verifies the Rust workspace (spacelens-core + spacelens-engine +
-# spacelens-classifier) on all three target platforms and the frontend
-# scaffold. Native Tauri compilation is intentionally NOT attempted yet: the
-# shell crate is still a config-level contract and its bundle icons do not
-# exist until the packaging work (see progress/PHASE_1_STATUS.md).
+# spacelens-classifier + spacelens-identity) on all three target platforms
+# and the frontend scaffold. Native Tauri compilation is intentionally NOT
+# attempted yet: the shell crate is still a config-level contract and its
+# bundle icons do not exist until the packaging work (see
+# progress/PHASE_1_STATUS.md).
 #
 # Every Rust job runs the full quality gate: `cargo fmt --check`,
 # `cargo clippy -D warnings`, and `cargo test`. Clippy is part of the gate on
@@ -49,6 +50,9 @@ jobs:
 
       - name: Phase 2 perf smoke (10k/100k/1M synthetic; linear-scaling guard)
         run: cargo test -j 2 -p spacelens-classifier -- --ignored --nocapture
+
+      - name: Phase 3 perf smoke (identity pipeline; 4 hostile workloads, linear-scaling guard)
+        run: cargo test -j 2 -p spacelens-identity -- --ignored --nocapture
 
   frontend:
     runs-on: ubuntu-latest

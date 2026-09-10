@@ -1,0 +1,19 @@
+[package]
+name = "spacelens-identity"
+version = "0.0.0"
+edition = "2021"
+description = "SpaceLens identity engine — Phase 3 (content identity, hashing, exact duplicate relationships)"
+license = "UNLICENSED"
+
+[lib]
+name = "spacelens_identity"
+crate-type = ["lib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+spacelens-engine = { path = "../spacelens-engine" }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"

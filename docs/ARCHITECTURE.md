@@ -55,14 +55,17 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
    `SysDirs` traits with per-OS modules. Shared logic never `cfg!`-branches on
    OS behavior; only the trait impls do (docs/CROSS_PLATFORM.md).
 
-## Core engine module boundaries (future; names are contracts)
+## Core engine module boundaries (implemented so far)
 
 - `scanner` — parallel walk, metadata collection, progress/cancel. Knows nothing
-  of categories or UI.
+  of categories or UI. (Phase 1: `crates/spacelens-engine`.)
 - `classifier` — maps entries → human categories + app attribution. Pure function
   over metadata; rule tables versioned and testable without a disk.
+  (Phase 2/2.1: `crates/spacelens-classifier`.)
 - `hasher` / `duplicates` — content hashing (SHA-256), exact-duplicate grouping
-  with hardlink collapse. Hash cache in DB; never re-hash unchanged files.
+  with hardlink collapse. (Phase 3: `crates/spacelens-identity`, docs/IDENTITY.md.)
+  The persistent hash cache belongs with persistence (later phase); Phase 3
+  deliberately added no database.
 - `recommender` — produces opportunities with reasons + recovery estimates.
   Advisory only; cannot delete.
 - `planner` + `safety` — turns accepted recommendations into a validated plan;

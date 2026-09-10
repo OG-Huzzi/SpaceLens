@@ -21,6 +21,7 @@
 
 pub mod cancel;
 pub mod error;
+pub mod identity;
 pub mod model;
 pub mod options;
 pub mod platform;
@@ -30,7 +31,8 @@ pub mod summary;
 
 pub use cancel::CancelHandle;
 pub use error::{ErrorCategory, ScanError, ScanErrorReport};
-pub use model::{EntryKind, FsEntry, LinkInfo, LinkKind};
+pub use identity::FileIdentity;
+pub use model::{EntryKind, ErrorCategoryRef, FsEntry, LinkInfo, LinkKind};
 pub use options::{ScanOptions, SymlinkPolicy};
 pub use platform::{DriveInfo, PlatformFs, SysDirs};
 pub use progress::{Phase, ProgressSnapshot, ScanEvent};

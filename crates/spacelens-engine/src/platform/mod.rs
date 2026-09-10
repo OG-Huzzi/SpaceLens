@@ -18,6 +18,75 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::error::ErrorCategory;
+use crate::identity::FileIdentity;
+
+/// Streaming reader handed to [`PlatformFs::read_content`] callbacks.
+///
+/// The implementation reads bounded chunks from an OS file handle. A read is
+/// retryable exactly when it yields [`ReadChunk::Interrupted`]; any `Error`
+/// is terminal for that file. The consumer must not retain the borrowed
+/// chunk across calls.
+pub trait ContentReader {
+    /// Read the next bounded chunk. Returns `Ok(None)` at end of file.
+    fn read_chunk(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>>;
+
+    /// Identity of the underlying file object, proven from the open handle
+    /// while the content is being read. Prefer this over any pre-open stat:
+    /// it describes the object the bytes actually came from.
+    fn file_identity(&self) -> FileIdentity;
+
+    /// Raw file length as the OS reports it for the open handle.
+    fn file_len(&self) -> io::Result<u64>;
+}
+
+/// Outcome of [`PlatformFs::read_content`]. The error variant preserves the
+/// native error so the platform's own categorization (sharing violation,
+/// permission denied, vanished file, …) applies unchanged.
+///
+/// Callback failures use a separate signal so the caller can distinguish
+/// "the file could not be read" from "the consumer stopped the read".
+pub enum ContentOutcome<'a> {
+    /// The handle was opened successfully; drive the read through `feed`.
+    /// Returning `Err` from the callback aborts and yields
+    /// [`ContentError::Aborted`].
+    Opened(&'a mut dyn FnMut(&mut dyn ContentReader) -> io::Result<()>),
+    /// The handle could not be opened.
+    Failed(io::Error),
+}
+
+/// Why [`PlatformFs::read_content`] did not deliver content.
+#[derive(Debug)]
+pub enum ContentError {
+    /// The handle could not be opened (preserves the original error).
+    OpenFailed(io::Error),
+    /// A read failed mid-stream (preserves the original error).
+    ReadFailed(io::Error),
+    /// The consumer's callback aborted the read deliberately (e.g.
+    /// cancellation). Never an OS failure.
+    Aborted,
+}
+
+impl From<ContentError> for io::Error {
+    fn from(e: ContentError) -> Self {
+        match e {
+            ContentError::OpenFailed(err) | ContentError::ReadFailed(err) => err,
+            ContentError::Aborted => io::Error::new(
+                io::ErrorKind::Interrupted,
+                "content read aborted by consumer",
+            ),
+        }
+    }
+}
+
+impl ContentError {
+    pub fn message(&self) -> String {
+        match self {
+            ContentError::OpenFailed(err) => err.to_string(),
+            ContentError::ReadFailed(err) => err.to_string(),
+            ContentError::Aborted => "aborted by consumer".to_string(),
+        }
+    }
+}
 
 /// File kind as reported by the platform metadata call (link-aware: a
 /// symlink/junction is `Symlink`, never `Dir`/`File`).
@@ -90,6 +159,26 @@ pub trait PlatformFs: Send + Sync {
 
     /// Platform hidden-entry rule (Windows attributes vs Unix dot-names).
     fn is_hidden(&self, name: &OsStr, md: &MetadataInfo) -> bool;
+
+    /// Open the file at `path` for bounded streaming reads and call `outcome`
+    /// with the result. This is Phase 3's single content-access boundary:
+    /// the hashing layer consumes observed entries and never crawls the
+    /// filesystem itself, so content access must flow through the platform
+    /// abstraction like every other operation.
+    ///
+    /// Implementations must open with metadata-following disabled or proved
+    /// equivalent (the entry was observed as [`crate::model::EntryKind::File`]
+    /// at scan time), stream in bounded chunks without buffering whole files,
+    /// and never spawn processes, touch the network, or traverse directories.
+    fn read_content(&self, path: &Path, outcome: ContentOutcome<'_>) -> Result<(), ContentError> {
+        // Default: no content access. The engine core is usable without it;
+        // platforms that cannot read content degrade explicitly.
+        let _ = (path, outcome);
+        Err(ContentError::OpenFailed(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this platform implementation does not expose file content",
+        )))
+    }
 }
 
 /// One volume / mount the platform exposes.
