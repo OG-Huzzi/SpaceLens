@@ -58,9 +58,6 @@ fn write(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-
 #[test]
 fn scanned_tree_groups_real_duplicates() {
     let tmp = tempfile::tempdir().unwrap();
@@ -427,8 +424,18 @@ fn large_sparse_file_hashes_streaming() {
         }
     }
 
-    let entries = scan_entries(root);
-    assert_eq!(entries.len(), 2);
+    // Runner temp dirs can contain unrelated noise files; filter to this
+    // test's fixtures so assertions test engine semantics, not the host.
+    let entries: Vec<_> = scan_entries(root)
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                e.path.file_name().and_then(|n| n.to_str()),
+                Some("huge.bin") | Some("twin.bin")
+            )
+        })
+        .collect();
+    assert_eq!(entries.len(), 2, "fixtures must be observed: {entries:?}");
     assert_eq!(entries.iter().map(|e| e.size).max(), Some(size));
 
     let report = run_pipeline(entries, &default_opts());
