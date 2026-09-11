@@ -2,10 +2,19 @@
 
 - **Phase:** 3.1 — Identity-engine correctness, TOCTOU safety & true
   boundedness (audit-repair pass over Phase 3)
-- **Verdict:** **PHASE 3.1 — VERIFIED** (full local gate green on
-  Windows; CI matrix green on the final SHA — runs recorded below)
+- **Verdict:** **PHASE 3.1 — VERIFIED** (full local gate green on Windows;
+  CI matrix green on the implementation SHA `f0a6ea5` — run
+  `34617425239`, all 4 jobs success with every step verified individually
+  from the Actions API; the doc-record commit `f0a6ea5` reruns the
+  same matrix on top of unchanged code)
 - **Date:** 2026-09-11 · **Machine:** Windows 11 Pro x64, 8 GB RAM
 - **Starting SHA:** `274a225` (Phase 3 record, clean tree)
+- **History:** implementation `5f845e1` (run `34603456406`: windows +
+  frontend ✓, ubuntu/macos clippy ✗ — unix-only dead-code lint) → repair
+  `b10f9e2` (run `34615674824`: clippy green everywhere; ubuntu test ✗ —
+  ext4 inode reuse defeated a delete+recreate fixture) → repair `f0a6ea5`
+  (run `34617425239`: **all green**). Every failure was diagnosed from its
+  actual CI log before repair; nothing was papered over.
 
 ## Why this phase existed
 
