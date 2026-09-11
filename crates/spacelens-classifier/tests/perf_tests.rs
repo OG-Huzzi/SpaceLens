@@ -113,6 +113,7 @@ fn synthetic_entry(i: u64) -> FsEntry {
         changed: None,
         device: None,
         inode: None,
+        file_id_hi: None,
         hidden: false,
         error: None,
     }

@@ -112,26 +112,13 @@ fn handle_identity(file: &fs::File) -> io::Result<FileIdentity> {
         Ok(FileIdentity {
             device: Some(md.dev()),
             inode: Some(md.ino()),
+            file_id_hi: None,
             link_count: Some(md.nlink()),
         })
     }
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        };
-        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        // BOOL FALSE == 0.
-        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
-        if ok == 0 {
-            return Ok(FileIdentity::unknown());
-        }
-        Ok(FileIdentity {
-            device: Some(u64::from(info.dwVolumeSerialNumber)),
-            inode: Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)),
-            link_count: Some(u64::from(info.nNumberOfLinks)),
-        })
+        windows::handle_identity(file)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -246,13 +233,29 @@ impl PlatformFs for StdFs {
             changed: None,
             device: None,
             inode: None,
+            file_id_hi: None,
             reparse: false,
             hidden: false,
         };
         #[cfg(unix)]
         unix::fill_platform_fields(&md, &mut info);
         #[cfg(windows)]
-        windows::fill_platform_fields(&md, &mut info);
+        {
+            windows::fill_platform_fields(&md, &mut info);
+            // Phase 3.2: Windows scan-time object identity via a query-only
+            // handle (FILE_ID_INFO). Reparse points (symlinks/junctions)
+            // keep `None` — they are recorded as links and never hashed, so
+            // their identity is never used; regular files and directories
+            // get the (volume serial, 128-bit file id) provenance the
+            // identity layer compares at hash time.
+            if !info.reparse && matches!(kind, FsKind::File | FsKind::Dir) {
+                if let Some(identity) = windows::identity_via_query_handle(path) {
+                    info.device = identity.device;
+                    info.inode = identity.inode;
+                    info.file_id_hi = identity.file_id_hi;
+                }
+            }
+        }
         Ok(info)
     }
 

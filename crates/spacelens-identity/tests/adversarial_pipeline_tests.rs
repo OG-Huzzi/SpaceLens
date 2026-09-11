@@ -50,6 +50,7 @@ fn entry(id: u64, path: &str, size: u64, object: Option<(u64, u64)>) -> FsEntry 
         changed: None,
         device: object.map(|o| o.0),
         inode: object.map(|o| o.1),
+        file_id_hi: None,
         hidden: false,
         error: None,
     }
@@ -168,6 +169,7 @@ impl ContentReader for ScriptedChunks {
         spacelens_engine::FileIdentity {
             device,
             inode,
+            file_id_hi: None,
             link_count: Some(1),
         }
     }

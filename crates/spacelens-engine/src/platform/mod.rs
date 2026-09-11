@@ -187,14 +187,19 @@ pub struct MetadataInfo {
     /// identity layer compares the two to catch same-length rewrites that
     /// preserve mtime.
     pub changed: Option<SystemTime>,
-    /// Device / volume identity (Unix `st_dev`). `None` on Windows: std's
-    /// path-stat surface does not expose the volume serial number (the
-    /// `windows_by_handle` extension is unstable), so scan-time object
-    /// identity is Unix-only — never fabricated.
+    /// Device / volume identity (Unix `st_dev`; Windows volume serial
+    /// number). Phase 3.2: Windows scan-time identity is captured through a
+    /// query-only handle (`FILE_ID_INFO`), so it is provable on all
+    /// supported platforms. `None` where the OS refused the query — never
+    /// fabricated.
     pub device: Option<u64>,
-    /// File identity (Unix `st_ino`). `None` on Windows for the same honest
-    /// reason as [`Self::device`].
+    /// File identity (Unix `st_ino`; Windows low 64 bits of the 128-bit
+    /// `FILE_ID_INFO.FileId` — on NTFS the MFT record reference including
+    /// its sequence number). `None` = not provable.
     pub inode: Option<u64>,
+    /// High 64 bits of a >64-bit file identifier (Windows `FILE_ID_INFO`
+    /// on ReFS-class filesystems). `None` = no wider identifier proven.
+    pub file_id_hi: Option<u64>,
     /// Windows reparse-point flag (junctions, symlinks, mount points).
     pub reparse: bool,
     /// Windows `FILE_ATTRIBUTE_HIDDEN` bit; always `false` on other OSes

@@ -66,13 +66,22 @@ pub(super) fn is_hidden(name: &OsStr) -> bool {
 ///   immediately and the fstat inspection below rejects it.
 /// - `O_CLOEXEC`: hygiene; the engine spawns no processes.
 ///
-/// Intermediate path components resolve normally. A parent directory
-/// swapped to a link resolves to a *different object*, which the identity
-/// layer detects by comparing observation-time `(st_dev, st_ino)` (recorded
-/// by the scanner) with handle-proven identity — both provable on Unix, so
-/// the residual race is closed without an `openat(O_PATH)` chain.
+/// Phase 3.2 intermediate-path guard: every ancestor component is opened
+/// `O_NOFOLLOW|O_DIRECTORY` before the final open, so a directory that
+/// became a symlink anywhere in the chain is refused — the same structural
+/// guard as the Windows reparse-ancestor validation. The scanner never
+/// descends into links (`SymlinkPolicy::RecordOnly`), so a legitimately
+/// observed path can never contain a symlink ancestor. An ancestor that
+/// cannot be opened at all is not treated as a link: the final open is
+/// authoritative and the identity/mutation checks still apply.
+///
+/// The observed-vs-opened `(st_dev, st_ino)` comparison in the identity
+/// layer remains the authoritative proof that the hashed object is the
+/// observed object; this check is the deterministic structural guard that
+/// runs before it.
 pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
     use std::os::unix::fs::OpenOptionsExt;
+    validate_no_symlink_ancestors(path)?;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -86,6 +95,36 @@ pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
         Ok(_) => Err(ContentError::NotRegularFile),
         Err(e) => Err(ContentError::OpenFailed(e)),
     }
+}
+
+/// Phase 3.2 intermediate-path guard (Unix twin of the Windows
+/// reparse-ancestor validation): every ancestor component must still be a
+/// plain directory. `O_NOFOLLOW|O_DIRECTORY` on a symlinked ancestor fails
+/// with `ELOOP` → [`ContentError::UnexpectedLink`]; other ancestor-open
+/// failures degrade to the final open's authoritative error.
+fn validate_no_symlink_ancestors(path: &Path) -> Result<(), ContentError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    for ancestor in path.ancestors().skip(1) {
+        // Stop at the filesystem root (no file name).
+        if ancestor.file_name().is_none() {
+            break;
+        }
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(ancestor);
+        match opened {
+            Ok(dir) => drop(dir),
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(ContentError::UnexpectedLink);
+            }
+            // Ancestor is not a directory (swapped to a file/FIFO): the
+            // final open fails with the authoritative ENOTDIR; other
+            // errors (ACL) degrade to the final open too.
+            Err(_) => continue,
+        }
+    }
+    Ok(())
 }
 
 /// Map no-follow open failures onto typed content errors.

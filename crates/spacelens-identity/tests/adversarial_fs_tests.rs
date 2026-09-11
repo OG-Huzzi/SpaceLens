@@ -46,6 +46,7 @@ fn file_entry(id: u64, path: &Path, size: u64) -> FsEntry {
         changed: None,
         device: None,
         inode: None,
+        file_id_hi: None,
         hidden: false,
         error: None,
     }

@@ -626,6 +626,7 @@ fn entries_with_scan_errors_are_ineligible() {
         changed: None,
         device: None,
         inode: None,
+        file_id_hi: None,
         hidden: false,
         error: Some(spacelens_engine::ErrorCategoryRef::InUse),
     });

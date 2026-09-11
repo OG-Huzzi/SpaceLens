@@ -275,6 +275,7 @@ impl PlatformFs for FakeFs {
             changed: None,
             device: Some(1),
             inode: Some(0),
+            file_id_hi: None,
             reparse: false,
             hidden: node.hidden,
         })

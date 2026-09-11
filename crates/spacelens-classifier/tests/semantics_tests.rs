@@ -32,6 +32,7 @@ fn entry(id: u64, parent: Option<u64>, path: &str, kind: EntryKind) -> FsEntry {
         changed: None,
         device: None,
         inode: None,
+        file_id_hi: None,
         hidden: false,
         error: None,
     }

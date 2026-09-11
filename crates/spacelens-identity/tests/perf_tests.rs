@@ -72,6 +72,7 @@ fn synthetic_entry(i: u64, family: &str, total: u64) -> FsEntry {
         changed: None,
         device: None,
         inode: None,
+        file_id_hi: None,
         hidden: false,
         error: None,
     }
@@ -322,6 +323,7 @@ fn huge_file_streams_beyond_4gib() {
         changed: None,
         device: None,
         inode: None,
+        file_id_hi: None,
         hidden: false,
         error: None,
     };
@@ -381,6 +383,7 @@ fn u64_sizes_group_across_chunk_boundaries() {
         changed: None,
         device: None,
         inode: None,
+        file_id_hi: None,
         hidden: false,
         error: None,
     };

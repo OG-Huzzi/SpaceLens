@@ -306,6 +306,7 @@ impl Shared {
             changed: md.changed,
             device: md.device,
             inode: md.inode,
+            file_id_hi: md.file_id_hi,
             hidden: platform.is_hidden(&name, md),
             error: None,
         }
@@ -432,6 +433,7 @@ fn process_dir(
                     changed: None,
                     device: None,
                     inode: None,
+                    file_id_hi: None,
                     hidden: false,
                     error: Some(crate::model::ErrorCategoryRef::from(
                         platform.categorize_error(&err),
@@ -539,6 +541,7 @@ fn handle_link(
             changed: None,
             device: None,
             inode: None,
+            file_id_hi: None,
             hidden: false,
             error: Some(crate::model::ErrorCategoryRef::from(
                 platform.categorize_error(md_err.as_ref().unwrap()),

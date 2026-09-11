@@ -230,21 +230,33 @@ const FAILURE_DETAIL_CAP: usize = 256;
 
 /// One staged candidate: the observation-side facts the mutation policy
 /// will verify against the open handle. Deliberately lean (path + observed
-/// size + observed object identity + observed change stamp) — this is the
-/// structure the global cap bounds.
+/// size + observed object identity + observed change stamp + observed
+/// mtime) — this is the structure the global cap bounds (fixed ~40 bytes
+/// of observation data per record; no per-path security structures).
 #[derive(Debug, Clone)]
 struct StagedMember {
     entry_id: u64,
     path: PathBuf,
     size: u64,
-    /// Observation-time object identity `(device, inode)` where the scanner
-    /// proved it (Unix). `None` = unavailable on this platform (Windows
-    /// path-stats) — the observed-vs-opened check degrades honestly.
+    /// Observation-time object identity `(volume, file_id)` where the
+    /// scanner proved it — Unix `(st_dev, st_ino)`; Windows
+    /// `(volume serial, low 64 bits of FILE_ID_INFO.FileId)` since Phase
+    /// 3.2. `None` = the scanner could not prove identity — the
+    /// observed-vs-opened check degrades honestly (never fabricated).
     observed_object_id: Option<(u64, u64)>,
+    /// Observation-time high 64 bits of a >64-bit file identifier (Windows
+    /// `FILE_ID_INFO` on ReFS-class filesystems). Compared only when both
+    /// sides proved it.
+    observed_file_id_hi: Option<u64>,
     /// Observation-time metadata-change stamp (Unix `st_ctime`). `None`
     /// where the scanner could not observe one — the scan→open bracket
     /// then degrades to mtime/length, never fabricated.
     observed_changed: Option<std::time::SystemTime>,
+    /// Observation-time modification stamp. Compared against the open
+    /// handle's where both are provable: a same-content replacement
+    /// (delete+recreate or rename-over) carries a fresh mtime, so this
+    /// bracket catches what a size check cannot.
+    observed_modified: Option<std::time::SystemTime>,
 }
 
 /// Per-size-group staging state. `observed` counts every member ever
@@ -426,7 +438,9 @@ fn staged(entry: &FsEntry) -> StagedMember {
         path: entry.path.clone(),
         size: entry.size,
         observed_object_id: entry.device.zip(entry.inode),
+        observed_file_id_hi: entry.file_id_hi,
         observed_changed: entry.changed,
+        observed_modified: entry.modified,
     }
 }
 
@@ -723,6 +737,22 @@ fn hash_file(
                     observed.0, observed.1, handle.0, handle.1
                 )));
             }
+            // Wide-identity bracket (Phase 3.2): when BOTH sides proved a
+            // >64-bit file identifier (Windows FILE_ID_INFO on ReFS-class
+            // filesystems), the high bits must also agree. A provability
+            // mismatch is not an identity mismatch — compared only on
+            // shared evidence, never fabricated.
+            if let (Some(observed_hi), Some(handle_hi)) =
+                (member.observed_file_id_hi, identity.file_id_hi)
+            {
+                if observed_hi != handle_hi {
+                    return Err(std::io::Error::other(format!(
+                        "object replaced between scan and hash (wide file id moved: \
+                         observed {:#018x}…, opened {:#018x}…)",
+                        observed_hi, handle_hi
+                    )));
+                }
+            }
         }
         // Degraded mode (either side unprovable): proceed on the remaining
         // checks — documented, never fabricated.
@@ -736,11 +766,29 @@ fn hash_file(
             )));
         }
 
-        // ---- check 6 (scan→open bracket): the object's change stamp must
-        // still be the one the scanner observed, where both sides could
-        // prove one. A same-length rewrite moves st_ctime/ChangeTime even
-        // when mtime is preserved; where either side is unprovable the
-        // check degrades honestly (never fabricated).
+        // ---- check 6a (scan→open mtime bracket): the object's
+        // modification stamp must still be the one the scanner observed,
+        // where both sides could prove one. A same-content replacement
+        // (delete+recreate, rename-over) carries a fresh mtime, so this
+        // catches replacements that identity alone might miss on
+        // filesystems without reuse-resistant file ids. A same-length
+        // rewrite that deliberately preserved mtime is caught by the
+        // change-stamp bracket below (where the platform maintains one).
+        if let (Some(observed_mtime), Some(handle_mtime)) = (member.observed_modified, pre.modified)
+        {
+            if observed_mtime != handle_mtime {
+                return Err(std::io::Error::other(
+                    "file changed between scan and hash (modification time moved)",
+                ));
+            }
+        }
+
+        // ---- check 6b (scan→open change bracket): the object's change
+        // stamp must still be the one the scanner observed, where both
+        // sides could prove one. A same-length rewrite moves
+        // st_ctime/ChangeTime even when mtime is preserved; where either
+        // side is unprovable the check degrades honestly (never
+        // fabricated).
         if let (Some(observed_change), Some(handle_change)) = (member.observed_changed, pre.changed)
         {
             if observed_change != handle_change {
@@ -1105,6 +1153,7 @@ mod tests {
             changed: None,
             device: None,
             inode: None,
+            file_id_hi: None,
             hidden: false,
             error: None,
         }
@@ -1124,6 +1173,7 @@ mod tests {
             changed: None,
             device: None,
             inode: None,
+            file_id_hi: None,
             hidden: false,
             error: None,
         }

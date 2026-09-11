@@ -1,21 +1,38 @@
 //! Windows-specific pieces of the `StdFs` trait implementation.
+//!
+//! Phase 3.2 adds **scan-time object identity**: a query-only handle
+//! (`CreateFileW` with `FILE_READ_ATTRIBUTES`, share-all, opened
+//! `OPEN_REPARSE_POINT` so a reparse point's own handle is inspected, never
+//! its target) yields `FILE_ID_INFO` — the (volume serial, 128-bit file id)
+//! pair that identifies the filesystem object rather than the path. On
+//! NTFS the file id embeds the MFT record reference *including its sequence
+//! number*, which increments every time a record is freed and reused — the
+//! strongest reuse-resistant object identity Windows exposes to user mode.
+//! Filesystems that do not support `FileIdInfo` fall back to the 64-bit
+//! `BY_HANDLE_FILE_INFORMATION` index; where even that fails, identity
+//! degrades honestly to `None` (never fabricated).
 
 use std::fs;
 use std::io;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use windows_sys::Win32::Foundation::{ERROR_SYMLINK_NOT_SUPPORTED, FILETIME};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_SYMLINK_NOT_SUPPORTED, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT,
+    CreateFileW, FileBasicInfo, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 
 use super::{ContentError, HandleStat, MetadataInfo};
 use crate::error::ErrorCategory;
+use crate::identity::FileIdentity;
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -32,13 +49,9 @@ pub(super) fn fill_platform_fields(md: &std::fs::Metadata, info: &mut MetadataIn
     let attrs = md.file_attributes();
     info.reparse = attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0;
     info.hidden = attrs & FILE_ATTRIBUTE_HIDDEN != 0;
-    // std does not expose allocated size / file index on stable for path
-    // stats (the `windows_by_handle` extension is unstable); `None` is the
-    // honest value. Handle-time identity IS available through
-    // `GetFileInformationByHandle` and is used by the content boundary.
+    // Allocated size is not exposed by std path-stats; the object identity
+    // fields are filled by `identity_via_query_handle` (see `StdFs::metadata`).
     info.allocated = None;
-    info.device = None;
-    info.inode = None;
 }
 
 pub(super) fn categorize(err: &io::Error) -> ErrorCategory {
@@ -57,6 +70,95 @@ pub(super) fn is_hidden(md: &MetadataInfo) -> bool {
     md.hidden
 }
 
+/// Open a query-only handle on `path` and read the object identity from it.
+///
+/// `FILE_READ_ATTRIBUTES` (no data access, share-everything) succeeds on
+/// files whose bytes are locked, and `FILE_FLAG_OPEN_REPARSE_POINT` means a
+/// reparse point is opened *itself* — the scan observes the entry at the
+/// path, never the link target (matching the scanner's record-only link
+/// policy). `None` = the OS refused the query (ACL/ vanished/volume quirks):
+/// the caller keeps `None` — identity is never fabricated.
+pub(super) fn identity_via_query_handle(path: &Path) -> Option<FileIdentity> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is a null-terminated UTF-16 path owned for the call;
+    // no other parameter is retained. The returned handle (if any) is
+    // closed on every path below.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            INVALID_HANDLE_VALUE,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let identity = handle_identity_from(handle);
+    // SAFETY: `handle` is a valid open handle owned by this call.
+    unsafe { CloseHandle(handle) };
+    identity
+}
+
+/// Object identity from an open raw HANDLE: `FILE_ID_INFO` first (128-bit
+/// file id + 64-bit volume serial), falling back to the 64-bit
+/// `BY_HANDLE_FILE_INFORMATION` index on filesystems that predate
+/// `FileIdInfo`. The derivation is identical for scan-time and hash-time
+/// identity, so comparisons are always like-for-like.
+fn handle_identity_from(handle: HANDLE) -> Option<FileIdentity> {
+    let mut id_info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+    // BOOL FALSE == 0.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            &mut id_info as *mut FILE_ID_INFO as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if ok != 0 {
+        let mut lo = [0u8; 8];
+        let mut hi = [0u8; 8];
+        lo.copy_from_slice(&id_info.FileId.Identifier[..8]);
+        hi.copy_from_slice(&id_info.FileId.Identifier[8..]);
+        let hi = u64::from_le_bytes(hi);
+        return Some(FileIdentity {
+            device: Some(id_info.VolumeSerialNumber),
+            inode: Some(u64::from_le_bytes(lo)),
+            file_id_hi: Some(hi),
+            // FileIdInfo does not carry the link count; the hard-link
+            // accounting uses the (volume, id) pair, so the count is not
+            // needed for identity and is left unproven here.
+            link_count: None,
+        });
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    if ok == 0 {
+        return None;
+    }
+    Some(FileIdentity {
+        device: Some(u64::from(info.dwVolumeSerialNumber)),
+        inode: Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)),
+        file_id_hi: None,
+        link_count: Some(u64::from(info.nNumberOfLinks)),
+    })
+}
+
+/// Hash-time object identity from an already-open std file handle. Same
+/// derivation as [`identity_via_query_handle`] — the identity layer
+/// compares the two directly.
+pub(super) fn handle_identity(file: &fs::File) -> io::Result<FileIdentity> {
+    Ok(handle_identity_from(file.as_raw_handle() as _).unwrap_or_else(FileIdentity::unknown))
+}
+
 /// `FILE_FLAG_OPEN_REPARSE_POINT`: open the reparse point *itself*, never
 /// traverse to its target. Combined with the immediate handle inspection
 /// below, a path that became a symlink/junction/mount point after
@@ -67,12 +169,73 @@ pub(super) fn is_hidden(md: &MetadataInfo) -> bool {
 /// replaced-by-directory path must be *typed* from handle attributes, not
 /// guessed from an error code) and has no effect on regular-file opens.
 pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
+    validate_no_reparse_ancestors(path)?;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .map_err(map_open_err)?;
     inspect_handle(file)
+}
+
+/// Phase 3.2 intermediate-path guard: every ancestor component of the
+/// observed path must still be a plain directory — a junction/reparse
+/// point anywhere in the chain is refused before the final open, so a
+/// swapped intermediate component cannot silently redirect resolution to
+/// another object tree.
+///
+/// The scanner never descends into links (`SymlinkPolicy::RecordOnly`), so
+/// a legitimately observed path can never contain a reparse ancestor and
+/// this check cannot false-positive on engine-produced input. An ancestor
+/// that cannot be opened at all (ACL) is *not* treated as a link: the
+/// final open is authoritative and identity/mutation checks still apply.
+///
+/// Each ancestor is opened `OPEN_REPARSE_POINT` (its own handle, never its
+/// target) and rejected on the reparse attribute. Component opens are
+/// independent; a swap *between* the component checks and the final open
+/// cannot manufacture a false identity — the final object's identity is
+/// compared against the observation (see the pipeline), which is the
+/// authoritative proof.
+fn validate_no_reparse_ancestors(path: &Path) -> Result<(), ContentError> {
+    for ancestor in path.ancestors().skip(1) {
+        // Stop at the volume/share root (no file name): it has no
+        // meaningful parent chain to validate.
+        if ancestor.file_name().is_none() {
+            break;
+        }
+        let wide: Vec<u16> = ancestor
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` is a null-terminated UTF-16 path owned for the
+        // call; the handle is closed on every path below.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                INVALID_HANDLE_VALUE,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            // Unopenable ancestor (ACL, vanished): not evidence of a link.
+            // The final open and the identity comparison remain the gates.
+            continue;
+        }
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // BOOL FALSE == 0.
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        // SAFETY: `handle` is a valid open handle owned by this call.
+        unsafe { CloseHandle(handle) };
+        if ok != 0 && info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(ContentError::UnexpectedLink);
+        }
+    }
+    Ok(())
 }
 
 /// Read BY_HANDLE information from the open handle and classify the object
@@ -176,4 +339,84 @@ fn filetime_ticks_to_systemtime(ticks: u64) -> Option<SystemTime> {
     let sub100ns = (ticks % TICKS_PER_SEC) as u32;
     let unix_secs = secs.checked_sub(EPOCH_SHIFT_SECS)?;
     SystemTime::UNIX_EPOCH.checked_add(Duration::new(unix_secs, sub100ns * 100))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_time_identity_is_proven_for_regular_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("identity.bin");
+        std::fs::write(&p, b"identity-fixture").unwrap();
+        let identity = identity_via_query_handle(&p)
+            .expect("a plain tempdir file must yield object identity on Windows");
+        let (volume, inode) = match (identity.device, identity.inode) {
+            (Some(v), Some(i)) => (v, i),
+            other => panic!("identity fields must be proven: {other:?}"),
+        };
+        assert_ne!(volume, 0, "volume serial is never zero for a real volume");
+        // Same path, second query: the same live object must give the same
+        // identity (stability over the scan/hash window).
+        let again = identity_via_query_handle(&p).unwrap();
+        assert_eq!((again.device, again.inode), (Some(volume), Some(inode)));
+        if let (Some(h1), Some(h2)) = (identity.file_id_hi, again.file_id_hi) {
+            assert_eq!(h1, h2, "high file-id bits must be stable");
+        }
+    }
+
+    #[test]
+    fn scan_time_identity_is_proven_for_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dir-with-identity");
+        std::fs::create_dir(&dir).unwrap();
+        let identity = identity_via_query_handle(&dir)
+            .expect("a plain directory must yield object identity on Windows");
+        assert!(identity.device.is_some() && identity.inode.is_some());
+        // Distinct objects must never share an identity.
+        let file = tmp.path().join("a-file.bin");
+        std::fs::write(&file, b"x").unwrap();
+        let file_identity = identity_via_query_handle(&file).unwrap();
+        assert_ne!(
+            (identity.device, identity.inode),
+            (file_identity.device, file_identity.inode),
+            "a directory and a file are different objects"
+        );
+    }
+
+    #[test]
+    fn identity_distinguishes_two_files_and_matches_a_hard_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.bin");
+        let b = tmp.path().join("b.bin");
+        std::fs::write(&a, b"one").unwrap();
+        std::fs::write(&b, b"two").unwrap();
+        let ia = identity_via_query_handle(&a).unwrap();
+        let ib = identity_via_query_handle(&b).unwrap();
+        assert_ne!(
+            (ia.device, ia.inode),
+            (ib.device, ib.inode),
+            "two distinct files must have distinct identities"
+        );
+        // Hard link: same object, same identity.
+        let alias = tmp.path().join("alias.bin");
+        if std::fs::hard_link(&a, &alias).is_err() {
+            eprintln!("skipping: host refused hard-link creation");
+            return;
+        }
+        let ialias = identity_via_query_handle(&alias).unwrap();
+        assert_eq!(
+            (ia.device, ia.inode),
+            (ialias.device, ialias.inode),
+            "a hard link is the same object: identical identity"
+        );
+    }
+
+    #[test]
+    fn query_handle_on_missing_path_is_none_not_fabricated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ghost = tmp.path().join("does-not-exist.bin");
+        assert!(identity_via_query_handle(&ghost).is_none());
+    }
 }

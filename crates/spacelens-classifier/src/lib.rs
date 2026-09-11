@@ -69,6 +69,7 @@ mod tests {
             changed: None,
             device: None,
             inode: None,
+            file_id_hi: None,
             hidden: false,
             error: None,
         }

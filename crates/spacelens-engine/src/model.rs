@@ -82,8 +82,16 @@ pub struct FsEntry {
     pub changed: Option<SystemTime>,
     /// Filesystem/device identity where the platform provides it (Unix `st_dev`).
     pub device: Option<u64>,
-    /// Inode/file identity where the platform provides it (Unix `st_ino`).
+    /// Inode/file identity where the platform provides it (Unix `st_ino`;
+    /// Windows low 64 bits of the 128-bit file identifier — on NTFS the MFT
+    /// record reference including its sequence number, so a freed-and-reused
+    /// record produces a different identity). Captured through a
+    /// query-only handle (Phase 3.2) on every supported platform.
     pub inode: Option<u64>,
+    /// High 64 bits of a >64-bit file identifier (Windows `FILE_ID_INFO`,
+    /// non-zero on ReFS-class filesystems). `None` = no wider identifier
+    /// proven; the identity layer compares only what both sides proved.
+    pub file_id_hi: Option<u64>,
     /// Platform-specific hidden determination (Windows `FILE_ATTRIBUTE_HIDDEN`,
     /// Unix dot-name convention).
     pub hidden: bool,
@@ -144,6 +152,7 @@ mod tests {
             changed: None,
             device: None,
             inode: None,
+            file_id_hi: None,
             hidden: false,
             error: None,
         };
@@ -175,6 +184,7 @@ mod tests {
             changed: None,
             device: None,
             inode: None,
+            file_id_hi: None,
             hidden: false,
             error: Some(ErrorCategoryRef::NotFound),
         };
