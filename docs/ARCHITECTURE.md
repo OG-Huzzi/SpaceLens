@@ -64,6 +64,11 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   (Phase 2/2.1: `crates/spacelens-classifier`.)
 - `hasher` / `duplicates` — content hashing (SHA-256), exact-duplicate grouping
   with hardlink collapse. (Phase 3: `crates/spacelens-identity`, docs/IDENTITY.md.)
+  Phase 3.1 hardened the same layer: no-follow content opens (links that
+  replace an observed file are refused, never followed), observed-vs-opened
+  object verification (`Replaced`), handle-proven mutation brackets
+  (length + change-time before/after the read), and globally bounded
+  candidate staging with exact skip accounting (`CompletedWithLimits`).
   The persistent hash cache belongs with persistence (later phase); Phase 3
   deliberately added no database.
 - `recommender` — produces opportunities with reasons + recovery estimates.

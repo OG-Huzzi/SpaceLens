@@ -21,6 +21,19 @@ pub const DEFAULT_MAX_GROUP_MEMBERS_REPORTED: usize = 64;
 /// files); overflow is counted and reported, never silently dropped.
 pub const DEFAULT_MAX_CANDIDATES_PER_GROUP: usize = 1_000_000;
 
+/// Hard cap on how many **distinct sizes** the pipeline tracks during
+/// ingest. Beyond this, members of untracked sizes are counted into
+/// `candidatesSkippedBySizeTracking` and the report status becomes
+/// `CompletedWithLimits` — never a silently truncated "Completed".
+pub const DEFAULT_MAX_TRACKED_SIZE_GROUPS: usize = 100_000;
+
+/// **Global** cap on in-memory candidate records across all size groups
+/// (Contract A, docs/IDENTITY.md §boundedness). The per-group cap cannot
+/// bound total memory: a hostile tree with many distinct sizes defeats it.
+/// This cap does. Every record beyond it is counted into
+/// `candidatesSkippedGlobalCap` and the run reports `CompletedWithLimits`.
+pub const DEFAULT_MAX_TRACKED_CANDIDATES: usize = 1_000_000;
+
 /// Bounded default worker pool. The scanner's model: metadata/content work
 /// is I/O-bound, an 8 GB machine is never saturated, callers may override.
 /// Never thread-per-file; never unbounded.
@@ -43,8 +56,9 @@ pub fn default_hash_threads() -> usize {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MutationPolicy {
-    /// Reject any file whose observed metadata (kind, size) or length does
-    /// not match exactly what was read. **Default and only implemented
+    /// Reject any file whose handle-proven state disagrees with the
+    /// observation, or whose state moves during the read (pre/post
+    /// length + change-time brackets). **Default and only implemented
     /// policy** — honesty over throughput.
     #[default]
     Reject,

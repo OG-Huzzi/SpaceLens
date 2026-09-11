@@ -21,6 +21,11 @@ No phase starts without authorization recorded in `CURRENT_PHASE.md`.
 - [ ] **PHASE 3 — Duplicate detection.** SHA-256 candidate hashing, hardlink
   collapse, hash cache. Success: zero false-positive tolerance suite green;
   cache-hit rescan of unchanged tree.
+  - [x] **PHASE 3.1 — identity correctness hardening.** No-follow content
+    opens (link-TOCTOU closed), observed-vs-opened object verification,
+    same-length mutation brackets, globally bounded staging with exact
+    skip accounting. Success: adversarial suite green on all three OSes
+    in CI; docs claim nothing the code does not provide.
 - [ ] **PHASE 4 — Cleanup + safety engine.** Planner, safety validator with veto
   tests, Trash/quarantine adapters, preview + verify. Success: adversarial
   safety suite green on all three OSes in CI.

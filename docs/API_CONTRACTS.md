@@ -43,7 +43,7 @@ Typed everywhere: `{ code, message, detail? }`. Stable codes, e.g.
 UI renders `message` verbatim for known codes (copy reviewed with safety doc);
 unknown codes show a generic safe fallback, never a stack trace.
 
-## Identity contracts (Phase 3)
+## Identity contracts (Phase 3 / 3.1)
 
 Namespace: `spacelens.v1.identity.*` (engine-side in `crates/spacelens-identity`;
 IPC payload shapes follow the same camelCase + bytes-as-integers rules as
@@ -52,7 +52,26 @@ a content identity is meaningless without its algorithm tag. Duplicate groups
 report `logicalDuplicateBytes` exactly and `recoverableBytes` only with
 `Exact`/`Estimated` accounting evidence — see docs/IDENTITY.md for the full
 semantics (hard links, mutation policy, zero-byte policy, deterministic
-ordering). No IPC command surfaces these yet; the types are the contract for
+ordering, observed-vs-opened object verification, no-follow content opens).
+
+Phase 3.1 contract additions (all additive within `v1`):
+
+- `DuplicateStatus` adds `CompletedWithLimits`: any candidate skipped by a
+  global bound (distinct-size tracking cap, global record cap, per-group
+  cap overflow is reported via counters) makes the report incomplete —
+  `Completed` is only ever emitted when nothing was skipped. The exact
+  skip counts travel in `PipelineStats`
+  (`candidatesSkippedByCap`, `candidatesSkippedSizeTracking`,
+  `candidatesSkippedGlobalCap`, `candidatesUntrackedTotal`).
+- `HashFailureKind` adds `Replaced`: the opened object is not the object
+  the scanner observed (provable on Unix via st_dev/st_ino at scan time;
+  Windows path-stats cannot prove observation-side identity and degrade
+  honestly — documented limitation, never fabricated).
+- `FsEntry` adds `changed` (observation-time metadata-change stamp, Unix
+  `st_ctime`): used by the scan→open mutation bracket; `null` where
+  unprovable.
+
+No IPC command surfaces these yet; the types are the contract for
 future phases and are covered by engine tests.
 
 ## Rules for evolution

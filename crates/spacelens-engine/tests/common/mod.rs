@@ -272,6 +272,7 @@ impl PlatformFs for FakeFs {
             modified: Some(SystemTime::UNIX_EPOCH),
             created: None,
             accessed: None,
+            changed: None,
             device: Some(1),
             inode: Some(0),
             reparse: false,

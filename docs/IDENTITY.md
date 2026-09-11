@@ -1,8 +1,9 @@
-# SpaceLens — File Identity, Hashing & Duplicate Relationships (Phase 3)
+# SpaceLens — File Identity, Hashing & Duplicate Relationships (Phase 3 / 3.1)
 
-Status: implemented and locally verified on Windows; CI matrix verification
-recorded in `progress/PHASE_3_STATUS.md`. This document describes the
-implementation as it exists — every claim here is backed by a test.
+Status: Phase 3.1 hardened and verified. CI matrix verification recorded in
+`progress/PHASE_3_STATUS.md`. This document describes the implementation as
+it exists — every claim here is backed by a test, and every limitation is
+stated where it applies.
 
 ## What "identity" means (three distinct concepts)
 
@@ -43,52 +44,171 @@ metadata are candidates:
 | `EntryKind::File`, no error | yes | — |
 | `EntryKind::File` with `error` | no | `ObservationError` (size unreliable) |
 | `EntryKind::Dir` | no | `Directory` |
-| `EntryKind::Link(_)` (symlink/junction/reparse) | no | `Link` — **links are recorded, never followed** (Phase 1 rule preserved) |
+| `EntryKind::Link(_)` (symlink/junction/reparse) | no | `Link` — **links are recorded, never followed** |
 | `EntryKind::Other` | no | `Special` |
 
 The duplicate layer never crawls the filesystem and never opens files by
 itself: content is read only through the engine's `PlatformFs::read_content`
 boundary. There is no second traversal mechanism.
 
-## Pipeline (`pipeline.rs`)
+## Content-open safety: links are never followed, at scan *and* at hash
+
+Phase 3 guaranteed "links are never followed" at *scan* time only: the
+scanner records links without recursing. Phase 3.1 closes the second window —
+**a path that became a link after the scan is refused at hash time too**:
+
+- **Unix:** the content open uses `open(O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`
+  (`libc` constants — raw values differ per Unix flavor, so hand-rolled
+  constants would silently apply the wrong flags on an unlisted target).
+  A final component that is now a symlink fails with `ELOOP` → typed
+  refusal; its target is never touched. `O_NONBLOCK` means a FIFO that
+  replaced the file cannot block a hashing worker; the post-open fstat
+  then rejects it as a non-regular object.
+- **Windows:** the content open uses `FILE_FLAG_OPEN_REPARSE_POINT` (+ the
+  required `FILE_FLAG_BACKUP_SEMANTICS`), which opens a reparse point
+  *itself* rather than traversing to its target. The handle is immediately
+  inspected with `GetFileInformationByHandle`: a reparse attribute refuses
+  the open (typed refusal), a directory attribute refuses it as a
+  non-regular object.
+- **Intermediate path components** still resolve normally. A parent
+  directory swapped to a link resolves to a different object — which the
+  observed-vs-opened identity check (below) catches on Unix; on Windows the
+  length/change-time brackets and content grouping prevent a false
+  relationship (the same-bytes group is real for whatever object was hashed,
+  and object replacement is detected via `CompletedWithLimits`-style honesty
+  in the failure list, not silently).
+
+Refusal outcomes are typed failures (`HashFailureKind::Changed` with an
+explicit "became a link/directory" message), never `Vanished`, never a
+group. Adversarial tests pin each variant (scan→symlink, scan→directory,
+broken symlink, FIFO, junction).
+
+## Observed object vs opened object (Phase 3.1)
+
+The pipeline receives an `FsEntry` observed earlier and later opens the same
+path. Two identities are compared:
 
 ```text
-Observed FsEntry
-      ↓  ingest: eligibility contract
-Size grouping             (same size ⇒ candidacy only, never equality)
-      ↓  only groups with ≥2 members; singletons cost zero read bytes
-Bounded hashing pool      (fixed worker count, bounded job queue)
-      ↓
-Content identity grouping (same (size, hash) ⇒ same bytes)
-      ↓  deterministic ordering
-DuplicateReport + typed events + typed failures
+observation-time (device, inode)   — recorded by the scanner (Unix st_dev/st_ino)
+        vs
+handle-proven (device, inode)     — fstat / GetFileInformationByHandle at hash time
 ```
 
-- **Candidate filtering:** files whose size matches no other eligible file
-  are never hashed (`singleton_files` counts them). Same size is *candidacy*,
-  never equality — same-size different-content files are hashed and then not
-  grouped (`size_groups_without_duplicates` counts them).
-- **Concurrency:** a fixed bounded worker pool (default `clamp(cpus, 2, 4)`,
-  never thread-per-file), fed pre-grouped jobs through a bounded channel
-  (natural backpressure). The queue holds paths, never content. Memory stays
-  flat against file count; hard caps (`max_candidates_per_group`,
-  `max_group_members_reported`) bound even hostile trees, with overflow
-  counted, never silent.
+- **Both provable and equal** → the hashed object is the observed object.
+  (Unix: always, from any filesystem that reports stable st_dev/st_ino.)
+- **Both provable and different** → the path now names a different object:
+  typed `HashFailureKind::Replaced`; the impostor is never hashed into the
+  observed file's identity. Hard links are NOT replacements — aliases share
+  object identity, so they pass and group as the alias relationship they are.
+- **Either side unprovable** → the comparison degrades honestly: the file is
+  hashed under the remaining checks (length/change-time brackets, content
+  grouping). Identity is never fabricated. On Windows the *observation-time*
+  identity is unavailable: std's path-stat surface does not expose the
+  volume serial / file index on stable (`windows_by_handle` is unstable), so
+  scan-side `FsEntry.device/inode` are `None` and Windows runs permanently
+  in this degraded mode for the *replacement* check (the handle-side
+  identity is still proven there and used for hard-link accounting).
+
+The published member `object_id` is the **handle-proven** identity (the
+object the digest was actually computed from — hard-link accounting depends
+on this), falling back to the observation identity when the handle could
+not prove one.
 
 ## Mutation policy: file changed during hashing
 
 Policy: **Reject** (`MutationPolicy::Reject` — the default and only
-implemented policy). A file is accepted only when ALL hold:
+implemented policy). A digest is published only when the read is proven to
+describe one stable state of the object. The full check sequence, all from
+the open handle (fstat semantics — never a second path resolution):
 
-1. the open handle's length equals the size observed at scan time,
-2. every chunk is read with per-chunk cancellation checks,
-3. total bytes read equals the observed length.
+1. **observed vs opened identity** (above) — else typed `Replaced`;
+2. **pre-read length == observed size** — else typed `Changed`;
+3. **scan→open change bracket**: the handle's metadata-change stamp
+   (`st_ctime` / NTFS `ChangeTime`) equals the scanner's observation of it,
+   where both sides could prove one — else `Changed`. This catches the
+   same-length rewrite that happens *between* scan and open and preserves
+   its mtime;
+4. every chunk is read with per-chunk cancellation checks; interrupted
+   reads are retried inside the platform layer;
+5. **total bytes read == observed size** — else `Changed`;
+6. **post-read length == pre-read length** — else `Changed`;
+7. **post-read change stamp == pre-read change stamp** (where the platform
+   maintains one) — else `Changed`. This catches the same-length rewrite
+   *during* the read — the A→B same-length swap that a length-only check
+   can never see.
 
-Any mismatch → typed `HashFailureKind::Changed` and the file is excluded.
-A vanished file → `Vanished`. Cancellation → the run unwinds to
-`DuplicateStatus::Cancelled`; **no partial state is ever published as a
-completed report**. Automatic retries are deliberately not performed — a
-deterministic single-pass result is explainable and testable.
+The change stamp (`st_ctime`/`ChangeTime`) moves on content rewrites even
+when mtime is deliberately preserved (`utimensat` bumps ctime) and cannot
+be set independently from userspace — it is the strongest mid-read signal
+each OS offers. Where the filesystem does not maintain it, the check
+degrades to length + mtime + content grouping and the residual window is
+the documented limitation below.
+
+Any rejection → the file is excluded from grouping entirely (it can neither
+create nor destroy a relationship) with a typed failure. A vanished file →
+`Vanished`. Cancellation → the run unwinds to `DuplicateStatus::Cancelled`;
+**no partial state is ever published as a completed report**. Automatic
+retries are deliberately not performed — a deterministic single-pass result
+is explainable and testable.
+
+## Boundedness contract (Phase 3.1, Contract A)
+
+Phase 3's staging held *every* eligible entry in a
+`BTreeMap<size, Vec<Member>>` with only a per-group cap — many distinct
+sizes scaled memory with input. Phase 3.1 replaces it with **streaming
+ingest under two global caps**:
+
+- `max_tracked_size_groups` (default 100,000): the number of *distinct
+  sizes* the staging map may track,
+- `max_tracked_candidates` (default 1,000,000): the total number of staged
+  member records across all groups.
+
+Every member beyond a cap increments an exact counter
+(`candidatesSkippedSizeTracking` / `candidatesSkippedGlobalCap` /
+`candidatesSkippedByCap`), and any capped run reports
+**`DuplicateStatus::CompletedWithLimits`** — a `Completed` report is only
+ever produced when nothing was skipped. Zero-byte files under the default
+policy are counted with one counter, never staged.
+
+Secondary buffers are bounded by the same caps:
+
+- the job channel is bounded (`threads × 4`) with natural backpressure,
+- the result buffer holds one record per *accepted* candidate — bounded by
+  the staging caps,
+- failure detail is capped at 256 entries with exact overflow counts,
+- group member detail is capped at 64 with exact `member_count`.
+
+A counting-allocator test proves the property mechanically: ingesting
+100,000 hostile distinct-size entries under low caps peaks at the same
+staging-memory order as 10,000 entries (and under a few MB absolute),
+where uncapped staging would have grown ~10 MB per 100k records.
+
+The deterministic job order (size ascending, then first-member path bytes)
+makes cap decisions order-independent: the same input in any observation
+order produces byte-identical reports, capped or not.
+
+## Pipeline (`pipeline.rs`)
+
+```text
+Observed FsEntry  — streamed one at a time, never fully buffered
+      ↓  ingest: eligibility contract + global caps (exact skip counters)
+Size grouping             (same size ⇒ candidacy only, never equality)
+      ↓  only groups with ≥2 members; singletons cost zero read bytes
+Bounded hashing pool      (fixed worker count, bounded job queue)
+      ↓  7-check mutation/identity policy (above)
+Content identity grouping (same (size, hash) ⇒ same bytes)
+      ↓  deterministic ordering
+DuplicateReport + typed events + typed failures + CompletedWithLimits
+```
+
+- **Concurrency:** a fixed bounded worker pool (default `clamp(cpus, 2, 4)`,
+  never thread-per-file), fed pre-grouped jobs through a bounded channel
+  (natural backpressure). The queue holds paths, never content.
+- **Candidate filtering:** files whose size matches no other eligible file
+  are never hashed (`singleton_files` counts them). Same size is
+  *candidacy*, never equality — same-size different-content files are
+  hashed and then not grouped (`size_groups_without_duplicates` counts
+  them).
 
 ## Error semantics
 
@@ -98,7 +218,8 @@ empty hash, never a silent skip, never a false relationship:
 | `HashFailureKind` | Meaning |
 |---|---|
 | `Hash { category }` | open/read failed; engine-categorized cause (permission denied, in use, transient, …) |
-| `Changed` | mutation-policy rejection (length mismatch before/after read) |
+| `Changed` | the path no longer names a regular file (link/junction/directory/FIFO replaced it), or a mutation-policy rejection (length/bytes/change-stamp mismatch) |
+| `Replaced` | the opened object is not the object the scanner observed (identity disagreement, where both are provable — Unix) |
 | `Vanished` | file disappeared between observation and hashing (open or mid-read ENOENT) |
 | `Cancelled` | consumer-aborted read (only when not globally cancelled — that unwinds instead) |
 
@@ -137,10 +258,10 @@ counts plus at most 256 detail entries (`failures_truncated` for overflow).
 All zero-byte files share one content identity — correct, but a hostile
 tree (a million empty files) would form an enormous group with zero storage
 value. Default policy: `group_zero_byte_files: false` — same-size zero-byte
-sets are *counted* (`zero_byte_matches_ungrouped`), not grouped. Callers may
-opt in; opted-in groups carry `ContentHash::empty()`,
-`logical_duplicate_bytes = 0`, `recoverable_bytes = Some(0)` — an honest
-zero.
+sets are *counted* (`zero_byte_matches_ungrouped`, one counter, no staged
+records), not grouped. Callers may opt in; opted-in groups carry
+`ContentHash::empty()`, `logical_duplicate_bytes = 0`,
+`recoverable_bytes = Some(0)` — an honest zero.
 
 ## Deterministic ordering
 
@@ -148,10 +269,11 @@ zero.
 - Members within a group: path bytes ascending (`MemberOrder::PathAscending`,
   locale-independent).
 - The representative is the first member in that order.
-- The pipeline stage maps are `BTreeMap`s; no HashMap iteration order ever
-  reaches output. Repeated runs over the same input produce identical
-  logical reports (asserted by tests, including the timestamps-are-not-part-
-  of-the-contract distinction).
+- All stage maps are `BTreeMap`s; job order is normalized before dispatch;
+  cap decisions are order-independent. No HashMap iteration order, thread
+  scheduling, or OS enumeration order ever reaches output. Repeated runs
+  over the same input produce identical logical reports (asserted by
+  tests, including under shuffled observation order and active caps).
 
 ## Progress
 
@@ -165,25 +287,43 @@ skip.
 ## API surface (`spacelens.v1.identity.*`)
 
 `run_duplicates`, `DuplicateOptions`, `DuplicateReport`, `DuplicateGroup`,
-`DuplicateMember`, `DuplicateStatus`, `DuplicateProgressEvent`,
-`PipelineStats`, `EligibilityStats`, `ContentHash`, `HashAlgorithm`,
-`HashFailure(Kind)`, `StorageAccounting`, `MutationPolicy`,
+`DuplicateMember`, `DuplicateStatus` (incl. `CompletedWithLimits`),
+`DuplicateProgressEvent`, `PipelineStats` (incl. the exact skip counters),
+`EligibilityStats`, `ContentHash`, `HashAlgorithm`, `HashFailure(Kind)`
+(incl. `Replaced`), `StorageAccounting`, `MutationPolicy`,
 `ContentReaderFactory`, `DefaultReaderFactory`. Additive changes only
 within `v1` (docs/API_CONTRACTS.md rules).
 
 ## Known limitations (honest)
 
-1. Windows object identity uses `dwVolumeSerialNumber` + 32-bit file index;
-   on filesystems where the index is not stable, identity degrades to
-   `Estimated` (never fabricated).
-2. A file that changes *and changes back* within one hash read while
-   keeping its length is accepted; window is one sequential pass. Content
-   identity still describes bytes that existed; a later scan would correct
-   grouping. (Detection of mid-read torn writes needs OS-specific buffering
-   guarantees — out of scope, documented here.)
-3. Cross-device duplicate detection works, but `device`/`inode` are only
-   proven on Unix and via the Windows file-index query; `Estimated`
-   accounting is the honest default where they are absent.
-4. No hash cache yet: unchanged files re-hash on a later Phase 3 run. The
+1. **Mid-read torn writes where the FS does not maintain a change stamp:**
+   a same-length rewrite during the read is caught by the change-time
+   bracket (check 7) only where the platform provides `st_ctime`/NTFS
+   `ChangeTime`. On filesystems without it the digest may describe a
+   mixture of two states of a file that was rewritten mid-read *while
+   preserving both length and mtime*. The window is one sequential read;
+   a later scan corrects grouping. (Detection of arbitrary torn writes
+   needs OS snapshot semantics — out of scope, documented here.)
+2. **Windows scan-time object identity is unavailable** (std's path-stat
+   surface does not expose volume serial / file index on stable): the
+   observed-vs-opened *replacement* check runs in degraded mode on
+   Windows. Handle-proven identity at hash time still provides hard-link
+   accounting (`Exact`/`Estimated` as evidenced). A path swapped to a
+   different regular file with different content still cannot group
+   (content differs); a swap to *identical* content is undetectable on
+   Windows scan-side and — semantically — produces a true content
+   relationship for whatever object was hashed.
+3. **Windows object identity granularity:** `dwVolumeSerialNumber` +
+   64-bit file index from `BY_HANDLE_FILE_INFORMATION`; on filesystems
+   where the index is not stable, identity degrades to `Estimated`
+   (never fabricated).
+4. **Intermediate path components** are resolved by the OS at open time
+   (no `openat(O_PATH)` walk is performed — it would add complexity without
+   closing the *observable* attack on Unix, where the identity comparison
+   already proves the final object; on Windows the handle inspection
+   proves kind). A parent swap to a link followed by a *different regular
+   file with identical content* is caught only by identity comparison
+   (Unix) and is semantically indistinguishable on Windows.
+5. **No hash cache yet:** unchanged files re-hash on a later run. The
    persistent cache belongs with persistence (a later phase, per the
    master plan — no SQLite was added here).

@@ -24,6 +24,11 @@ pub enum HashFailureKind {
     /// The file's kind changed between observation and hashing (e.g. it was
     /// replaced by a directory or a link). Never hashed through the new type.
     Changed,
+    /// The path now names a **different object** than the scanner observed:
+    /// observation-time `(device, inode)` disagrees with the handle-proven
+    /// identity of the opened file (where the platform can prove both).
+    /// Never silently accepted as the observed file.
+    Replaced,
     /// The file vanished between observation and hashing (or mid-hash, per
     /// the mutation policy).
     Vanished,
@@ -97,6 +102,17 @@ mod tests {
             HashFailureKind::Changed,
             HashFailureKind::Vanished,
             "a policy-rejected mutation must never be reported as a vanish"
+        );
+        assert_ne!(
+            HashFailureKind::Replaced,
+            HashFailureKind::Changed,
+            "an object replacement is not a content mutation: a same-length \
+             replacement must be typed Replaced, never Changed"
+        );
+        assert_ne!(
+            HashFailureKind::Replaced,
+            HashFailureKind::Vanished,
+            "an object replacement is not a vanish"
         );
     }
 }

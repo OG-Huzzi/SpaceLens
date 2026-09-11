@@ -623,6 +623,7 @@ fn entries_with_scan_errors_are_ineligible() {
         modified: None,
         created: None,
         accessed: None,
+        changed: None,
         device: None,
         inode: None,
         hidden: false,

@@ -1,12 +1,51 @@
 # SpaceLens — Current Phase
 
-- **Current phase:** PHASE 3 — File identity, hashing & duplicate
-  relationships (on top of verified Phases 1, 2, 2.1)
-- **Status:** PHASE 3 — VERIFIED (full local gate green; CI run
-  `34454636871` for `e453dd1` success — all 4 jobs; see PHASE_3_STATUS.md)
-- **Last updated:** 2026-09-10 (Phase 3 identity engine)
+- **Current phase:** PHASE 3.1 — identity-engine correctness, TOCTOU safety
+  & true boundedness (hardening pass over verified Phase 3)
+- **Status:** PHASE 3.1 — VERIFIED (full local gate green; CI verified per
+  PHASE_3_1_STATUS.md)
+- **Last updated:** 2026-09-11 (Phase 3.1 hardening)
 
-## What happened (2026-09-10, Phase 3)
+## What happened (2026-09-11, Phase 3.1)
+
+An audit-identified hardening pass over the Phase 3 identity/duplicate
+subsystem. Nothing outside Observation → Classification → Identity →
+Relationships was touched. The six audit defects were confirmed in source,
+repaired, and pinned with adversarial tests:
+
+1. **Same-size mutation escaped** the old length-only check → the read is
+   now bracketed by handle-proven state (length + change-time
+   `st_ctime`/NTFS `ChangeTime` before/after the read) plus a scan→open
+   change-stamp bracket. A same-length mid-read rewrite is rejected typed
+   `Changed`.
+2. **Observed object vs opened object** was never compared → the pipeline
+   now compares observation-time `(device, inode)` with handle-proven
+   identity; disagreement is typed `Replaced` (new kind). Windows
+   path-stats cannot prove scan-time identity (std limitation) and degrade
+   honestly — documented, never fabricated.
+3. **Symlink/junction TOCTOU at hash time** → the content open is now
+   no-follow everywhere: Unix `O_NOFOLLOW|O_NONBLOCK` (libc constants),
+   Windows `FILE_FLAG_OPEN_REPARSE_POINT` + handle inspection (reparse →
+   refused; directory/FIFO → refused). A link that replaced an observed
+   file is never followed, never hashed, typed failure.
+4. **Staging was not globally bounded** (per-group cap only; many distinct
+   sizes scaled memory) → streaming ingest under two global caps
+   (`max_tracked_size_groups`, `max_tracked_candidates`) with exact skip
+   counters and a `CompletedWithLimits` status — `Completed` is only ever
+   emitted when nothing was skipped. A counting-allocator test proves peak
+   staging does not scale with entry count.
+5. **Result buffering** bounded transitively by the same caps (one record
+   per accepted candidate).
+6. **Docs overstated guarantees** → IDENTITY.md/API_CONTRACTS.md rewritten to
+   match the implementation exactly, with every residual window stated as a
+   documented limitation.
+
+24 new adversarial tests (TOCTOU swaps, same-length rewrites, identity
+degradation modes, cap accounting, shuffled-order determinism under caps,
+cancellation under pressure, memory-boundedness proof). All Phase 1/2/2.1/3
+tests kept green. Full record in PHASE_3_1_STATUS.md.
+
+## Previous pass (2026-09-10, Phase 3)
 
 The RELATE layer: content identity (streaming SHA-256 behind the new
 `PlatformFs::read_content` boundary), eligibility contract, size-group

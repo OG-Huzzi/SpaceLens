@@ -74,6 +74,12 @@ pub struct FsEntry {
     /// Creation time where the platform provides it.
     pub created: Option<SystemTime>,
     pub accessed: Option<SystemTime>,
+    /// Metadata-change timestamp (Unix `st_ctime`) where the scanner
+    /// observed it. `None` on Windows path-stats (the NTFS ChangeTime is
+    /// not exposed by std's stat surface) and on filesystems that do not
+    /// maintain it. The identity layer compares this with the handle-proven
+    /// change time to catch same-length rewrites that preserve mtime.
+    pub changed: Option<SystemTime>,
     /// Filesystem/device identity where the platform provides it (Unix `st_dev`).
     pub device: Option<u64>,
     /// Inode/file identity where the platform provides it (Unix `st_ino`).
@@ -135,6 +141,7 @@ mod tests {
             modified: None,
             created: None,
             accessed: None,
+            changed: None,
             device: None,
             inode: None,
             hidden: false,
@@ -165,6 +172,7 @@ mod tests {
             modified: None,
             created: None,
             accessed: None,
+            changed: None,
             device: None,
             inode: None,
             hidden: false,

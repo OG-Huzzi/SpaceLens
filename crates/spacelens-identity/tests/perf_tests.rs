@@ -69,6 +69,7 @@ fn synthetic_entry(i: u64, family: &str, total: u64) -> FsEntry {
         modified: None,
         created: None,
         accessed: None,
+        changed: None,
         device: None,
         inode: None,
         hidden: false,
@@ -176,8 +177,27 @@ impl ContentReader for SyntheticChunks {
     fn file_identity(&self) -> spacelens_engine::FileIdentity {
         spacelens_engine::FileIdentity::unknown()
     }
+    fn pre_stat(&self) -> io::Result<spacelens_engine::platform::HandleStat> {
+        Ok(self.stat())
+    }
+    fn post_stat(&self) -> io::Result<spacelens_engine::platform::HandleStat> {
+        Ok(self.stat())
+    }
     fn file_len(&self) -> io::Result<u64> {
         Ok(self.size)
+    }
+}
+
+impl SyntheticChunks {
+    /// Stable synthetic stat: the stream never mutates, so pre and post
+    /// agree by construction (an honest stand-in for a stable file).
+    fn stat(&self) -> spacelens_engine::platform::HandleStat {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        spacelens_engine::platform::HandleStat {
+            len: self.size,
+            modified: Some(UNIX_EPOCH),
+            changed: Some(SystemTime::UNIX_EPOCH),
+        }
     }
 }
 
@@ -299,6 +319,7 @@ fn huge_file_streams_beyond_4gib() {
         modified: None,
         created: None,
         accessed: None,
+        changed: None,
         device: None,
         inode: None,
         hidden: false,
@@ -357,6 +378,7 @@ fn u64_sizes_group_across_chunk_boundaries() {
         modified: None,
         created: None,
         accessed: None,
+        changed: None,
         device: None,
         inode: None,
         hidden: false,

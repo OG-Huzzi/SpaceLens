@@ -29,6 +29,7 @@ fn entry(id: u64, parent: Option<u64>, path: &str, kind: EntryKind) -> FsEntry {
         modified: None,
         created: None,
         accessed: None,
+        changed: None,
         device: None,
         inode: None,
         hidden: false,

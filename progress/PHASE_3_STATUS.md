@@ -31,10 +31,14 @@ never crawls the filesystem; it consumes observed `FsEntry` values.
 - **Pipeline:** ingest → eligibility contract (observer-proved regular files
   only) → size grouping (same size ⇒ candidacy, never equality; singletons
   never hashed) → bounded worker pool (bounded channel, bounded candidates
-  per group) → mutation-checked streaming hashing (pre-lstat / open+fstat /
-  per-chunk cancel checks / post-lstat kind+size+mtime match; else typed
+  per group) → mutation-checked streaming hashing (open+fstat length +
+  bytes-read checks; per-chunk cancel checks; else typed
   `Changed`/`Vanished`, never a false relationship) → deterministic grouping
   and ordering (size asc, then hash bytes asc).
+  *(Phase 3.1 correction of this record: the "pre-lstat / post-lstat
+  kind+size+mtime match" wording described checks that were not in the
+  shipped code. The 3.1 hardening implemented the full bracket contract —
+  see PHASE_3_1_STATUS.md and docs/IDENTITY.md §mutation policy.)*
 - **Honest storage accounting:** `logical_duplicate_bytes` always exact;
   `recoverable_bytes = size × (distinct_objects − 1)` only with
   `StorageAccounting::Exact` (every member's handle identity known); hard-link

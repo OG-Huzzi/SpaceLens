@@ -18,6 +18,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
 ] }
 
+# Phase 3.1: Unix no-follow content open. libc is used ONLY for platform
+# constants (O_NOFOLLOW/O_NONBLOCK/O_CLOEXEC, ELOOP/ENXIO), whose raw
+# values differ per Unix flavor; bindings-only crate, no transitive
+# dependencies, maintained by the Rust project.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 serde_json = "1"
