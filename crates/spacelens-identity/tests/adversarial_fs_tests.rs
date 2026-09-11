@@ -180,10 +180,22 @@ fn replaced_object_with_observed_identity_is_typed_replaced() {
     observed_b.device = Some(md_b.dev());
     observed_b.inode = Some(md_b.ino());
 
-    // Replace b's object at the same path (delete + recreate = new inode),
-    // keeping identical content: ONLY the identity check can catch it.
-    std::fs::remove_file(&b).unwrap();
-    std::fs::write(&b, content).unwrap();
+    // Replace the object at b's path with a DIFFERENT object holding
+    // identical content: ONLY the identity check can catch it. The
+    // impostor is created while b still exists (concurrent objects are
+    // guaranteed distinct inodes) and then renamed over b — POSIX rename
+    // atomically swaps the directory entry, keeping the impostor's inode.
+    // (delete + recreate is NOT deterministic: ext4 reuses the freed
+    // inode immediately, making the impostor identity-indistinguishable.)
+    let impostor = tmp.path().join("impostor.bin");
+    std::fs::write(&impostor, content).unwrap();
+    let md_impostor = std::fs::symlink_metadata(&impostor).unwrap();
+    assert_ne!(
+        (md_b.dev(), md_b.ino()),
+        (md_impostor.dev(), md_impostor.ino()),
+        "fixture: concurrent objects must have distinct identities"
+    );
+    std::fs::rename(&impostor, &b).unwrap();
 
     let report = run(vec![file_entry(1, &a, size), observed_b]);
     assert!(
