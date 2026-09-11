@@ -81,28 +81,22 @@ fn handle_object_id(path: &Path) -> Option<(u64, u64)> {
 }
 
 /// Windows privilege probe: can this host create file symlinks / junctions?
+/// (On unix every host can create symlinks, so the probe is dead code there.)
+#[cfg(windows)]
 fn windows_can_create_links(root: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        let probe = root.join("_probe_link");
+    let probe = root.join("_probe_link");
+    let _ = std::fs::remove_file(&probe);
+    if std::os::windows::fs::symlink_file(root, &probe).is_ok() {
         let _ = std::fs::remove_file(&probe);
-        if std::os::windows::fs::symlink_file(root, &probe).is_ok() {
-            let _ = std::fs::remove_file(&probe);
-            return true;
-        }
-        let dir_probe = root.join("_probe_junction");
+        return true;
+    }
+    let dir_probe = root.join("_probe_junction");
+    let _ = std::fs::remove_dir(&dir_probe);
+    if std::os::windows::fs::symlink_dir(root, &dir_probe).is_ok() {
         let _ = std::fs::remove_dir(&dir_probe);
-        if std::os::windows::fs::symlink_dir(root, &dir_probe).is_ok() {
-            let _ = std::fs::remove_dir(&dir_probe);
-            return true;
-        }
-        false
+        return true;
     }
-    #[cfg(not(windows))]
-    {
-        let _ = root;
-        true
-    }
+    false
 }
 
 // ---------------------------------------------------------------------------

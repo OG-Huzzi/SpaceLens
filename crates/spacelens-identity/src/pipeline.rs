@@ -998,3 +998,669 @@ fn finish(
     sink(event);
     report
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::duplicate::StorageAccounting;
+    use crate::policy::{ContentReaderFactory, DefaultReaderFactory};
+    use spacelens_engine::platform::{ContentError, ContentReader, HandleStat};
+    use std::collections::HashMap;
+    use std::io;
+    use std::path::Path;
+    use std::sync::Mutex as StdMutex;
+
+    /// In-memory content source implementing the factory over fixed bytes.
+    /// Serves `name → content`; missing names produce typed NotFound.
+    struct MemReader {
+        files: StdMutex<HashMap<PathBuf, Vec<u8>>>,
+    }
+
+    impl MemReader {
+        fn new(files: &[(&str, &[u8])]) -> Self {
+            MemReader {
+                files: StdMutex::new(
+                    files
+                        .iter()
+                        .map(|(p, c)| (PathBuf::from(p), c.to_vec()))
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl ContentReaderFactory for MemReader {
+        fn read(
+            &self,
+            path: &Path,
+            feed: &mut dyn FnMut(&mut dyn ContentReader) -> io::Result<()>,
+        ) -> Result<(), ContentError> {
+            let content = self
+                .files
+                .lock()
+                .unwrap()
+                .get(path)
+                .cloned()
+                .ok_or_else(|| ContentError::OpenFailed(io::Error::from_raw_os_error(2)))?;
+            let mut pos = 0usize;
+            let mut reader = MemChunkReader {
+                content: &content,
+                pos: &mut pos,
+            };
+            feed(&mut reader).map_err(ContentError::ReadFailed)
+        }
+    }
+
+    struct MemChunkReader<'a> {
+        content: &'a [u8],
+        pos: &'a mut usize,
+    }
+
+    impl ContentReader for MemChunkReader<'_> {
+        fn read_chunk(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+            if *self.pos >= self.content.len() {
+                return Ok(None);
+            }
+            let n = buf.len().min(self.content.len() - *self.pos);
+            buf[..n].copy_from_slice(&self.content[*self.pos..*self.pos + n]);
+            *self.pos += n;
+            Ok(Some(n))
+        }
+        fn file_identity(&self) -> spacelens_engine::FileIdentity {
+            // Distinct per path is unnecessary for these tests: None exercises
+            // the Estimated accounting path.
+            spacelens_engine::FileIdentity::unknown()
+        }
+        fn pre_stat(&self) -> io::Result<HandleStat> {
+            Ok(self.stat())
+        }
+        fn post_stat(&self) -> io::Result<HandleStat> {
+            Ok(self.stat())
+        }
+    }
+
+    impl MemChunkReader<'_> {
+        /// Stable synthetic stat: the in-memory file never mutates.
+        fn stat(&self) -> HandleStat {
+            use std::time::SystemTime;
+            HandleStat {
+                len: self.content.len() as u64,
+                modified: Some(SystemTime::UNIX_EPOCH),
+                changed: Some(SystemTime::UNIX_EPOCH),
+            }
+        }
+    }
+
+    fn entry(id: u64, path: &str, size: u64) -> FsEntry {
+        FsEntry {
+            id,
+            parent_id: None,
+            path: PathBuf::from(path),
+            kind: spacelens_engine::EntryKind::File,
+            size,
+            allocated_size: None,
+            modified: None,
+            created: None,
+            accessed: None,
+            changed: None,
+            device: None,
+            inode: None,
+            hidden: false,
+            error: None,
+        }
+    }
+
+    fn dir(path: &str) -> FsEntry {
+        FsEntry {
+            id: 99,
+            parent_id: None,
+            path: PathBuf::from(path),
+            kind: spacelens_engine::EntryKind::Dir,
+            size: 0,
+            allocated_size: None,
+            modified: None,
+            created: None,
+            accessed: None,
+            changed: None,
+            device: None,
+            inode: None,
+            hidden: false,
+            error: None,
+        }
+    }
+
+    fn no_events(_: DuplicateProgressEvent) {}
+
+    #[test]
+    fn same_content_different_names_group() {
+        let entries = vec![
+            entry(1, "/a/one.bin", 11),
+            entry(2, "/b/two.bin", 11),
+            entry(3, "/c/three.bin", 5),
+        ];
+        let reader = MemReader::new(&[
+            ("/a/one.bin", b"hello world"),
+            ("/b/two.bin", b"hello world"),
+            ("/c/three.bin", b"xxxxx"),
+        ]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        assert_eq!(report.status, DuplicateStatus::Completed);
+        assert_eq!(report.groups.len(), 1, "{report:?}");
+        let g = &report.groups[0];
+        assert_eq!(g.member_count, 2);
+        assert_eq!(g.size, 11);
+        assert_eq!(g.representative().path, PathBuf::from("/a/one.bin"));
+        assert_eq!(g.logical_duplicate_bytes, 11);
+        // Object identity unknown (mem reader) → Estimated.
+        assert_eq!(g.accounting, StorageAccounting::Estimated);
+        // Singleton never hashed: stats prove candidate filtering.
+        assert_eq!(report.stats.singleton_files, 1);
+        assert_eq!(report.stats.candidates_hashed, 2);
+        assert_eq!(report.stats.size_groups_without_duplicates, 0);
+    }
+
+    #[test]
+    fn same_name_different_content_never_groups() {
+        let entries = vec![entry(1, "/a/report.txt", 5), entry(2, "/b/report.txt", 5)];
+        let reader = MemReader::new(&[("/a/report.txt", b"alpha"), ("/b/report.txt", b"bravo")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        assert_eq!(report.status, DuplicateStatus::Completed);
+        assert!(report.groups.is_empty(), "{report:?}");
+        assert_eq!(report.stats.size_groups_without_duplicates, 1);
+    }
+
+    #[test]
+    fn same_size_different_content_never_groups() {
+        let entries = vec![entry(1, "/a/x.bin", 4), entry(2, "/b/y.bin", 4)];
+        let reader = MemReader::new(&[("/a/x.bin", b"aaaa"), ("/b/y.bin", b"bbbb")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        assert!(report.groups.is_empty(), "{report:?}");
+        assert_eq!(report.stats.candidates_hashed, 2);
+    }
+
+    #[test]
+    fn different_sizes_never_reach_hashing() {
+        let entries = vec![entry(1, "/a/small", 1), entry(2, "/b/big", 10)];
+        let reader = MemReader::new(&[("/a/small", b"x"), ("/b/big", b"0123456789")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        assert!(report.groups.is_empty());
+        assert_eq!(
+            report.stats.candidates_hashed, 0,
+            "no hashing for size-unique files"
+        );
+        assert_eq!(report.stats.singleton_files, 2);
+        assert_eq!(report.stats.bytes_hashed, 0);
+    }
+
+    #[test]
+    fn zero_byte_files_follow_the_group_policy() {
+        // Default: counted, not grouped (hostile-input protection).
+        let make_entries = || vec![entry(1, "/a/empty1", 0), entry(2, "/b/empty2", 0)];
+        let reader = MemReader::new(&[]);
+        let report = run_duplicates(
+            make_entries().into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        assert!(report.groups.is_empty());
+        assert_eq!(report.stats.zero_byte_matches_ungrouped, 2);
+
+        // Opted in: they group (their content IS identical) with zero
+        // recoverable storage semantics.
+        let opts = DuplicateOptions {
+            group_zero_byte_files: true,
+            ..DuplicateOptions::default()
+        };
+        let zero_reader = MemReader::new(&[("/a/empty1", b""), ("/b/empty2", b"")]);
+        let report = run_duplicates(
+            make_entries().into_iter(),
+            &opts,
+            &CancelHandle::new(),
+            Some(&zero_reader),
+            &mut no_events,
+        );
+        assert_eq!(report.groups.len(), 1);
+        assert_eq!(report.groups[0].member_count, 2);
+        assert_eq!(report.groups[0].size, 0);
+        assert_eq!(
+            report.groups[0].content_hash,
+            crate::hash::ContentHash::empty()
+        );
+    }
+
+    #[test]
+    fn three_duplicates_form_one_stable_group() {
+        let entries = vec![
+            entry(1, "/c.bin", 3),
+            entry(2, "/a.bin", 3),
+            entry(3, "/b.bin", 3),
+        ];
+        let reader = MemReader::new(&[("/c.bin", b"xyz"), ("/a.bin", b"xyz"), ("/b.bin", b"xyz")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        assert_eq!(report.groups.len(), 1);
+        let g = &report.groups[0];
+        assert_eq!(g.member_count, 3);
+        // Deterministic member order regardless of stream order.
+        assert_eq!(g.members[0].path, PathBuf::from("/a.bin"));
+        assert_eq!(g.members[1].path, PathBuf::from("/b.bin"));
+        assert_eq!(g.members[2].path, PathBuf::from("/c.bin"));
+    }
+
+    #[test]
+    fn ineligible_entries_are_never_candidates() {
+        // One directory, one link, one special node, one observation-error
+        // file, one clean file with a unique size.
+        let mut errored = entry(4, "/broken.bin", 7);
+        errored.error = Some(spacelens_engine::ErrorCategoryRef::PermissionDenied);
+        let link = FsEntry {
+            kind: spacelens_engine::EntryKind::Link(spacelens_engine::LinkInfo {
+                kind: spacelens_engine::LinkKind::Symlink,
+                target: None,
+                broken: false,
+            }),
+            ..entry(5, "/alias", 7)
+        };
+        let entries = vec![
+            dir("/d"),
+            link,
+            FsEntry {
+                kind: spacelens_engine::EntryKind::Other,
+                ..entry(6, "/socket", 7)
+            },
+            errored,
+            entry(7, "/clean.bin", 7),
+        ];
+        let reader = MemReader::new(&[]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        let el = report.eligibility;
+        assert_eq!(el.dirs, 1);
+        assert_eq!(el.links, 1);
+        assert_eq!(el.special, 1);
+        assert_eq!(el.observation_errors, 1);
+        assert_eq!(el.eligible_files, 1);
+        // The clean file is a size singleton: never hashed, never grouped.
+        assert!(report.groups.is_empty());
+        assert_eq!(report.stats.candidates_hashed, 0);
+        assert_eq!(report.stats.singleton_files, 1);
+    }
+
+    #[test]
+    fn observation_errors_are_ineligible() {
+        let mut e = entry(1, "/locked.bin", 100);
+        e.error = Some(spacelens_engine::ErrorCategoryRef::InUse);
+        let entries = vec![e, entry(2, "/other.bin", 100)];
+        let reader = MemReader::new(&[("/other.bin", b"content")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        // The error entry was ineligible → no size group of 2 → nothing hashed.
+        assert!(report.groups.is_empty());
+        assert_eq!(report.eligibility.observation_errors, 1);
+        assert_eq!(report.stats.singleton_files, 1);
+    }
+
+    #[test]
+    fn missing_file_is_a_typed_vanish_not_a_false_hash() {
+        let entries = vec![
+            entry(1, "/a/present.bin", 4),
+            entry(2, "/b/vanishing.bin", 4),
+        ];
+        let reader = MemReader::new(&[("/a/present.bin", b"aaaa")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        assert_eq!(report.status, DuplicateStatus::Completed);
+        assert!(
+            report.groups.is_empty(),
+            "failed hash must not create a relationship"
+        );
+        assert_eq!(report.stats.failures, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].kind,
+            HashFailureKind::Vanished,
+            "a missing file is typed as vanished"
+        );
+    }
+
+    #[test]
+    fn changed_file_is_typed_changed() {
+        // Handle length disagrees with observation → Changed.
+        struct ShrinkingReader;
+        impl ContentReaderFactory for ShrinkingReader {
+            fn read(
+                &self,
+                _path: &Path,
+                feed: &mut dyn FnMut(&mut dyn ContentReader) -> io::Result<()>,
+            ) -> Result<(), ContentError> {
+                let mut r = FakeLenReader { len: 999 };
+                feed(&mut r).map_err(ContentError::ReadFailed)
+            }
+        }
+        struct FakeLenReader {
+            len: u64,
+        }
+        impl ContentReader for FakeLenReader {
+            fn read_chunk(&mut self, _buf: &mut [u8]) -> io::Result<Option<usize>> {
+                Ok(None)
+            }
+            fn file_identity(&self) -> spacelens_engine::FileIdentity {
+                spacelens_engine::FileIdentity::unknown()
+            }
+            fn pre_stat(&self) -> io::Result<HandleStat> {
+                Ok(HandleStat {
+                    len: self.len,
+                    modified: None,
+                    changed: None,
+                })
+            }
+            fn post_stat(&self) -> io::Result<HandleStat> {
+                Ok(HandleStat {
+                    len: self.len,
+                    modified: None,
+                    changed: None,
+                })
+            }
+        }
+        let entries = vec![entry(1, "/a/x.bin", 4), entry(2, "/b/y.bin", 4)];
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&ShrinkingReader),
+            &mut no_events,
+        );
+        assert!(report.groups.is_empty());
+        assert_eq!(
+            report.stats.failures, 2,
+            "both files mismatch the observed size"
+        );
+        assert!(report
+            .failures
+            .iter()
+            .all(|f| f.kind == HashFailureKind::Changed));
+    }
+
+    #[test]
+    fn cancelled_before_start_publishes_no_groups() {
+        let cancel = CancelHandle::new();
+        cancel.cancel();
+        let entries = vec![entry(1, "/a.bin", 3), entry(2, "/b.bin", 3)];
+        let reader = MemReader::new(&[("/a.bin", b"xyz"), ("/b.bin", b"xyz")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &cancel,
+            Some(&reader),
+            &mut no_events,
+        );
+        assert_eq!(report.status, DuplicateStatus::Cancelled);
+        assert!(report.groups.is_empty());
+        assert_eq!(report.stats.candidates_hashed, 0);
+    }
+
+    #[test]
+    fn cancel_during_hashing_publishes_no_groups() {
+        use std::sync::atomic::AtomicBool as AB;
+        struct CancelMidway {
+            cancel: CancelHandle,
+            first_seen: AB,
+        }
+        impl ContentReaderFactory for CancelMidway {
+            fn read(
+                &self,
+                _path: &Path,
+                feed: &mut dyn FnMut(&mut dyn ContentReader) -> io::Result<()>,
+            ) -> Result<(), ContentError> {
+                // Cancel after the first file begins hashing.
+                if !self.first_seen.swap(true, Ordering::SeqCst) {
+                    let mut r = EndlessReader;
+                    let _ = feed(&mut r);
+                }
+                self.cancel.cancel();
+                Err(ContentError::Aborted)
+            }
+        }
+        struct EndlessReader;
+        impl ContentReader for EndlessReader {
+            fn read_chunk(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+                buf.fill(0xAA);
+                Ok(Some(buf.len()))
+            }
+            fn file_identity(&self) -> spacelens_engine::FileIdentity {
+                spacelens_engine::FileIdentity::unknown()
+            }
+            fn pre_stat(&self) -> io::Result<HandleStat> {
+                Ok(HandleStat {
+                    len: 4,
+                    modified: None,
+                    changed: None,
+                })
+            }
+            fn post_stat(&self) -> io::Result<HandleStat> {
+                Ok(HandleStat {
+                    len: 4,
+                    modified: None,
+                    changed: None,
+                })
+            }
+        }
+        let cancel = CancelHandle::new();
+        let reader = CancelMidway {
+            cancel: cancel.clone(),
+            first_seen: AB::new(false),
+        };
+        let entries = vec![entry(1, "/a/x.bin", 4), entry(2, "/b/y.bin", 4)];
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &cancel,
+            Some(&reader),
+            &mut no_events,
+        );
+        assert_eq!(report.status, DuplicateStatus::Cancelled);
+        assert!(
+            report.groups.is_empty(),
+            "cancelled run publishes no groups"
+        );
+    }
+
+    #[test]
+    fn unsupported_reader_yields_unsupported_status() {
+        let entries = vec![entry(1, "/a.bin", 3), entry(2, "/b.bin", 3)];
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            None,
+            &mut no_events,
+        );
+        assert_eq!(report.status, DuplicateStatus::Unsupported);
+        assert!(report.groups.is_empty());
+        assert_eq!(report.stats.candidates_hashed, 2, "candidacy still ran");
+        assert_eq!(report.stats.files_hashed, 0);
+    }
+
+    #[test]
+    fn report_is_deterministic_across_runs() {
+        let build = || {
+            let entries = vec![
+                entry(1, "/d1/same.bin", 4),
+                entry(2, "/d2/same.bin", 4),
+                entry(3, "/d3/same.bin", 4),
+                entry(4, "/other/unique.bin", 7),
+                entry(5, "/pair/p1.bin", 2),
+                entry(6, "/pair/p2.bin", 2),
+            ];
+            let reader = MemReader::new(&[
+                ("/d1/same.bin", b"aaaa"),
+                ("/d2/same.bin", b"aaaa"),
+                ("/d3/same.bin", b"aaaa"),
+                ("/other/unique.bin", b"unique!"),
+                ("/pair/p1.bin", b"pp"),
+                ("/pair/p2.bin", b"pp"),
+            ]);
+            run_duplicates(
+                entries.into_iter(),
+                &DuplicateOptions::default(),
+                &CancelHandle::new(),
+                Some(&reader),
+                &mut no_events,
+            )
+        };
+        let a = build();
+        let b = build();
+        // Timestamps are observational; every logical field must match.
+        assert_eq!(a.status, b.status);
+        assert_eq!(a.groups, b.groups, "same input → identical groups");
+        assert_eq!(a.stats, b.stats);
+        assert_eq!(a.eligibility, b.eligibility);
+        assert_eq!(a.failures, b.failures);
+        assert_eq!(a.logical_duplicate_bytes, b.logical_duplicate_bytes);
+        assert_eq!(a.recoverable_bytes, b.recoverable_bytes);
+        assert_eq!(a.groups.len(), 2);
+        // Group order: size ascending.
+        assert_eq!(a.groups[0].size, 2);
+        assert_eq!(a.groups[1].size, 4);
+        assert_eq!(a.groups[1].member_count, 3);
+    }
+
+    #[test]
+    fn events_are_started_then_one_terminal() {
+        let entries = vec![entry(1, "/a.bin", 3), entry(2, "/b.bin", 3)];
+        let reader = MemReader::new(&[("/a.bin", b"xyz"), ("/b.bin", b"xyz")]);
+        let mut events = Vec::new();
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut |e| {
+                events.push(match e {
+                    DuplicateProgressEvent::Started => "started".to_string(),
+                    DuplicateProgressEvent::Progress(_) => "progress".to_string(),
+                    DuplicateProgressEvent::Completed(_) => "completed".to_string(),
+                    DuplicateProgressEvent::Cancelled(_) => "cancelled".to_string(),
+                    DuplicateProgressEvent::Failed(_) => "failed".to_string(),
+                })
+            },
+        );
+        assert_eq!(report.status, DuplicateStatus::Completed);
+        assert_eq!(events.first().map(String::as_str), Some("started"));
+        assert_eq!(events.last().map(String::as_str), Some("completed"));
+        assert!(!events.contains(&"cancelled".to_string()));
+        assert!(!events.contains(&"failed".to_string()));
+    }
+
+    #[test]
+    fn every_entry_is_accounted_for_exactly_once() {
+        let entries = vec![
+            entry(1, "/f1", 3),
+            dir("/d1"),
+            entry(2, "/f2", 3),
+            dir("/d2"),
+            {
+                let mut e = entry(3, "/err", 3);
+                e.error = Some(spacelens_engine::ErrorCategoryRef::PermissionDenied);
+                e
+            },
+        ];
+        let reader = MemReader::new(&[("/f1", b"abc"), ("/f2", b"abc")]);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&reader),
+            &mut no_events,
+        );
+        let el = report.eligibility;
+        assert_eq!(
+            el.examined,
+            (el.eligible_files + el.dirs + el.links + el.special + el.observation_errors) as u64,
+            "every entry accounted exactly once"
+        );
+        assert_eq!(el.examined, 5);
+        assert_eq!(el.eligible_files, 2);
+        assert_eq!(el.dirs, 2);
+        assert_eq!(el.observation_errors, 1);
+    }
+
+    #[test]
+    fn default_reader_factory_streams_real_files() {
+        // Round-trip through the engine's real platform boundary.
+        let tmp = tempfile::tempdir().unwrap();
+        let p1 = tmp.path().join("one.dat");
+        let p2 = tmp.path().join("two.dat");
+        std::fs::write(&p1, b"duplicate-content").unwrap();
+        std::fs::write(&p2, b"duplicate-content").unwrap();
+
+        let size = std::fs::metadata(&p1).unwrap().len();
+        let entries = vec![
+            entry(1, p1.to_str().unwrap(), size),
+            entry(2, p2.to_str().unwrap(), size),
+        ];
+        let platform = spacelens_engine::platform::std_fs();
+        let factory = DefaultReaderFactory::new(platform);
+        let report = run_duplicates(
+            entries.into_iter(),
+            &DuplicateOptions::default(),
+            &CancelHandle::new(),
+            Some(&factory),
+            &mut no_events,
+        );
+        assert_eq!(report.status, DuplicateStatus::Completed);
+        assert_eq!(report.groups.len(), 1, "{report:?}");
+        assert_eq!(report.groups[0].member_count, 2);
+        // On this host the platform proves object identity (unix fstat /
+        // windows file index) — accounting must be Exact and recoverable
+        // must be the full duplicate size.
+        assert_eq!(report.groups[0].accounting, StorageAccounting::Exact);
+        assert_eq!(report.groups[0].recoverable_bytes, Some(size));
+    }
+}

@@ -105,13 +105,29 @@ FFI. No network, no processes, no telemetry anywhere in shipped code.
 All Phase 1 / 2 / 2.1 / 3 tests remain green, unchanged except for the
 mechanical `FsEntry.changed` field additions.
 
+## Second-order audit findings (fixed before this record)
+
+1. **A full Phase 3 unit-test module had been dropped in the pipeline
+   rewrite** (17 tests: grouping, cancellation matrix, unsupported mode,
+   determinism, event sequencing, eligibility accounting, the real-fs
+   factory round-trip). Restored verbatim, adapted to the new
+   `ContentReader` trait surface. Workspace count reconciles exactly:
+   289 (Phase 3) − 0 + 24 (new adversarial) = 313.
+2. **Unix-only dead code**: the Windows link-privilege probe helper was
+   compiled (and flagged `-D dead_code`) on unix where no caller exists —
+   found by cross-target clippy locally, gated `#[cfg(windows)]`. This was
+   the exact lint that failed the first CI attempt for ubuntu/macos.
+3. `StdContentReader` returned `Ok(Some(0))` at EOF against its own trait
+   contract (now `Ok(None)`; the pipeline accepts both shapes defensively).
+
 ## Verification
 
 - **Local (Windows):** `cargo fmt --check` ✓ · `cargo clippy --workspace
-  --all-targets -- -D warnings` ✓ · `cargo test --workspace` **296 passed /
-  0 failed** (272 before this phase; +24 adversarial) · identity perf
-  smoke ✓ (4 hostile workloads at 10k/100k/1M, ~linear per-entry cost) ·
-  release >4 GiB streaming proof ✓ (24.3 s).
+  --all-targets -- -D warnings` ✓ (plus `--target x86_64-unknown-linux-gnu`
+  cross-clippy for the unix-only code paths) · `cargo test --workspace`
+  **313 passed / 0 failed** (289 at Phase 3; +24 adversarial, Phase 3 suite
+  intact) · identity perf smoke ✓ (4 hostile workloads at 10k/100k/1M,
+  ~linear per-entry cost) · release >4 GiB streaming proof ✓ (24.3 s).
 - **CI:** matrix green on the final SHA (run recorded below) — each job
   verified individually from the Actions API.
 
@@ -133,8 +149,8 @@ mechanical `FsEntry.changed` field additions.
 Mutation / replacement / links / identity / memory / buffers / completeness
 / accounting / cancellation / determinism / cross-platform / security /
 documentation — each question from the phase brief was re-asked against the
-final code; findings are folded into the record above. Two issues found
-during the audit were fixed before verification: a FIFO/`mkfifo` test used
-process spawning (kept unix-test-only, engine untouched), and
-`StdContentReader` returned `Ok(Some(0))` at EOF against its own trait
-contract (now `Ok(None)`; the pipeline accepts both shapes defensively).
+final code; findings are folded into the audit-findings section above and
+into docs/IDENTITY.md §limitations. The FIFO/`mkfifo` adversarial test
+spawns `mkfifo` in a unix-only test to create the fixture (the engine
+itself never spawns processes; the spawn is test fixture setup on unix CI
+where the binary exists, with an honest skip if absent).
