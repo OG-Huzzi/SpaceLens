@@ -70,6 +70,16 @@ Phase 3.1 contract additions (all additive within `v1`):
 - `FsEntry` adds `changed` (observation-time metadata-change stamp, Unix
   `st_ctime`): used by the scan→open mutation bracket; `null` where
   unprovable.
+- `FsEntry` adds `fileIdHi` (Phase 3.2): high 64 bits of a >64-bit file
+  identifier (Windows `FILE_ID_INFO`, non-zero on ReFS-class filesystems);
+  compared by the identity layer only where both scan and hash sides
+  proved it. Additive; `null` on Unix and where the OS proves no wider
+  identifier.
+- Windows object identity (Phase 3.2): scan-time `(volumeSerial,
+  128-bit fileId)` captured via a query-only handle (`FILE_ID_INFO`),
+  removing the Phase 3.1 degraded-identity limitation on Windows. On NTFS
+  the file id embeds the MFT record sequence number, so delete+recreate
+  impostors are detectable.
 
 No IPC command surfaces these yet; the types are the contract for
 future phases and are covered by engine tests.

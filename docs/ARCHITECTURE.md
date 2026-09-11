@@ -69,6 +69,11 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   object verification (`Replaced`), handle-proven mutation brackets
   (length + change-time before/after the read), and globally bounded
   candidate staging with exact skip accounting (`CompletedWithLimits`).
+  Phase 3.2 added Windows scan-time object identity (`FILE_ID_INFO` via a
+  query-only handle — NTFS file ids embed the MFT record sequence number,
+  so delete+recreate impostors are detectable), an ancestor-chain guard
+  (a symlink/junction anywhere in the observed path's chain is refused at
+  hash time), and a scan→open mtime bracket.
   The persistent hash cache belongs with persistence (later phase); Phase 3
   deliberately added no database.
 - `recommender` — produces opportunities with reasons + recovery estimates.

@@ -1,12 +1,32 @@
 # SpaceLens — Current Phase
 
-- **Current phase:** PHASE 3.1 — identity-engine correctness, TOCTOU safety
-  & true boundedness (hardening pass over verified Phase 3)
-- **Status:** PHASE 3.1 — VERIFIED (full local gate green; CI verified per
-  PHASE_3_1_STATUS.md)
-- **Last updated:** 2026-09-11 (Phase 3.1 hardening)
+- **Current phase:** PHASE 3.2 — Windows object identity & path-chain
+  TOCTOU hardening (closes the Windows identity gap from Phase 3.1)
+- **Status:** PHASE 3.2 — VERIFIED (full local gate green; CI verified per
+  PHASE_3_2_STATUS.md)
+- **Last updated:** 2026-09-11 (Phase 3.2 hardening)
 
-## What happened (2026-09-11, Phase 3.1)
+## What happened (2026-09-11, Phase 3.2)
+
+Windows scan-time object identity is now real: a query-only handle
+(`FILE_READ_ATTRIBUTES`, share-all, `OPEN_REPARSE_POINT`) reads
+`FILE_ID_INFO` — the (volume serial, 128-bit file id) pair. On NTFS the id
+embeds the MFT record sequence number, so delete+recreate impostors are
+detectable. Scan-time and hash-time identity use the identical derivation,
+and the pipeline compares them (plus the high bits where proven) — mismatch
+is typed `Replaced`. A scan→open mtime bracket backstops same-content
+replacements on filesystems with weaker identity. The intermediate-path
+window is closed by an ancestor-chain guard on both platforms: every
+ancestor prefix is opened no-follow before the final open, so a junction
+or symlink anywhere in the chain is refused and its target never touched.
+11 new deterministic adversarial tests cover the brief's acceptance matrix
+(parent/junction/multi-level swaps, same-content replacement in both
+forms, degraded mode, hard-link and distinct-copy semantics on both
+platforms). Nothing outside Observation → Classification → Identity →
+Relationships changed; all Phase 3.1 boundedness, cancellation, and
+determinism properties re-verified. Full record in PHASE_3_2_STATUS.md.
+
+## Previous pass (2026-09-11, Phase 3.1)
 
 An audit-identified hardening pass over the Phase 3 identity/duplicate
 subsystem. Nothing outside Observation → Classification → Identity →
