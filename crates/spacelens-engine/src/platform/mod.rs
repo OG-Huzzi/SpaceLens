@@ -283,6 +283,27 @@ pub trait PlatformFs: Send + Sync {
             "this platform implementation does not expose file content",
         )))
     }
+
+    /// **Phase 3.2 intermediate-path guard:** verify that the ancestor
+    /// components of `path` strictly below `boundary` (exclusive) are still
+    /// plain directories — a component that became a symlink/junction/
+    /// reparse point after observation is refused with
+    /// [`ContentError::UnexpectedLink`] and its target is never touched.
+    ///
+    /// `boundary` is the deepest common ancestor of the run's staged
+    /// candidates (computed by the identity pipeline). Components at or
+    /// above the boundary were chosen by the scan's caller and may
+    /// legitimately traverse OS-level symlinks (e.g. macOS `/var`), so the
+    /// engine refuses only what it observed itself. An ancestor that cannot
+    /// be inspected (ACL) is not treated as a link: the final open is
+    /// authoritative and the identity comparison remains the proof.
+    ///
+    /// The default is "no guard": platforms without a guard implementation
+    /// rely on the identity comparison, which is authoritative anyway.
+    fn validate_path_chain(&self, path: &Path, boundary: &Path) -> Result<(), ContentError> {
+        let _ = (path, boundary);
+        Ok(())
+    }
 }
 
 /// One volume / mount the platform exposes.

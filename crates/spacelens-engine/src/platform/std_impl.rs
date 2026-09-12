@@ -298,6 +298,22 @@ impl PlatformFs for StdFs {
             ContentOutcome::Failed(err) => Err(ContentError::OpenFailed(err)),
         }
     }
+
+    fn validate_path_chain(&self, path: &Path, boundary: &Path) -> Result<(), ContentError> {
+        #[cfg(unix)]
+        {
+            unix::validate_chain_below(path, boundary)
+        }
+        #[cfg(windows)]
+        {
+            windows::validate_chain_below(path, boundary)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (path, boundary);
+            Ok(())
+        }
+    }
 }
 
 /// The default platform instance for production use.

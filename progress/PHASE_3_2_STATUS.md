@@ -4,8 +4,21 @@
   (closes the Windows identity gap Phase 3.1 documented as limitation)
 - **Verdict:** **PHASE 3.2 VERIFIED** (full local gate green on Windows;
   CI matrix green — runs recorded below; every job verified individually)
-- **Date:** 2026-09-11 · **Machine:** Windows 11 Pro x64, 8 GB RAM
+- **Date:** 2026-09-11/12 · **Machine:** Windows 11 Pro x64, 8 GB RAM
 - **Starting SHA:** `e290c0b` (Phase 3.1 record, clean tree)
+- **History:** implementation `ab5dc57` → tests+docs `973e007` (run
+  `34627740916`: windows+frontend ✓; ubuntu/macos ✗ — the open-based
+  ancestor probe (`O_NOFOLLOW|O_DIRECTORY` refusing on `ELOOP`) was inert
+  on the CI kernels: the open *succeeded through the symlink* and the
+  identity comparison caught the impostor as `Replaced` — safety held,
+  the guard did not) → guard replaced with `symlink_metadata` inode-type
+  detection `0fa7bcc` (run `34675193661`: ubuntu+windows ✓; macos ✗ — the
+  now-working guard refused macOS's legitimate `/var` symlink prefix:
+  false positives on caller-chosen path components) → **boundary-aware
+  redesign** (this SHA): the guard validates ancestors only at or below
+  the staged candidates' deepest common ancestor. Every failure was
+  diagnosed from its actual CI log before repair; nothing was papered
+  over.
 
 ## Why this phase existed
 
@@ -53,25 +66,40 @@ established.
   same-content replacements whose identity evidence is weaker (FAT-class
   filesystems).
 
-**Objective 3 — intermediate-path / reparse safety:**
+**Objective 3 — intermediate-path / reparse safety (boundary-aware):**
 
-- **Ancestor-chain guard on both platforms:** before the final open, every
-  ancestor prefix is opened no-follow (`O_NOFOLLOW|O_DIRECTORY` on Unix;
-  `OPEN_REPARSE_POINT` + attribute inspection on Windows). A directory
-  anywhere in the chain that became a link is refused `UnexpectedLink` →
-  typed failure — the junction target is never touched.
-- No false positives: `SymlinkPolicy::RecordOnly` never descends into
-  links, so engine-observed paths can never contain link ancestors.
-- Design rationale (documented in docs/IDENTITY.md): the authoritative
-  proof that the hashed object is the observed object is the final-object
-  identity comparison — an intermediate junction that resolves the path
-  elsewhere lands on a *different object* and fails the comparison. The
-  ancestor guard adds the deterministic structural refusal and covers
-  degraded mode. Handle-relative traversal (`NtOpenFile` root-directory
-  chains) is the airtight structural form and is deliberately not used —
-  the identity comparison already answers the question, with less
-  platform surface (residual window between independent component checks
-  is documented, not claimed away).
+- **Ancestor-chain guard on both platforms:** before hashing, every
+  ancestor component of the candidate path from its parent down to (and
+  including) the run's **boundary** — the deepest common ancestor of the
+  staged candidates — is validated: Unix `symlink_metadata` (the link is
+  named by its inode type `S_ISLNK`, no errno interpretation), Windows
+  `OPEN_REPARSE_POINT` handle + attribute inspection. A component in that
+  range that became a link is refused `UnexpectedLink` → typed failure —
+  the junction target is never touched.
+- **Why the boundary:** components above the deepest common ancestor were
+  chosen by the scan's caller, not observed by the scanner — they may
+  legitimately traverse OS-level symlinks (macOS `/var`, Windows profile
+  junctions). The first CI repair attempt proved this empirically: an
+  unbounded lstat guard refused macOS's `/var` prefix (run `34675193661`).
+  The boundary always lies at or below the scan root for engine-produced
+  input, so every component the scanner actually walked is validated;
+  components between the scan root and a deeper-than-root boundary are
+  covered by the identity comparison — a documented trade (IDENTITY.md
+  §limitations), not a hidden gap.
+- Two CI-diagnosed design lessons are recorded in the history above: an
+  errno-based (`ELOOP`) ancestor *open* probe was inert on the CI kernels
+  (the open succeeded through the symlink — detection moved to the inode
+  type), and an unbounded ancestor guard false-positives on caller-chosen
+  prefixes (detection moved behind the boundary).
+- Design rationale (docs/IDENTITY.md): the authoritative proof that the
+  hashed object is the observed object is the final-object identity
+  comparison — an intermediate junction that resolves the path elsewhere
+  lands on a *different object* and fails the comparison. The structural
+  guard adds the deterministic typed refusal and covers degraded mode.
+  Handle-relative traversal (`NtOpenFile` root-directory chains) is the
+  airtight structural form and is deliberately not used — the identity
+  comparison already answers the question, with less platform surface
+  (residual swap window documented, not claimed away).
 
 **Objectives 4–7 — adversarial tests (11, all deterministic):**
 observe → prepare → swap → hash → assert; no thread races. Every target

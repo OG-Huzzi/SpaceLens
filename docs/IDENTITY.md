@@ -91,19 +91,28 @@ and Phase 3.2 extended that refusal to the **whole path chain**:
   which opens a reparse point *itself* rather than traversing to its target.
   The handle is immediately inspected: a reparse attribute refuses the open
   (typed refusal), a directory attribute refuses it as a non-regular object.
-- **Every ancestor component (both platforms, Phase 3.2):** before the final
-  open, each ancestor prefix of the observed path is opened no-follow
-  (`O_NOFOLLOW|O_DIRECTORY` on Unix; `OPEN_REPARSE_POINT|BACKUP_SEMANTICS` +
-  attribute inspection on Windows). A directory anywhere in the chain that
-  became a symlink/junction/reparse point is refused (`UnexpectedLink` →
-  typed failure) — a hostile intermediate swap cannot silently redirect
-  resolution to another object tree. The scanner never descends into links
-  (`SymlinkPolicy::RecordOnly`), so a legitimately observed path can never
-  contain a link ancestor and this check cannot false-positive on
-  engine-produced input. (A future scan policy that legitimately traverses
-  directory links would need to extend this contract; none exists yet.)
-  An ancestor that cannot be opened at all (ACL) is *not* treated as a link:
-  the final open is authoritative.
+- **Ancestor components at or below the run's boundary (both platforms,
+  Phase 3.2):** before hashing, each ancestor prefix of the observed path
+  from its parent down to (and including) the run's **boundary** — the
+  deepest common ancestor of the staged candidates — is checked: Unix
+  `symlink_metadata` (the link is named by its inode type, no errno
+  interpretation), Windows `OPEN_REPARSE_POINT` handle + attribute
+  inspection. A directory in that range that became a symlink/junction/
+  reparse point is refused (`UnexpectedLink` → typed failure) — a hostile
+  intermediate swap cannot silently redirect resolution to another object
+  tree.
+  **Why the boundary:** components above the deepest common ancestor were
+  chosen by the scan's caller, not observed by the scanner — they may
+  legitimately traverse OS-level symlinks (macOS `/var` → `/private/var`,
+  profile-folder junctions on Windows). Refusing those would false-positive
+  on normal systems; the object identity comparison remains authoritative
+  for them. The boundary always lies at or below the scan root for
+  engine-produced input, so every component the scanner actually walked is
+  validated. Components between the scan root and the boundary (when the
+  candidates' common ancestor is deeper than the root) are covered by the
+  identity comparison rather than the structural check — a documented
+  trade, not a hidden gap. An ancestor that cannot be inspected (ACL) is
+  *not* treated as a link: the final open is authoritative.
 
 The residual exposure between independent per-component checks and the final
 open (a swap landing exactly inside that window) cannot manufacture a false
@@ -362,7 +371,7 @@ within `v1` (docs/API_CONTRACTS.md rules).
    degrades exactly as far as the OS proves — comparisons run only on
    shared evidence, accounting degrades to `Estimated`, never fabricated.
 4. **Swap window between per-component checks:** the ancestor-chain guard
-   and the final open are independent opens; a swap landing exactly
+   and the final open are independent checks; a swap landing exactly
    between them is not excluded *structurally*. It cannot produce a false
    relationship — the final object identity comparison is the
    authoritative proof — and in degraded mode (identity unavailable at
@@ -371,9 +380,18 @@ within `v1` (docs/API_CONTRACTS.md rules).
    `NtOpenFile` with root-directory handles) is the airtight form and is
    deliberately not used: the identity comparison already answers the
    question the walk would answer, with less platform surface.
-5. **Scan-time identity cost on Windows:** every scanned file/directory
+5. **Chain-guard boundary:** the structural guard validates components at
+   or below the staged candidates' deepest common ancestor. When that
+   ancestor is deeper than the scan root (all candidates under one
+   subtree), components between the scan root and the boundary are covered
+   by the identity comparison only — in degraded mode (identity
+   unavailable) a swap of such a component could redirect resolution
+   within the window between check and open. Engine-produced input always
+   puts the boundary at or below the scan root, and every component the
+   scanner walked below the boundary is validated.
+6. **Scan-time identity cost on Windows:** every scanned file/directory
    costs one extra query-only handle open (no data access, share-all).
    Measured as part of the perf smokes; no timing gate regressed.
-6. **No hash cache yet:** unchanged files re-hash on a later run. The
+7. **No hash cache yet:** unchanged files re-hash on a later run. The
    persistent cache belongs with persistence (a later phase, per the
    master plan — no SQLite was added here).

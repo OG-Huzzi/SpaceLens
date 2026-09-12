@@ -66,23 +66,18 @@ pub(super) fn is_hidden(name: &OsStr) -> bool {
 ///   immediately and the fstat inspection below rejects it.
 /// - `O_CLOEXEC`: hygiene; the engine spawns no processes.
 ///
-/// Phase 3.2 intermediate-path guard: every ancestor component is checked
-/// (`symlink_metadata` — the link is named by its inode type) before the
-/// final open, so a directory that became a symlink anywhere in the chain
-/// is refused — the same structural guard as the Windows reparse-ancestor
-/// validation. The scanner never descends into links
-/// (`SymlinkPolicy::RecordOnly`), so a legitimately observed path can never
-/// contain a symlink ancestor. An ancestor that cannot be stat-ed at all is
-/// not treated as a link: the final open is authoritative and the
-/// identity/mutation checks still apply.
+/// The intermediate-path guard is NOT folded into this open: it is
+/// boundary-aware ([`validate_chain_below`], called through
+/// `PlatformFs::validate_path_chain`) because components above the scan's
+/// caller-chosen root may legitimately traverse OS-level symlinks (macOS
+/// `/var`, `/tmp` → `/private/tmp`) and must not be refused by the engine.
 ///
 /// The observed-vs-opened `(st_dev, st_ino)` comparison in the identity
 /// layer remains the authoritative proof that the hashed object is the
-/// observed object; this check is the deterministic structural guard that
-/// runs before it.
+/// observed object; the chain guard is the deterministic structural check
+/// that runs before it.
 pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
     use std::os::unix::fs::OpenOptionsExt;
-    validate_no_symlink_ancestors(path)?;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -99,18 +94,27 @@ pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
 }
 
 /// Phase 3.2 intermediate-path guard (Unix twin of the Windows
-/// reparse-ancestor validation): every ancestor component must still be a
-/// plain directory. Detection is via `symlink_metadata` — the link is named
-/// by the inode type (`S_ISLNK`) with no errno interpretation involved —
-/// so the refusal is deterministic on every Unix flavor. A hostile symlink
-/// ancestor is refused `UnexpectedLink`; other ancestor failures (ACL,
-/// vanished) degrade to the final open's authoritative error, and the
-/// final object's identity comparison remains the authoritative proof.
-fn validate_no_symlink_ancestors(path: &Path) -> Result<(), ContentError> {
-    for ancestor in path.ancestors().skip(1) {
-        // Stop at the filesystem root (no file name).
-        if ancestor.file_name().is_none() {
+/// reparse-ancestor validation): every ancestor component **at or below the
+/// `boundary`** must still be a plain directory. The boundary itself is
+/// included — it is the deepest common ancestor of the run's staged
+/// candidates, a directory the scanner observed, so a swap of it is as
+/// hostile as a swap deeper down. Detection is via `symlink_metadata` — the
+/// link is named by the inode type (`S_ISLNK`) with no errno
+/// interpretation involved — so the refusal is deterministic on every Unix
+/// flavor. A hostile symlink ancestor is refused `UnexpectedLink`; other
+/// ancestor failures (ACL, vanished) degrade to the final open's
+/// authoritative error, and the final object's identity comparison remains
+/// the authoritative proof.
+pub(super) fn validate_chain_below(path: &Path, boundary: &Path) -> Result<(), ContentError> {
+    let boundary_depth = component_depth(boundary);
+    for ancestor in path.ancestors() {
+        // The path itself has no ancestor role; everything from its parent
+        // down to (and including) the boundary is validated.
+        if component_depth(ancestor) < boundary_depth {
             break;
+        }
+        if ancestor == path {
+            continue;
         }
         match fs::symlink_metadata(ancestor) {
             Ok(md) if md.file_type().is_symlink() => {
@@ -123,6 +127,12 @@ fn validate_no_symlink_ancestors(path: &Path) -> Result<(), ContentError> {
         }
     }
     Ok(())
+}
+
+/// Number of path components (a cheap, allocation-free depth measure for
+/// the boundary comparison; consistent within one platform's path form).
+fn component_depth(p: &Path) -> usize {
+    p.components().count()
 }
 
 /// Map no-follow open failures onto typed content errors.

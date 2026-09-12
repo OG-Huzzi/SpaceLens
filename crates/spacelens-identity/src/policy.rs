@@ -76,6 +76,26 @@ pub trait ContentReaderFactory: Send + Sync {
         path: &Path,
         feed: &mut dyn FnMut(&mut dyn ContentReader) -> std::io::Result<()>,
     ) -> Result<(), spacelens_engine::platform::ContentError>;
+
+    /// Validate that the ancestor components of `path` **below `boundary`**
+    /// (exclusive) are still plain directories — the Phase 3.2
+    /// intermediate-path guard. `boundary` is the deepest common ancestor of
+    /// the run's staged candidates: components at or above it were chosen by
+    /// the scan's caller (and may legitimately contain OS-level symlinks,
+    /// e.g. macOS `/var`), so they are not the engine's to refuse; the final
+    /// object identity comparison remains authoritative for them.
+    ///
+    /// The default is a no-op: in-memory/synthetic factories have no
+    /// filesystem to guard. `DefaultReaderFactory` forwards to
+    /// `PlatformFs::validate_path_chain`.
+    fn validate_path_chain(
+        &self,
+        path: &Path,
+        boundary: &Path,
+    ) -> Result<(), spacelens_engine::platform::ContentError> {
+        let _ = (path, boundary);
+        Ok(())
+    }
 }
 
 /// Production factory: forwards to the engine's `PlatformFs` content
@@ -92,6 +112,14 @@ impl<'p> DefaultReaderFactory<'p> {
 }
 
 impl ContentReaderFactory for DefaultReaderFactory<'_> {
+    fn validate_path_chain(
+        &self,
+        path: &Path,
+        boundary: &Path,
+    ) -> Result<(), spacelens_engine::platform::ContentError> {
+        self.platform.validate_path_chain(path, boundary)
+    }
+
     fn read(
         &self,
         path: &Path,

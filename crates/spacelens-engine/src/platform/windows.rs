@@ -168,8 +168,14 @@ pub(super) fn handle_identity(file: &fs::File) -> io::Result<FileIdentity> {
 /// `FILE_FLAG_BACKUP_SEMANTICS` is required to open directory handles (a
 /// replaced-by-directory path must be *typed* from handle attributes, not
 /// guessed from an error code) and has no effect on regular-file opens.
+///
+/// The intermediate-path guard is NOT folded into this open: it is
+/// boundary-aware ([`validate_chain_below`], called through
+/// `PlatformFs::validate_path_chain`) because components above the scan's
+/// caller-chosen root may legitimately traverse OS-level reparse points
+/// (profile-folder junctions, `/var`-style prefixes) and must not be
+/// refused by the engine.
 pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
-    validate_no_reparse_ancestors(path)?;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
@@ -178,30 +184,25 @@ pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
     inspect_handle(file)
 }
 
-/// Phase 3.2 intermediate-path guard: every ancestor component of the
-/// observed path must still be a plain directory — a junction/reparse
-/// point anywhere in the chain is refused before the final open, so a
-/// swapped intermediate component cannot silently redirect resolution to
-/// another object tree.
-///
-/// The scanner never descends into links (`SymlinkPolicy::RecordOnly`), so
-/// a legitimately observed path can never contain a reparse ancestor and
-/// this check cannot false-positive on engine-produced input. An ancestor
-/// that cannot be opened at all (ACL) is *not* treated as a link: the
-/// final open is authoritative and identity/mutation checks still apply.
-///
-/// Each ancestor is opened `OPEN_REPARSE_POINT` (its own handle, never its
-/// target) and rejected on the reparse attribute. Component opens are
-/// independent; a swap *between* the component checks and the final open
-/// cannot manufacture a false identity — the final object's identity is
-/// compared against the observation (see the pipeline), which is the
-/// authoritative proof.
-fn validate_no_reparse_ancestors(path: &Path) -> Result<(), ContentError> {
-    for ancestor in path.ancestors().skip(1) {
-        // Stop at the volume/share root (no file name): it has no
-        // meaningful parent chain to validate.
-        if ancestor.file_name().is_none() {
+/// Phase 3.2 intermediate-path guard (Windows twin of the Unix
+/// symlink-ancestor validation): every ancestor component **at or below the
+/// `boundary`** must still be a plain directory. The boundary itself is
+/// included — it is the deepest common ancestor of the run's staged
+/// candidates, a directory the scanner observed, so a swap of it is as
+/// hostile as a swap deeper down. Each ancestor is opened
+/// `OPEN_REPARSE_POINT` (its own handle, never its target) and rejected on
+/// the reparse attribute — deterministic, no error-code guessing. A
+/// hostile junction/symlink ancestor is refused `UnexpectedLink`; an
+/// ancestor that cannot be opened (ACL) is not treated as a link — the
+/// final open and the identity comparison remain the gates.
+pub(super) fn validate_chain_below(path: &Path, boundary: &Path) -> Result<(), ContentError> {
+    let boundary_depth = component_depth(boundary);
+    for ancestor in path.ancestors() {
+        if component_depth(ancestor) < boundary_depth {
             break;
+        }
+        if ancestor == path {
+            continue;
         }
         let wide: Vec<u16> = ancestor
             .as_os_str()
@@ -236,6 +237,12 @@ fn validate_no_reparse_ancestors(path: &Path) -> Result<(), ContentError> {
         }
     }
     Ok(())
+}
+
+/// Number of path components (a cheap depth measure for the boundary
+/// comparison; consistent within one platform's path form).
+fn component_depth(p: &Path) -> usize {
+    p.components().count()
 }
 
 /// Read BY_HANDLE information from the open handle and classify the object

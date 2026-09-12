@@ -50,7 +50,7 @@
 //! require reading every byte it is trying to skip.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
@@ -444,6 +444,40 @@ fn staged(entry: &FsEntry) -> StagedMember {
     }
 }
 
+/// Deepest common ancestor of every staged candidate path — the Phase 3.2
+/// chain-guard boundary. Components at or above it were chosen by the scan's
+/// caller (and may legitimately traverse OS-level symlinks); only the
+/// structure the scanner observed below it is validated at hash time.
+/// Computed once per run from the staged jobs (bounded: one `PathBuf`, no
+/// per-path state); `None` when there is nothing to hash.
+fn boundary_of_jobs(jobs: &[(u64, Vec<StagedMember>)]) -> Option<PathBuf> {
+    let first = jobs.first()?.1.first()?.path.clone();
+    let mut common: Vec<std::path::Component<'_>> = first.components().collect();
+    for (_, members) in jobs {
+        for member in members {
+            let comps: Vec<std::path::Component<'_>> = member.path.components().collect();
+            let mut shared = 0;
+            while shared < common.len() && shared < comps.len() && common[shared] == comps[shared] {
+                shared += 1;
+            }
+            common.truncate(shared);
+        }
+    }
+    if common.is_empty() {
+        return None;
+    }
+    let mut boundary = PathBuf::new();
+    for component in common {
+        boundary.push(component.as_os_str());
+    }
+    // A single-path run would make the boundary the file itself, guarding
+    // nothing; step up to its parent so the parent directory is validated.
+    if boundary == first {
+        boundary = first.parent()?.to_path_buf();
+    }
+    Some(boundary)
+}
+
 /// Run duplicate detection over an entry stream.
 ///
 /// `entries` must yield each observed entry exactly once (scanner output;
@@ -521,6 +555,11 @@ pub fn run_duplicates(
     });
 
     // ---- Stage 2: bounded hashing pool ----------------------------------
+    // Phase 3.2 intermediate-path guard boundary: the deepest common
+    // ancestor of all staged candidate paths. Components at or above it are
+    // caller context (may legitimately traverse OS-level symlinks); only
+    // what the scanner observed below it is structurally validated.
+    let chain_boundary = boundary_of_jobs(&jobs);
     let mut cancelled = false;
     if let Some(reader) = reader {
         let (tx, rx) = mpsc::sync_channel::<Job>(options.threads.max(1) * 4);
@@ -533,6 +572,7 @@ pub fn run_duplicates(
             for _ in 0..options.threads.max(1) {
                 let shared = Arc::clone(&shared);
                 let rx = Arc::clone(&rx);
+                let boundary = chain_boundary.clone();
                 scope.spawn(move || loop {
                     let job = {
                         let guard = rx.lock().unwrap();
@@ -542,7 +582,7 @@ pub fn run_duplicates(
                     if shared.cancel.is_cancelled() {
                         break;
                     }
-                    match hash_file(&job.member, options, reader, &shared) {
+                    match hash_file(&job.member, options, reader, &shared, boundary.as_deref()) {
                         Ok(Some((member, hash))) => {
                             shared.files_hashed.fetch_add(1, Ordering::Relaxed);
                             shared
@@ -699,12 +739,36 @@ fn hash_file(
     options: &DuplicateOptions,
     reader: &dyn ContentReaderFactory,
     shared: &Shared,
+    chain_boundary: Option<&Path>,
 ) -> Result<Option<(DuplicateMember, ContentHash)>, HashError> {
     if shared.cancel.is_cancelled() {
         return Err(HashError::Cancelled);
     }
     let _ = options.mutation_policy; // Reject — the only implemented policy
     let observed_size = member.size;
+
+    // ---- check 0: intermediate-path chain guard (Phase 3.2) -------------
+    // Every ancestor component below the run's boundary must still be a
+    // plain directory; a component that became a link redirects resolution
+    // and is refused before anything is opened. Errors map exactly like
+    // open failures below.
+    if let Some(boundary) = chain_boundary {
+        if let Err(chain_err) = reader.validate_path_chain(member.path.as_path(), boundary) {
+            return match chain_err {
+                ContentError::UnexpectedLink | ContentError::NotRegularFile => {
+                    Err(HashError::Failure(HashFailure::new(
+                        member.path.clone(),
+                        HashFailureKind::Changed,
+                        "path chain no longer resolves through the observed directories \
+                         (an ancestor became a link)",
+                    )))
+                }
+                ContentError::OpenFailed(e) => Err(HashError::Failure(failure_from_io(member, &e))),
+                ContentError::ReadFailed(e) => Err(HashError::Failure(failure_from_io(member, &e))),
+                ContentError::Aborted => Err(HashError::Cancelled),
+            };
+        }
+    }
 
     // Outcome carried out of the closure.
     let mut outcome: Result<(DuplicateMember, ContentHash), std::io::Error> = Ok((
