@@ -66,14 +66,15 @@ pub(super) fn is_hidden(name: &OsStr) -> bool {
 ///   immediately and the fstat inspection below rejects it.
 /// - `O_CLOEXEC`: hygiene; the engine spawns no processes.
 ///
-/// Phase 3.2 intermediate-path guard: every ancestor component is opened
-/// `O_NOFOLLOW|O_DIRECTORY` before the final open, so a directory that
-/// became a symlink anywhere in the chain is refused — the same structural
-/// guard as the Windows reparse-ancestor validation. The scanner never
-/// descends into links (`SymlinkPolicy::RecordOnly`), so a legitimately
-/// observed path can never contain a symlink ancestor. An ancestor that
-/// cannot be opened at all is not treated as a link: the final open is
-/// authoritative and the identity/mutation checks still apply.
+/// Phase 3.2 intermediate-path guard: every ancestor component is checked
+/// (`symlink_metadata` — the link is named by its inode type) before the
+/// final open, so a directory that became a symlink anywhere in the chain
+/// is refused — the same structural guard as the Windows reparse-ancestor
+/// validation. The scanner never descends into links
+/// (`SymlinkPolicy::RecordOnly`), so a legitimately observed path can never
+/// contain a symlink ancestor. An ancestor that cannot be stat-ed at all is
+/// not treated as a link: the final open is authoritative and the
+/// identity/mutation checks still apply.
 ///
 /// The observed-vs-opened `(st_dev, st_ino)` comparison in the identity
 /// layer remains the authoritative proof that the hashed object is the
@@ -99,28 +100,25 @@ pub(super) fn open_no_follow(path: &Path) -> Result<fs::File, ContentError> {
 
 /// Phase 3.2 intermediate-path guard (Unix twin of the Windows
 /// reparse-ancestor validation): every ancestor component must still be a
-/// plain directory. `O_NOFOLLOW|O_DIRECTORY` on a symlinked ancestor fails
-/// with `ELOOP` → [`ContentError::UnexpectedLink`]; other ancestor-open
-/// failures degrade to the final open's authoritative error.
+/// plain directory. Detection is via `symlink_metadata` — the link is named
+/// by the inode type (`S_ISLNK`) with no errno interpretation involved —
+/// so the refusal is deterministic on every Unix flavor. A hostile symlink
+/// ancestor is refused `UnexpectedLink`; other ancestor failures (ACL,
+/// vanished) degrade to the final open's authoritative error, and the
+/// final object's identity comparison remains the authoritative proof.
 fn validate_no_symlink_ancestors(path: &Path) -> Result<(), ContentError> {
-    use std::os::unix::fs::OpenOptionsExt;
     for ancestor in path.ancestors().skip(1) {
         // Stop at the filesystem root (no file name).
         if ancestor.file_name().is_none() {
             break;
         }
-        let opened = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(ancestor);
-        match opened {
-            Ok(dir) => drop(dir),
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+        match fs::symlink_metadata(ancestor) {
+            Ok(md) if md.file_type().is_symlink() => {
                 return Err(ContentError::UnexpectedLink);
             }
-            // Ancestor is not a directory (swapped to a file/FIFO): the
-            // final open fails with the authoritative ENOTDIR; other
-            // errors (ACL) degrade to the final open too.
+            Ok(_) => {}
+            // Ancestor unreadable (ACL/vanished): not evidence of a link.
+            // The final open and the identity comparison remain the gates.
             Err(_) => continue,
         }
     }
