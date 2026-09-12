@@ -29,15 +29,22 @@ fn cancel_before_start_yields_typed_cancelled_state() {
 fn cancel_during_scan_stops_and_reports_cancelled() {
     let fs = Arc::new(FakeFs::new());
     let root = PathBuf::from("/cancel-mid");
+    // The tree must be LARGER than the scanner's entry-channel bound (1024):
+    // with a tree that fits in the channel buffer, the workers can complete
+    // the whole traversal before the drain loop observes the cancel point,
+    // making "stopped before the whole tree" scheduling-dependent (observed
+    // as a rare CI flake). Past the bound, workers block on send, the drain
+    // necessarily reaches the 41st entry while traversal is still in
+    // flight, and cancellation is guaranteed to bite mid-scan.
     fs.add_dir(&root);
-    for d in 0..20 {
+    for d in 0..40 {
         let dir = root.join(format!("d{d:02}"));
         fs.add_dir(&dir);
         for f in 0..50 {
             fs.add_file(&dir.join(format!("f{f:02}.txt")), 1);
         }
     }
-    let total_files = 20u64 * 50;
+    let total_files = 40u64 * 50;
 
     let cancel = CancelHandle::new();
     let mut rec = Recording { events: Vec::new() };
