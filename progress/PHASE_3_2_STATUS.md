@@ -3,7 +3,9 @@
 - **Phase:** 3.2 — Windows object identity & path-chain TOCTOU hardening
   (closes the Windows identity gap Phase 3.1 documented as limitation)
 - **Verdict:** **PHASE 3.2 VERIFIED** (full local gate green on Windows;
-  CI matrix green — runs recorded below; every job verified individually)
+  CI matrix green on the implementation SHA `f33dfb0` — run
+  `34677235698`, all 4 jobs success with every step verified individually
+  from the Actions API)
 - **Date:** 2026-09-11/12 · **Machine:** Windows 11 Pro x64, 8 GB RAM
 - **Starting SHA:** `e290c0b` (Phase 3.1 record, clean tree)
 - **History:** implementation `ab5dc57` → tests+docs `973e007` (run
@@ -15,10 +17,12 @@
   detection `0fa7bcc` (run `34675193661`: ubuntu+windows ✓; macos ✗ — the
   now-working guard refused macOS's legitimate `/var` symlink prefix:
   false positives on caller-chosen path components) → **boundary-aware
-  redesign** (this SHA): the guard validates ancestors only at or below
-  the staged candidates' deepest common ancestor. Every failure was
-  diagnosed from its actual CI log before repair; nothing was papered
-  over.
+  redesign** `09aaba7` (run `34676468192`: ubuntu+macos ✓; windows ✗ —
+  pre-existing Phase 1 cancel-test flake, unrelated: its 1000-entry tree
+  fit the 1024-slot entry channel, letting traversal complete before the
+  drain reached the cancel point) → de-flaked fixture `f33dfb0`
+  (run `34677235698`: **all green**). Every failure was diagnosed from
+  its actual CI log before repair; nothing was papered over.
 
 ## Why this phase existed
 
@@ -144,8 +148,11 @@ cancellation, and deterministic ordering intact (perf smokes green).
   --workspace` **328 passed / 0 failed** (313 at Phase 3.1; +11
   adversarial +4 identity unit tests) · identity perf smoke ✓ · release
   >4 GiB streaming proof ✓.
-- **CI:** recorded below after the matrix run — each job verified
-  individually from the Actions API.
+- **CI:** run `34677235698` on `f33dfb0` — **success**, all 4 jobs
+  verified individually from the Actions API: `rust (windows-latest)`,
+  `rust (ubuntu-latest)`, `rust (macos-latest)` (each 14/14 steps incl.
+  Phase 1/2/3 perf smokes and the release >4 GiB streaming proof),
+  `frontend`.
 
 ## Self-audit (brief §final self-audit, answered from the code)
 
