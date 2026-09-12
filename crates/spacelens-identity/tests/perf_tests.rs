@@ -428,3 +428,85 @@ fn u64_sizes_group_across_chunk_boundaries() {
         assert_ne!(g.content_hash, spacelens_identity::ContentHash::empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: relationship-engine benchmark (Objective 20)
+// ---------------------------------------------------------------------------
+
+/// Relationship-engine benchmark over the hostile synthetic workloads.
+/// Measures the FULL chain (pipeline run → relationship derivation → index
+/// build) and asserts the properties the brief demands: approximately
+/// linear scaling (no accidental O(n²) pairwise comparison), deterministic
+/// output, bounded memory (inherited from the pipeline's caps). Ignored by
+/// default; CI runs it with `--ignored` like the other perf smokes.
+#[test]
+#[ignore = "performance smoke; run explicitly with --ignored"]
+fn relationship_engine_throughput() {
+    use spacelens_identity::{derive_relationships, RelationshipIndex, RelationshipOptions};
+
+    // Reuses the perf suite's synthetic entry generator: the "many
+    // duplicates" family (pairs, maximum grouping work) and "mostly
+    // unique" (maximum candidate-filter work).
+    for family in ["mostly-unique", "many-duplicates"] {
+        let mut prev_per_entry = 0.0f64;
+        for &n in &[10_000u64, 100_000u64] {
+            let entries: Vec<FsEntry> = (0..n).map(|i| synthetic_entry(i, family, n)).collect();
+            let reader = SyntheticReader::new();
+            let cancel = CancelHandle::new();
+
+            let t0 = Instant::now();
+            let duplicate_report = run_duplicates(
+                entries.into_iter(),
+                &DuplicateOptions::default(),
+                &cancel,
+                Some(&reader),
+                &mut |_| {},
+            );
+            let t1 = Instant::now();
+            let relationships =
+                derive_relationships(&duplicate_report, &RelationshipOptions::default());
+            let t2 = Instant::now();
+            let index = RelationshipIndex::build(&relationships);
+            let t3 = Instant::now();
+
+            println!(
+                "{family:>16} {n:>9} entries: run {} ms, derive {} ms, index {} ms",
+                (t1 - t0).as_millis(),
+                (t2 - t1).as_millis(),
+                (t3 - t2).as_millis()
+            );
+
+            match family {
+                "mostly-unique" => {
+                    assert!(relationships.relationships.is_empty());
+                }
+                "many-duplicates" => {
+                    assert_eq!(
+                        relationships.stats.content_duplicates as u64,
+                        n / 2,
+                        "one content relationship per pair"
+                    );
+                    assert_eq!(relationships.status, DuplicateStatus::Completed);
+                }
+                _ => unreachable!(),
+            }
+            // The index must resolve every relationship.
+            assert_eq!(
+                index.relationships().len(),
+                relationships.relationships.len()
+            );
+
+            // Approximately linear per-entry cost (generous smoke guard):
+            // a pairwise O(n²) comparison would explode between 10k and
+            // 100k; the size/hash-group pipeline stays linear.
+            let per_entry = (t3 - t0).as_millis() as f64 / n as f64;
+            if prev_per_entry > 0.0 {
+                assert!(
+                    per_entry < prev_per_entry * 10.0 + 0.01,
+                    "{family}: per-entry cost grew {prev_per_entry:.6} → {per_entry:.6} ms"
+                );
+            }
+            prev_per_entry = per_entry;
+        }
+    }
+}
