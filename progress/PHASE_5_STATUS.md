@@ -2,8 +2,8 @@
 
 - **Phase:** 5 — System Memory & Change History
 - **Verdict:** **PHASE 5 VERIFIED** (full local gate green on Windows;
-  CI matrix green on the implementation SHA — runs recorded below; every
-  job verified individually from the Actions API)
+  CI matrix green on `d547b9c` — run `34699195194`, all 4 jobs success
+  with every step verified individually from the Actions API)
 - **Date:** 2026-09-12 · **Machine:** Windows 11 Pro x64, 8 GB RAM
 - **Starting SHA:** `273ee8c` (Phase 4 record, clean tree)
 
@@ -126,7 +126,11 @@ guard proves no pairwise comparison. Local: 10k → 139 ms, 100k → 1.8 s.
   --all-targets -- -D warnings` ✓ · `cargo test --workspace` **406
   passed / 0 failed** (364 at Phase 4; +42 Phase 5) · Phase 1–4 perf
   smokes ✓ · Phase 5 comparison-scaling smoke ✓ · release >4 GiB proof ✓.
-- **CI:** recorded below after the matrix run.
+- **CI:** run `34699195194` on `d547b9c` — **success**, all 4 jobs
+  verified individually: `rust (windows-latest)`, `rust (ubuntu-latest)`,
+  `rust (macos-latest)` (each 15/15 steps incl. Phase 1–4 perf smokes,
+  the new Phase 5 comparison-scaling smoke, and the release >4 GiB proof),
+  `frontend` (8/8). First-run green.
 
 ## Final self-audit (answered from the code)
 
