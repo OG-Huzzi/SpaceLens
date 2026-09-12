@@ -12,8 +12,8 @@ use spacelens_classifier::{Category, Subcategory};
 use spacelens_engine::{EntryKind, FsEntry};
 use spacelens_history::{
     BuildError, ClassificationRef, ConfigFingerprint, HistoryStore, ObservedEntry, ObservedKind,
-    QueryLimits, RetentionPolicy, RunCounts, RunId, RunRecord, RunStatus, Snapshot, SnapshotBuilder,
-    StoreError,
+    QueryLimits, RetentionPolicy, RunCounts, RunId, RunRecord, RunStatus, Snapshot,
+    SnapshotBuilder, StoreError,
 };
 use spacelens_identity::{
     ContentRef, DuplicateStatus, MemberRef, ObjectRef, Relationship, RelationshipKind,
@@ -215,7 +215,12 @@ fn double_commit_rejected() {
     let record = run_record("twice-run", 1, RunStatus::Completed, &["/scope-a"]);
     let snapshot = snapshot_of(
         record.run_id.clone(),
-        &[fs_entry("/scope-a/one.bin", EntryKind::File, 5, Some((1, 7)))],
+        &[fs_entry(
+            "/scope-a/one.bin",
+            EntryKind::File,
+            5,
+            Some((1, 7)),
+        )],
     );
 
     store.begin_run(&record).unwrap();
@@ -231,7 +236,10 @@ fn double_commit_rejected() {
     assert_eq!(run.status, RunStatus::Completed);
     let loaded = store.load_run_snapshot(&record.run_id).unwrap().unwrap();
     assert_eq!(loaded.snapshot.entries.len(), 1);
-    assert_eq!(loaded.snapshot.entries[0].path, PathBuf::from("/scope-a/one.bin"));
+    assert_eq!(
+        loaded.snapshot.entries[0].path,
+        PathBuf::from("/scope-a/one.bin")
+    );
     assert_eq!(loaded.snapshot.entries[0].size, Some(5));
 }
 
@@ -274,7 +282,9 @@ fn cancel_and_fail_statuses_persist() {
 
     let failed = run_record("run-failed", 2, RunStatus::Running, &["/scope-a"]);
     store.begin_run(&failed).unwrap();
-    store.abandon_run(&failed.run_id, RunStatus::Failed).unwrap();
+    store
+        .abandon_run(&failed.run_id, RunStatus::Failed)
+        .unwrap();
 
     let got_cancelled = store.get_run(&cancelled.run_id).unwrap().unwrap();
     assert_eq!(got_cancelled.status, RunStatus::Cancelled);
@@ -309,7 +319,12 @@ fn crash_recovery_marks_running_as_failed() {
     store.begin_run(&record).unwrap();
     let snapshot = snapshot_of(
         record.run_id.clone(),
-        &[fs_entry("/scope-a/alive.bin", EntryKind::File, 9, Some((1, 70)))],
+        &[fs_entry(
+            "/scope-a/alive.bin",
+            EntryKind::File,
+            9,
+            Some((1, 70)),
+        )],
     );
     store.commit_run(&record, &snapshot, None).unwrap();
     let done = store.get_run(&record.run_id).unwrap().unwrap();
@@ -333,10 +348,17 @@ fn latest_run_for_scope_skips_partial_and_respects_coverage() {
     // A newer cancelled run: partial by definition, never a baseline.
     let run2 = run_record("scope-run-2", 2, RunStatus::Running, &["/scope-a"]);
     store.begin_run(&run2).unwrap();
-    store.abandon_run(&run2.run_id, RunStatus::Cancelled).unwrap();
+    store
+        .abandon_run(&run2.run_id, RunStatus::Cancelled)
+        .unwrap();
 
     // The newest run: completed with limits, still full-scope.
-    let run3 = run_record("scope-run-3", 3, RunStatus::CompletedWithLimits, &["/scope-a"]);
+    let run3 = run_record(
+        "scope-run-3",
+        3,
+        RunStatus::CompletedWithLimits,
+        &["/scope-a"],
+    );
     store.begin_run(&run3).unwrap();
     store
         .commit_run(&run3, &empty_snapshot(run3.run_id.clone()), None)
@@ -367,14 +389,24 @@ fn history_for_path_across_runs_ordered_newest_first() {
         "path-run-old",
         1,
         &["/scope-a"],
-        &[fs_entry("/scope-a/keep.bin", EntryKind::File, 100, Some((1, 10)))],
+        &[fs_entry(
+            "/scope-a/keep.bin",
+            EntryKind::File,
+            100,
+            Some((1, 10)),
+        )],
     );
     let newer = commit_completed_run(
         &mut store,
         "path-run-new",
         2,
         &["/scope-a"],
-        &[fs_entry("/scope-a/keep.bin", EntryKind::File, 250, Some((1, 10)))],
+        &[fs_entry(
+            "/scope-a/keep.bin",
+            EntryKind::File,
+            250,
+            Some((1, 10)),
+        )],
     );
 
     let points = store
@@ -466,7 +498,12 @@ fn query_limits_truncate() {
             &format!("limit-run-{n}"),
             n,
             &["/scope-a"],
-            &[fs_entry("/scope-a/moved.bin", EntryKind::File, n * 100, Some((1, n)))],
+            &[fs_entry(
+                "/scope-a/moved.bin",
+                EntryKind::File,
+                n * 100,
+                Some((1, n)),
+            )],
         );
     }
 
@@ -566,7 +603,9 @@ fn relationship_round_trip() {
     let member_a = fs_entry("/scope-a/a.bin", EntryKind::File, 10, Some((1, 10)));
     let member_b = fs_entry("/scope-a/b.bin", EntryKind::File, 10, Some((1, 11)));
     let mut builder = SnapshotBuilder::new();
-    builder.push_entry(&member_a, None).push_entry(&member_b, None);
+    builder
+        .push_entry(&member_a, None)
+        .push_entry(&member_b, None);
     builder.set_content(Path::new("/scope-a/a.bin"), "deadbeef".to_string());
     builder.set_content(Path::new("/scope-a/b.bin"), "deadbeef".to_string());
     let snapshot = builder.build(record.run_id.clone()).unwrap();
@@ -622,9 +661,7 @@ fn relationship_round_trip() {
         finished_at: UNIX_EPOCH,
     };
 
-    store
-        .commit_run(&record, &snapshot, Some(&report))
-        .unwrap();
+    store.commit_run(&record, &snapshot, Some(&report)).unwrap();
 
     let history = store
         .relationship_history("content-deadbeef", &QueryLimits::default())

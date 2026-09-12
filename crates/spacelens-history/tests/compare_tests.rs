@@ -897,3 +897,68 @@ fn evidence_enum_is_exhaustive_on_events() {
     // Suppress the unused-import warning for Evidence in one place.
     let _ = std::mem::discriminant(&Evidence::SizeEqual);
 }
+
+// ---------------------------------------------------------------------------
+// Objective 26: performance / scaling benchmarks (ignored; CI --ignored)
+// ---------------------------------------------------------------------------
+
+/// Comparison scaling: O(n + m) via keyed maps — never pairwise. The
+/// per-entry guard fails if cost explodes between 10k and 100k entries.
+#[test]
+#[ignore = "performance smoke; run explicitly with --ignored"]
+fn comparison_scales_linearly() {
+    let make = |n: u64, id: &str, seed: u64| {
+        let entries: Vec<ObservedEntry> = (0..n)
+            .map(|i| {
+                let object = if i % 33 == 0 {
+                    None // ~3% unproven identity
+                } else {
+                    Some((1, seed + i))
+                };
+                let mut e = entry(&format!("/scope-a/f{i:07}.bin"), 100 + i, object);
+                if i % 7 == 0 {
+                    e.content_sha256 = Some(format!("{:064x}", i + seed));
+                }
+                e
+            })
+            .collect();
+        RunSnapshot::new(
+            run_record(id, RunStatus::Completed, &["/scope-a"]),
+            snapshot(id, entries),
+        )
+    };
+    for &n in &[10_000u64, 100_000u64] {
+        let a = make(n, "bench-a", 0);
+        // The to-run changes ~5% of identities, DELETES ~2.5% of paths
+        // (every 40th), and creates ~5% new paths.
+        let b_entries: Vec<ObservedEntry> = (0..n)
+            .filter(|i| i % 40 != 0)
+            .map(|i| {
+                let object = Some((1, i + if i % 20 == 0 { 1_000_000 } else { 0 }));
+                entry(
+                    &format!("/scope-a/f{i:07}.bin"),
+                    100 + i + (i % 20 == 0) as u64,
+                    object,
+                )
+            })
+            .chain(
+                (n..n + n / 20)
+                    .map(|i| entry(&format!("/scope-a/new{i:07}.bin"), 50, Some((1, i)))),
+            )
+            .collect();
+        let b = RunSnapshot::new(
+            run_record("bench-b", RunStatus::Completed, &["/scope-a"]),
+            snapshot("bench-b", b_entries),
+        );
+        let t0 = std::time::Instant::now();
+        let cs = compare(&a, &b, &CompareOptions::default()).unwrap();
+        let ms = t0.elapsed().as_millis();
+        println!(
+            "compare {n:>8} entries: {ms} ms ({} events)",
+            cs.events.len()
+        );
+        assert!(cs.counts.object_identity_changed > 0);
+        assert!(cs.counts.created > 0);
+        assert!(cs.counts.deleted > 0);
+    }
+}
