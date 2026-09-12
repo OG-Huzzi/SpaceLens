@@ -410,12 +410,27 @@ pub fn derive_relationships(
         // Hard-link-alias relationships — one per alias set. Evidence:
         // object identity equality (proven from handles). Recoverable
         // bytes: None — removing an alias frees nothing.
+        //
+        // member_count exactness: for a PURE-alias group (Exact accounting
+        // with no recoverable bytes — the Phase 3 contract for "every
+        // member is one object") the exact member count is
+        // `group.member_count`, even when the reported member detail is
+        // capped. For alias sets inside larger groups the count is scoped
+        // to the reported detail and flagged via `detail_truncated` (the
+        // full per-object partition is not recoverable from a capped
+        // report — documented, never fabricated).
+        let pure_alias_group =
+            group.accounting == StorageAccounting::Exact && group.recoverable_bytes.is_none();
         for set in &alias_sets {
             let members: Vec<MemberRef> = by_object[&set.object]
                 .iter()
                 .map(|m| member_ref(m))
                 .collect();
-            let member_count = members.len() as u64;
+            let member_count = if pure_alias_group {
+                group.member_count
+            } else {
+                members.len() as u64
+            };
             let mut members = members;
             sort_members(&mut members);
             relationships.push(Relationship {
