@@ -2,8 +2,8 @@
 
 - **Phase:** 4 — Relationship & Duplicate Intelligence
 - **Verdict:** **PHASE 4 VERIFIED** (full local gate green on Windows;
-  CI matrix green on the implementation SHA — runs recorded below; every
-  job verified individually from the Actions API)
+  CI matrix green on `eaa3b2a` — run `34681872324`, all 4 jobs success
+  with every step verified individually from the Actions API)
 - **Date:** 2026-09-12 · **Machine:** Windows 11 Pro x64, 8 GB RAM
 - **Starting SHA:** `e15f03d` (Phase 3.2 record, clean tree)
 
@@ -116,7 +116,11 @@ safety guarantee regressed.
   unix-gated paths) · `cargo test --workspace` **364 passed / 0 failed**
   (328 at Phase 3.2; +36 Phase 4) · Phase 3+4 perf smokes ✓ · release
   >4 GiB streaming proof ✓.
-- **CI:** recorded below after the matrix run.
+- **CI:** run `34681872324` on `eaa3b2a` — **success**, all 4 jobs
+  verified individually: `rust (windows-latest)`, `rust (ubuntu-latest)`,
+  `rust (macos-latest)` (each 14/14 steps incl. the Phase 1/2 perf smokes,
+  the Phase 3+4 identity+relationship perf smoke, and the release >4 GiB
+  streaming proof), `frontend` (8/8). First-run green.
 
 ## Self-audit (Objective — final questions, answered from the code)
 
