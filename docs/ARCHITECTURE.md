@@ -74,6 +74,12 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   so delete+recreate impostors are detectable), an ancestor-chain guard
   (a symlink/junction anywhere in the observed path's chain is refused at
   hash time), and a scan→open mtime bracket.
+- `relationships` — the Phase 4 relationship-intelligence layer: typed
+  relationship kinds (hard-link aliases vs content duplicates), categorical
+  evidence, deterministic ordering, conservative recoverability, undetermined
+  summaries, and a query index. A PURE derivation over the verified pipeline
+  output — no I/O, no destructive actions, no recommendations yet
+  (`crates/spacelens-identity::relationships`, docs/RELATIONSHIPS.md).
   The persistent hash cache belongs with persistence (later phase); Phase 3
   deliberately added no database.
 - `recommender` — produces opportunities with reasons + recovery estimates.

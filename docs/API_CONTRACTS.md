@@ -84,6 +84,38 @@ Phase 3.1 contract additions (all additive within `v1`):
 No IPC command surfaces these yet; the types are the contract for
 future phases and are covered by engine tests.
 
+## Relationship contracts (Phase 4)
+
+Namespace: `spacelens.v1.relationship.*` (engine-side in
+`crates/spacelens-identity::relationships`; payload shapes follow the same
+camelCase + bytes-as-integers rules as above). The relationship layer is a
+PURE derivation over one verified duplicate-pipeline run — no I/O, no
+deletion, no recommendations. See docs/RELATIONSHIPS.md for full semantics.
+
+- `RelationshipKind`: `hardLinkAlias` (same filesystem object, multiple
+  paths — no second copy) | `contentDuplicate` (distinct objects,
+  byte-identical content). Same size / same name / same path alone never
+  produce a relationship.
+- `Evidence` (per relationship, canonical order): `OBJECT_IDENTITY_EQUAL` |
+  `CONTENT_HASH_EQUAL` | `SIZE_EQUAL` — categorical proof, never a
+  confidence score.
+- `Relationship`: deterministic id (identity-derived, no counters), kind,
+  exact member count (paths), distinct objects where provable, members
+  (scan-scoped entry refs + paths, no filesystem records copied), alias
+  sets inside content duplicates, logical vs recoverable bytes
+  (conservative; `null` where unprovable), accounting
+  (`exact`|`estimated`), detail-truncation flag.
+- `RelationshipReport`: reused `DuplicateStatus` (incl.
+  `completedWithLimits`), relationships in canonical order, exact
+  truncation counter, undetermined summary (typed Phase 3 failure kinds +
+  exact not-examined counts), run provenance (timestamps).
+- Content identity published as `sha256Hex` + `algorithm` tag; raw digests
+  and platform structs never cross the boundary.
+
+No IPC command surfaces these yet; the types are the contract for future
+phases (storage search, history, cleanup recommendations — not built here)
+and are covered by engine tests.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

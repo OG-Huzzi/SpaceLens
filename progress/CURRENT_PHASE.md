@@ -1,12 +1,33 @@
 # SpaceLens — Current Phase
 
-- **Current phase:** PHASE 3.2 — Windows object identity & path-chain
-  TOCTOU hardening (closes the Windows identity gap from Phase 3.1)
-- **Status:** PHASE 3.2 — VERIFIED (full local gate green; CI verified per
-  PHASE_3_2_STATUS.md)
-- **Last updated:** 2026-09-11 (Phase 3.2 hardening)
+- **Current phase:** PHASE 4 — Relationship & duplicate intelligence
+- **Status:** PHASE 4 — VERIFIED (full local gate green; CI verified per
+  PHASE_4_STATUS.md)
+- **Last updated:** 2026-09-12 (Phase 4 relationship layer)
 
-## What happened (2026-09-11, Phase 3.2)
+## What happened (2026-09-12, Phase 4)
+
+The Relationship Intelligence Layer: a PURE derivation over the verified
+Phase 3 pipeline output (no I/O, no destructive actions). Typed kinds —
+`HardLinkAlias` (same object, multiple paths, nothing recoverable) vs
+`ContentDuplicate` (distinct objects, same size + SHA-256) — never
+conflated; alias sets inside mixed groups exposed explicitly. Categorical
+evidence (`OBJECT_IDENTITY_EQUAL` / `CONTENT_HASH_EQUAL` / `SIZE_EQUAL`)
+replaces vague confidence; ids are identity-derived and deterministic.
+Formal invariants pinned: same size/name/path alone never imply
+duplication; failed hashes stay typed-undetermined, never "no duplicates";
+capped runs report `CompletedWithLimits` with exact not-examined counts.
+Conservative recoverability (`size × (distinct objects − 1)` under Exact,
+upper bound under Estimated, `None` where unprovable). Canonical ordering
+(kind → identity → path bytes) proven schedule-independent; boundedness
+transitive over the Phase 3 caps plus an own record cap with exact
+truncation. Query API (`RelationshipIndex`: path/object/content lookups)
+prepares storage search, history, and cleanup recommendation phases
+without redesign. 36 new tests (matrix + invariants + adversarial scale +
+real fs) and a relationship-engine benchmark (linear scaling — no O(n²)).
+No Phase 5 work started. Full record in PHASE_4_STATUS.md.
+
+## Previous pass (2026-09-11/12, Phase 3.2)
 
 Windows scan-time object identity is now real: a query-only handle
 (`FILE_READ_ATTRIBUTES`, share-all, `OPEN_REPARSE_POINT`) reads
