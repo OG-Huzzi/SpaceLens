@@ -15,7 +15,7 @@ use spacelens_engine::ErrorCategory;
 /// What kind of failure produced a [`HashFailure`]. `Hash` errors are
 /// engine-categorized (permission, sharing violation, vanished, …);
 /// `Policy` errors are the pipeline's own contract rejections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum HashFailureKind {
     /// The file could not be opened or read; `ErrorCategory` on the failure

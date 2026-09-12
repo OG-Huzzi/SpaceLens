@@ -49,6 +49,7 @@ pub mod error;
 pub mod hash;
 pub mod pipeline;
 pub mod policy;
+pub mod relationships;
 
 pub use duplicate::{
     DuplicateGroup, DuplicateMember, MemberOrder, StorageAccounting, DUPLICATE_GROUP_DETAIL_CAP,
@@ -64,4 +65,9 @@ pub use policy::{
     ContentReaderFactory, DefaultReaderFactory, MutationPolicy, DEFAULT_MAX_CANDIDATES_PER_GROUP,
     DEFAULT_MAX_GROUP_MEMBERS_REPORTED, DEFAULT_MAX_TRACKED_CANDIDATES,
     DEFAULT_MAX_TRACKED_SIZE_GROUPS,
+};
+pub use relationships::{
+    derive_relationships, AliasSet, ContentRef, MemberRef, ObjectRef, Relationship,
+    RelationshipIndex, RelationshipKind, RelationshipOptions, RelationshipReport,
+    RelationshipStats, RelationshipStatus, Undetermined, UndeterminedDetail,
 };

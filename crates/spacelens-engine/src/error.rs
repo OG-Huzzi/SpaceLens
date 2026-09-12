@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// Stable error categories. These map 1:1 to IPC error codes later; the
 /// wording of human messages is a UI concern and does not live here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCategory {
     /// Access was denied (ACLs, TCC, EACCES/EPERM). Recoverable: skip + tally.
