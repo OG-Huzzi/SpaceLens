@@ -71,6 +71,11 @@ use crate::platform::Platform;
 /// precedence than any name/extension signal: *where something lives* never
 /// overrides *what it is*, but it does classify entries that carry no signal
 /// of their own.
+/// Version of the classification rule tables (Phase 5 history contract):
+/// persisted snapshots record this so historical classifications remain
+/// interpretable when rules evolve. Bump on any semantic rule change.
+pub const RULES_VERSION: u32 = 1;
+
 pub const LOCATION_TIER: u8 = 6;
 
 /// When a rule is allowed to win. A gated rule still matches (and is still

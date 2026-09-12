@@ -67,7 +67,7 @@ pub use policy::{
     DEFAULT_MAX_TRACKED_SIZE_GROUPS,
 };
 pub use relationships::{
-    derive_relationships, AliasSet, ContentRef, MemberRef, ObjectRef, Relationship,
+    derive_relationships, AliasSet, ContentRef, Evidence, MemberRef, ObjectRef, Relationship,
     RelationshipIndex, RelationshipKind, RelationshipOptions, RelationshipReport,
     RelationshipStats, RelationshipStatus, Undetermined, UndeterminedDetail,
 };

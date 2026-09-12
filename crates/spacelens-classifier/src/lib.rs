@@ -47,7 +47,7 @@ pub use context::{apply_context, ParentContext, ParentContextTracker};
 pub use evidence::{Evidence, EvidenceKind, EvidenceList, RuleId, MAX_EVIDENCE};
 pub use pathctx::{LocationClass, LocationMatch, LocationRule, PathContext, LOCATION_RULES};
 pub use platform::Platform;
-pub use rules::{evaluate, rule_by_id, rule_category, MatchOutcome, Rule, RuleGate, RULES};
+pub use rules::{evaluate, rule_by_id, rule_category, MatchOutcome, Rule, RuleGate, RULES, RULES_VERSION};
 
 #[cfg(test)]
 mod tests {

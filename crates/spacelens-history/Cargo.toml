@@ -1,0 +1,23 @@
+[package]
+name = "spacelens-history"
+version = "0.0.0"
+edition = "2021"
+description = "SpaceLens system memory — Phase 5 (runs, snapshots, change history)"
+license = "UNLICENSED"
+
+[lib]
+name = "spacelens_history"
+crate-type = ["lib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+spacelens-core = { path = "../spacelens-core" }
+spacelens-engine = { path = "../spacelens-engine" }
+spacelens-classifier = { path = "../spacelens-classifier" }
+spacelens-identity = { path = "../spacelens-identity" }
+
+[dev-dependencies]
+tempfile = "3"

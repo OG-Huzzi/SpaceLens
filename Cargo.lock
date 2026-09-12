@@ -342,6 +342,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spacelens-history"
+version = "0.0.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spacelens-classifier",
+ "spacelens-core",
+ "spacelens-engine",
+ "spacelens-identity",
+ "tempfile",
+]
+
+[[package]]
 name = "spacelens-identity"
 version = "0.0.0"
 dependencies = [
