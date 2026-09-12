@@ -74,6 +74,14 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   so delete+recreate impostors are detectable), an ancestor-chain guard
   (a symlink/junction anywhere in the observed path's chain is refused at
   hash time), and a scan→open mtime bracket.
+- `history` — the Phase 5 system-memory layer: persisted run records +
+  normalized snapshots (SQLite via the existing core schema, forward-only
+  migrations), a PURE comparison engine deriving typed evidence-backed
+  change events (incomplete-scan safe: partial runs never fake deletions;
+  scope boundaries enforced; configuration fingerprints preserved), a
+  query API (path/object/content/relationship history), deterministic
+  bounded retention, and crash recovery
+  (`crates/spacelens-history`, docs/HISTORY.md).
 - `relationships` — the Phase 4 relationship-intelligence layer: typed
   relationship kinds (hard-link aliases vs content duplicates), categorical
   evidence, deterministic ordering, conservative recoverability, undetermined

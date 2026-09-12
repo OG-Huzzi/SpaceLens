@@ -1,34 +1,35 @@
 # SpaceLens — Current Phase
 
-- **Current phase:** PHASE 4 — Relationship & duplicate intelligence
-- **Status:** PHASE 4 — VERIFIED (full local gate green; CI verified per
-  PHASE_4_STATUS.md)
-- **Last updated:** 2026-09-12 (Phase 4 relationship layer)
+- **Current phase:** PHASE 5 — System memory & change history
+- **Status:** PHASE 5 — VERIFIED (full local gate green; CI verified per
+  PHASE_5_STATUS.md)
+- **Last updated:** 2026-09-12 (Phase 5 history layer)
 
-## What happened (2026-09-12, Phase 4)
+## What happened (2026-09-12, Phase 5)
 
-The Relationship Intelligence Layer: a PURE derivation over the verified
-Phase 3 pipeline output (no I/O, no destructive actions). Typed kinds —
-`HardLinkAlias` (same object, multiple paths, nothing recoverable) vs
-`ContentDuplicate` (distinct objects, same size + SHA-256) — never
-conflated; alias sets inside mixed groups exposed explicitly. Categorical
-evidence (`OBJECT_IDENTITY_EQUAL` / `CONTENT_HASH_EQUAL` / `SIZE_EQUAL`)
-replaces vague confidence; ids are identity-derived and deterministic.
-Formal invariants pinned: same size/name/path alone never imply
-duplication; failed hashes stay typed-undetermined, never "no duplicates";
-capped runs report `CompletedWithLimits` with exact not-examined counts.
-Conservative recoverability (`size × (distinct objects − 1)` under Exact,
-upper bound under Estimated, `None` where unprovable). Canonical ordering
-(kind → identity → path bytes) proven schedule-independent; boundedness
-transitive over the Phase 3 caps plus an own record cap with exact
-truncation. Query API (`RelationshipIndex`: path/object/content lookups)
-prepares storage search, history, and cleanup recommendation phases
-without redesign. 36 new tests (matrix + invariants + adversarial scale +
-real fs) and a relationship-engine benchmark (linear scaling — no O(n²)).
-No Phase 5 work started. Full record in PHASE_4_STATUS.md.
+The REMEMBER layer: a new `spacelens-history` crate extending the
+existing SQLite persistence (forward-only migration v2 on the core
+schema — no second abstraction). Run/snapshot identity with the engine's
+status conventions; normalized per-path observation rows with proven
+object identity, stored classifications (rules-versioned), and verified
+content identities reused from Phase 3/4 (never re-hashed). A PURE
+comparison engine derives typed, evidence-backed change events
+(Created/Deleted/Moved/Renamed/Modified/SizeChanged/
+ClassificationChanged/Relationship±/MembershipChanged/
+ObjectIdentityChanged/BecameInaccessible/Accessible) via keyed maps —
+O(n+m), database-free, deterministic. Hard invariant: created/deleted
+claims require full-scope runs — a cancelled or failed scan can never
+produce mass deletions. Scope mismatches are rejected; configuration
+fingerprints (including the new classifier RULES_VERSION) are persisted
+per run. Atomic run commits, deterministic crash recovery (RUNNING at
+open → FAILED), bounded deterministic retention that never removes the
+newest baseline, bounded queries. 42 new tests (28 comparison incl.
+adversarial scenarios A–F, 14 store lifecycle/recovery/retention) and a
+comparison scaling benchmark (O(n+m) guard). No recommendations, no
+destructive actions, no network/telemetry. Full record in
+PHASE_5_STATUS.md.
 
-## Previous pass (2026-09-11/12, Phase 3.2)
-
+## Previous pass (2026-09-12, Phase 4
 Windows scan-time object identity is now real: a query-only handle
 (`FILE_READ_ATTRIBUTES`, share-all, `OPEN_REPARSE_POINT`) reads
 `FILE_ID_INFO` — the (volume serial, 128-bit file id) pair. On NTFS the id

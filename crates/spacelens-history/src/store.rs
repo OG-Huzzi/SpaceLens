@@ -642,20 +642,23 @@ impl HistoryStore {
                 continue; // newest baselines always kept
             }
             if is_committed {
-                if let Some(max_runs) = policy.max_runs {
-                    if keep >= max_runs {
-                        tx.execute("DELETE FROM scan_runs WHERE run_id = ?1", params![run_id])?;
-                        removed.push(RunId(run_id.clone()));
-                        continue;
-                    }
-                }
-                if let Some(max_age) = policy.max_age {
-                    let age_nanos = now.saturating_sub(*started);
-                    if age_nanos > max_age.as_nanos() as i64 {
-                        tx.execute("DELETE FROM scan_runs WHERE run_id = ?1", params![run_id])?;
-                        removed.push(RunId(run_id.clone()));
-                        continue;
-                    }
+                // Committed run beyond the always-keep floor: it is removed
+                // when ANY retention rule demands it — including the case
+                // where neither optional bound exists (then keep_latest IS
+                // the retention count, not merely a floor).
+                let over_max_runs = match policy.max_runs {
+                    Some(m) => keep >= m,
+                    None => false,
+                };
+                let over_age = match policy.max_age {
+                    Some(age) => now.saturating_sub(*started) > age.as_nanos() as i64,
+                    None => false,
+                };
+                let no_bounds_beyond_floor = policy.max_runs.is_none() && policy.max_age.is_none();
+                if over_max_runs || over_age || no_bounds_beyond_floor {
+                    tx.execute("DELETE FROM scan_runs WHERE run_id = ?1", params![run_id])?;
+                    removed.push(RunId(run_id.clone()));
+                    continue;
                 }
                 keep += 1;
             }

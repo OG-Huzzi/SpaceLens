@@ -116,6 +116,41 @@ No IPC command surfaces these yet; the types are the contract for future
 phases (storage search, history, cleanup recommendations — not built here)
 and are covered by engine tests.
 
+## History contracts (Phase 5)
+
+Namespace: `spacelens.v1.history.*` (engine-side in
+`crates/spacelens-history`; payload shapes follow the same camelCase +
+bytes-as-integers rules as above). System Memory persists one
+normalized snapshot per committed run and derives typed, evidence-backed
+change events on demand — see docs/HISTORY.md for full semantics.
+
+- `RunRecord`: stable run id, timestamps, canonical roots (scope),
+  platform, `ConfigFingerprint` (observation model / classifier schema +
+  rules version / hash algorithm / schemas), reused terminal statuses
+  (`RUNNING`, `COMPLETED`, `COMPLETED_WITH_LIMITS`, `CANCELLED`,
+  `FAILED`), fixed-width counts. A run that is not
+  `COMPLETED`/`COMPLETED_WITH_LIMITS` never serves as a complete
+  comparison baseline.
+- `Snapshot`: one `ObservedEntry` row per observed path per run (path,
+  kind, size, proven object identity, modified, stored classification,
+  verified content hash when Phase 3/4 produced one, observation error).
+  Unknown stays `null` — never inferred.
+- `ChangeSet` (pure comparison of two committed runs): completeness
+  (`COMPLETE`/`PARTIAL`), `configVersionsDiffer` flag, deterministic
+  event ids, typed `EventKind`s with categorical `EventEvidence`
+  (created/deleted require full-scope runs — a partial run can never
+  produce mass deletions), per-kind counts, exact truncation counter.
+- Persistence extends the existing SQLite schema (forward-only migration
+  v2: `scan_runs`, `observations`, `relationship_obs`,
+  `relationship_members`); the comparison engine itself is pure and
+  database-free.
+- Retention: deterministic policy (always-keep newest baseline, optional
+  max runs/age) with an observable removal report; queries are bounded
+  (`QueryLimits`) with explicit truncation.
+
+No IPC command surfaces these yet; the types are the contract for future
+phases and are covered by engine tests.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).
