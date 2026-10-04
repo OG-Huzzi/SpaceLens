@@ -34,12 +34,16 @@ fn run_record(id: &str, status: RunStatus, roots: &[&str]) -> RunRecord {
     }
 }
 
+fn oid(device: u64, inode: u64) -> spacelens_history::ObjectId {
+    spacelens_history::ObjectId::from_proven(device, inode, None)
+}
+
 fn entry(path: &str, size: u64, object: Option<(u64, u64)>) -> ObservedEntry {
     ObservedEntry {
         path: PathBuf::from(path),
         kind: ObservedKind::File,
         size: Some(size),
-        object,
+        object: object.map(|(d, i)| oid(d, i)),
         modified: None,
         classification: None,
         content_sha256: None,
@@ -257,7 +261,7 @@ fn complete_runs_prove_deletions() {
     assert_eq!(cs.counts.deleted, 1);
     let del = &cs.events[0];
     assert_eq!(del.path, PathBuf::from("/scope-a/gone.bin"));
-    assert_eq!(del.object, Some((1, 2)));
+    assert_eq!(del.object, Some(oid(1, 2)));
     assert!(del
         .evidence
         .contains(&spacelens_history::EventEvidence::ToRunCompleteForScope));
@@ -318,7 +322,7 @@ fn moved_object_is_move_not_delete_create() {
         mv.previous_path,
         Some(PathBuf::from("/scope-a/old/cat.jpg"))
     );
-    assert_eq!(mv.object, Some((1, 7)));
+    assert_eq!(mv.object, Some(oid(1, 7)));
     assert!(mv
         .evidence
         .contains(&spacelens_history::EventEvidence::ObjectIdentityEqual));

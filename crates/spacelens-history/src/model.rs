@@ -5,7 +5,7 @@
 //! | Concept | Type | Meaning |
 //! |---|---|---|
 //! | **Run / observation** | [`RunRecord`] | What a specific scan/run observed, when, under which configuration, and whether it completed. |
-//! | **Stable object** | `(volume, file id)` inside [`ObservedEntry`] | The underlying filesystem object, proven from handles (Phase 3.2 identity). |
+//! | **Stable object** | [`ObjectId`] inside [`ObservedEntry::object`] | The underlying filesystem object, proven from handles — the FULL Phase 3.2 identity `(volume, file id low, file id high)`, including the wide identifier's high bits where the platform proved them; never narrowed. |
 //! | **Path** | [`ObservedEntry::path`] | Where the object (or some object) was observed. Tracked independently of object identity. |
 //! | **Content** | [`ObservedEntry::content_sha256`] | Verified content identity — stored ONLY where Phase 3/4 actually produced one (verified duplicate candidates). Unknown stays unknown. |
 //! | **Classification** | [`ClassificationRef`] | The Phase 2 category observed in that run, with the rules version that produced it. |
@@ -25,6 +25,10 @@ use serde::{Deserialize, Serialize};
 
 use spacelens_engine::FsEntry;
 use spacelens_identity::hash::HashAlgorithm;
+
+// Historical object identity — the full Phase 3.2 component set
+// (see [`ObjectId`]); legacy `(device, inode)`-only records carry
+// `file_id_hi: None` with honest `Unknown` comparison semantics.
 
 /// Unique identity of one stored run. Generated once when a run begins
 /// (timestamp + process entropy); constructed explicitly in tests.
@@ -108,7 +112,12 @@ pub struct ConfigFingerprint {
     pub hash_algorithm: String,
     /// Relationship model schema version.
     pub relationship_schema: u32,
-    /// History model schema version.
+    /// History model schema version. 2 = Phase 5.1: full Phase 3.2
+    /// object identity (`fileIdHi` preserved end-to-end) and lossless
+    /// tagged path persistence. Runs recorded before Phase 5.1
+    /// (history_schema 1) still compare — but identity continuity claims
+    /// against them degrade to Unknown wherever the old format dropped
+    /// proven components.
     pub history_schema: u32,
 }
 
@@ -122,7 +131,7 @@ impl ConfigFingerprint {
             classifier_rules: spacelens_classifier::RULES_VERSION,
             hash_algorithm: HashAlgorithm::Sha256.tag().to_string(),
             relationship_schema: 1,
-            history_schema: 1,
+            history_schema: 2,
         }
     }
 
@@ -179,8 +188,9 @@ pub struct RunRecord {
 
 impl RunRecord {
     /// True when this run's roots cover `scope` (every scope root is at or
-    /// under some run root, compared case-insensitively on Windows-style
-    /// components via exact prefix matching on the component sequences).
+    /// under some run root, compared component-wise; components compare
+    /// case-insensitively on Windows pathname semantics — see
+    /// [`path_covers`] — and case-sensitively elsewhere).
     pub fn covers(&self, scope: &[PathBuf]) -> bool {
         scope
             .iter()
@@ -191,21 +201,91 @@ impl RunRecord {
 /// `root` covers `p` when `p` equals `root` or lies beneath it
 /// (component-wise prefix — no string-prefix ambiguity like
 /// `C:\a` vs `C:\ab`).
+///
+/// Platform semantics (Phase 5.1, Finding 6): component comparison is
+/// **case-insensitive on Windows** — mirroring the NTFS `$UpCase`
+/// convention (per-code-point simple Unicode uppercase; multi-character
+/// expansions like `ß`→`SS` are NOT applied, exactly like `$UpCase`) —
+/// and **case-sensitive on Unix**. Only comparison semantics are
+/// platform-aware; the stored path spelling is never modified here.
 pub fn path_covers(root: &std::path::Path, p: &std::path::Path) -> bool {
-    if root == p {
-        return true;
-    }
     let mut rc = root.components().peekable();
     let mut pc = p.components().peekable();
     loop {
         match (rc.peek(), pc.peek()) {
-            (Some(r), Some(pr)) if r == pr => {
+            (Some(r), Some(pr)) if component_eq(*r, *pr) => {
                 rc.next();
                 pc.next();
             }
             (None, Some(_)) => return true, // p continues beneath root
-            _ => return false,
+            (None, None) => return true,    // p equals root component-wise
+            (Some(_), None) => return false, // root reaches deeper than p
+            _ => return false,              // component mismatch
         }
+    }
+}
+
+/// Component equality under the platform's pathname semantics.
+#[cfg(not(windows))]
+fn component_eq(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
+    // Unix (and every non-Windows platform): case-sensitive, exact.
+    a == b
+}
+
+/// Component equality under Windows pathname semantics: prefixes and
+/// normal components compare case-insensitively via simple (1:1)
+/// Unicode uppercase mapping, mirroring the NTFS `$UpCase` table;
+/// structural components (root/current/parent) compare by kind.
+#[cfg(windows)]
+fn component_eq(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
+    use std::path::Component;
+    match (a, b) {
+        (Component::Prefix(x), Component::Prefix(y)) => {
+            os_str_eq_ignore_case(x.as_os_str(), y.as_os_str())
+        }
+        (Component::Normal(x), Component::Normal(y)) => os_str_eq_ignore_case(x, y),
+        (Component::RootDir, Component::RootDir)
+        | (Component::CurDir, Component::CurDir)
+        | (Component::ParentDir, Component::ParentDir) => true,
+        _ => false,
+    }
+}
+
+/// Windows case-insensitive `OsStr` comparison via per-character simple
+/// (1:1) Unicode uppercase mapping. Characters without a 1:1 uppercase
+/// (e.g. `ß`, the `ﬀ` ligature) compare exactly — matching `$UpCase`,
+/// which leaves them unchanged; full multi-character expansions are
+/// deliberately NOT applied. Components that are not valid UTF-8
+/// (unpaired-surrogate paths) compare exactly — case folding is never
+/// fabricated.
+#[cfg(windows)]
+fn os_str_eq_ignore_case(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    match (a.to_str(), b.to_str()) {
+        (Some(sa), Some(sb)) => {
+            let mut ia = sa.chars();
+            let mut ib = sb.chars();
+            loop {
+                match (ia.next(), ib.next()) {
+                    (Some(x), Some(y)) => {
+                        if simple_uppercase(x) != simple_uppercase(y) {
+                            return false;
+                        }
+                    }
+                    (None, None) => return true,
+                    _ => return false, // length mismatch
+                }
+            }
+        }
+        _ => a == b,
+    }
+}
+
+#[cfg(windows)]
+fn simple_uppercase(c: char) -> char {
+    let mut it = c.to_uppercase();
+    match (it.next(), it.next()) {
+        (Some(u), None) => u, // 1:1 simple mapping, as $UpCase applies
+        _ => c,               // no simple uppercase: $UpCase leaves it unchanged
     }
 }
 
@@ -251,6 +331,94 @@ impl ClassificationRef {
     }
 }
 
+/// Handle-proven filesystem object identity as stored in history — the
+/// FULL Phase 3.2 identity, never narrowed (Phase 5.1, Finding 1).
+///
+/// Windows identity is `(volume serial, 128-bit file id)`: `inode` carries
+/// the low 64 bits and `file_id_hi` the high 64 bits (`FILE_ID_INFO` on
+/// ReFS-class filesystems; `None` on the 64-bit `BY_HANDLE_FILE_INFORMATION`
+/// fallback). Unix identity is `(st_dev, st_ino)` with `file_id_hi = None`.
+///
+/// The rule set mirrors `spacelens_engine::identity::FileIdentity` exactly:
+/// `Some` = the platform proved it, `None` = honest unknown, never
+/// fabricated, never dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectId {
+    /// Volume/filesystem identity (Unix `st_dev`, Windows volume serial).
+    pub device: u64,
+    /// File identity within the volume (Unix `st_ino`, Windows low 64 bits
+    /// of the 128-bit `FILE_ID_INFO.FileId`).
+    pub inode: u64,
+    /// High 64 bits of a >64-bit file identifier. `Some` only where the
+    /// platform proved a wide id (Windows ReFS-class); `None` everywhere
+    /// else — including Unix, where no wide id exists.
+    pub file_id_hi: Option<u64>,
+}
+
+impl ObjectId {
+    /// From the engine's proven identity pair, keeping the full proven
+    /// component set. The caller passes `None` when the engine proved
+    /// nothing (identity stays `None` — unknown, never fabricated).
+    pub fn from_proven(device: u64, inode: u64, file_id_hi: Option<u64>) -> Self {
+        ObjectId {
+            device,
+            inode,
+            file_id_hi,
+        }
+    }
+}
+
+/// The proven relation between two [`ObjectId`]s (Phase 5.1, Finding 1):
+/// equality is decided ONLY on evidence BOTH sides proved — a wider
+/// identity is never silently downgraded into a weaker certainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IdentityRelation {
+    /// Both identities are fully proven and equal on every shared
+    /// component (including the high bits where BOTH proved them).
+    Equal,
+    /// Both identities are fully proven and differ on a component both
+    /// sides proved.
+    Different,
+    /// Not provable: at least one side's identity is unproven, or the two
+    /// sides proved different component SETS (e.g. one proved wide file
+    /// id bits and the other did not). Comparison outcomes depending on
+    /// identity must treat this as uncertainty — never as equality.
+    Unknown,
+}
+
+impl ObjectId {
+    /// Compare two object identities on the strongest MUTUALLY proven
+    /// identity, Phase 3.2 semantics:
+    ///
+    /// - Both proven with the same component set ⇒ exact comparison.
+    /// - Both proven but with different `file_id_hi` provability ⇒
+    ///   [`IdentityRelation::Unknown`] — the low pair matching is not
+    ///   proof of same object (the unproven side could differ in the
+    ///   high bits), and it is also not proof of difference.
+    /// - Either side unproven ⇒ [`IdentityRelation::Unknown`].
+    pub fn relation_to(self, other: ObjectId) -> IdentityRelation {
+        if self.file_id_hi.is_some() && other.file_id_hi.is_none()
+            || self.file_id_hi.is_none() && other.file_id_hi.is_some()
+        {
+            return IdentityRelation::Unknown;
+        }
+        let lo_equal = self.device == other.device && self.inode == other.inode;
+        let hi_equal = match (self.file_id_hi, other.file_id_hi) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => unreachable!("provability mismatch handled above"),
+        };
+        if lo_equal && hi_equal {
+            IdentityRelation::Equal
+        } else {
+            // A low-pair difference alone proves difference (a wide id
+            // match cannot rescue a different low pair).
+            IdentityRelation::Different
+        }
+    }
+}
+
 /// One observed filesystem entry in one run — the normalized snapshot
 /// row. Every field is a fact observed during that run; `None` = unknown,
 /// never inferred.
@@ -261,10 +429,10 @@ pub struct ObservedEntry {
     pub kind: ObservedKind,
     /// Logical size (files). `None` for non-files or unknown sizes.
     pub size: Option<u64>,
-    /// Handle-proven filesystem object identity `(volume, file id)` where
-    /// the platform proved it (Phase 3.2: both platforms for files and
-    /// directories); `None` = identity unprovable for this entry.
-    pub object: Option<(u64, u64)>,
+    /// Handle-proven filesystem object identity — the FULL Phase 3.2
+    /// identity `(volume, file id low, file id high)` where the platform
+    /// proved it; `None` = identity unprovable for this entry.
+    pub object: Option<ObjectId>,
     pub modified: Option<SystemTime>,
     /// The run's stored classification, when the entry was classifiable.
     pub classification: Option<ClassificationRef>,
@@ -345,7 +513,16 @@ impl SnapshotBuilder {
             path: entry.path.clone(),
             kind,
             size: (kind == ObservedKind::File).then_some(entry.size),
-            object: entry.device.zip(entry.inode),
+            object: entry
+                .device
+                .zip(entry.inode)
+                .map(|(device, inode)| ObjectId {
+                    device,
+                    inode,
+                    // Full Phase 3.2 identity: the wide-id high bits are
+                    // carried alongside the pair — never dropped.
+                    file_id_hi: entry.file_id_hi,
+                }),
             modified: entry.modified,
             classification,
             content_sha256: None,

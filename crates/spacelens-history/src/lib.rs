@@ -35,6 +35,7 @@
 
 pub mod compare;
 pub mod model;
+pub mod path_encoding;
 pub mod store;
 
 pub use compare::{
@@ -42,9 +43,10 @@ pub use compare::{
     ComparisonCompleteness, EventEvidence, EventKind, RunSnapshot,
 };
 pub use model::{
-    path_covers, BuildError, ClassificationRef, ConfigFingerprint, ObservedEntry, ObservedKind,
-    RunCounts, RunId, RunRecord, RunStatus, Snapshot, SnapshotBuilder,
+    path_covers, BuildError, ClassificationRef, ConfigFingerprint, IdentityRelation, ObjectId,
+    ObservedEntry, ObservedKind, RunCounts, RunId, RunRecord, RunStatus, Snapshot, SnapshotBuilder,
 };
+pub use path_encoding::{decode as decode_path, encode as encode_path, PathDecodeError};
 pub use store::{
     HistoryStore, PathHistoryPoint, QueryLimits, RetentionPolicy, RetentionReport, StoreError,
 };

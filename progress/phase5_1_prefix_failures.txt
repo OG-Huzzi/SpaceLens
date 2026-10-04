@@ -1,0 +1,162 @@
+
+running 25 tests
+test f1_mixed_wide_id_provability_is_unknown_never_equal ... FAILED
+test f1_wide_file_id_participates_in_identity_comparison ... FAILED
+test f1_mixed_wide_id_provability_blocks_move_continuity ... FAILED
+test f2_different_object_differing_hashes_is_replacement_not_modified ... ok
+test f2_no_modified_when_only_one_side_proves_the_object ... FAILED
+test f2_same_object_equal_hashes_emit_nothing ... ok
+test f2_no_modified_without_any_object_proof ... FAILED
+test f2_same_object_one_hash_only_is_never_modified ... ok
+test f2_same_object_two_verified_differing_hashes_is_modified ... FAILED
+test f3_alias_path_deleted_while_object_survives_through_other_alias ... FAILED
+test f3_all_aliases_removed_each_path_deleted ... ok
+test f3_deletion_invariant_every_deleted_path_absent_in_to ... ok
+test f3_one_alias_survives_another_moves_away ... FAILED
+test f3_single_alias_move_remains_a_move ... ok
+test f4_one_old_two_new_no_duplicate_movement ... FAILED
+test f4_three_old_three_new_no_fabricated_pairings ... FAILED
+test f4_two_old_one_new_no_fabricated_mapping ... FAILED
+test f4_two_old_two_new_no_fabricated_pairings ... FAILED
+test f6_component_wise_comparison_never_string_prefix_matches ... ok
+test f6_windows_run_scope_recognizes_case_variants ... FAILED
+test f6_windows_scope_comparison_is_case_insensitive ... FAILED
+test invariants_hold_over_mixed_scenario ... FAILED
+test f5_utf8_path_variety_round_trips_exactly ... ok
+test f5_non_utf8_path_round_trips_exactly_through_sqlite ... FAILED
+test f1_snapshot_builder_preserves_file_id_hi_in_sqlite ... FAILED
+
+failures:
+
+---- f1_mixed_wide_id_provability_is_unknown_never_equal stdout ----
+
+thread 'f1_mixed_wide_id_provability_is_unknown_never_equal' (17176) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:187:5:
+assertion `left == right` failed: unknown identity never proves modification: ChangeSet { from_run_id: RunId("reg-a"), to_run_id: RunId("reg-b"), completeness: Complete, config_versions_differ: false, events: [ChangeEvent { event_id: "ev-23f389878a32999e2ab0", kind: Modified, path: "/scope-a/f.bin", previous_path: None, object: Some((1, 5)), previous_size: Some(10), new_size: Some(10), previous_classification: None, new_classification: None, previous_content: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), new_content: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), evidence: [PathPresentInFromRun, PathPresentInToRun, ContentIdentityDiffering] }], events_truncated: 0, counts: ChangeCounts { created: 0, deleted: 0, moved: 0, renamed: 0, modified: 1, size_changed: 0, classification_changed: 0, relationship_added: 0, relationship_removed: 0, relationship_membership_changed: 0, object_identity_changed: 0, became_inaccessible: 0, became_accessible: 0 } }
+  left: 1
+ right: 0
+
+---- f1_wide_file_id_participates_in_identity_comparison stdout ----
+
+thread 'f1_wide_file_id_participates_in_identity_comparison' (15748) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:167:5:
+assertion `left == right` failed: differing wide file ids prove different objects: ChangeSet { from_run_id: RunId("reg-a"), to_run_id: RunId("reg-b"), completeness: Complete, config_versions_differ: false, events: [], events_truncated: 0, counts: ChangeCounts { created: 0, deleted: 0, moved: 0, renamed: 0, modified: 0, size_changed: 0, classification_changed: 0, relationship_added: 0, relationship_removed: 0, relationship_membership_changed: 0, object_identity_changed: 0, became_inaccessible: 0, became_accessible: 0 } }
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- f1_mixed_wide_id_provability_blocks_move_continuity stdout ----
+
+thread 'f1_mixed_wide_id_provability_blocks_move_continuity' (16072) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:204:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- f2_no_modified_when_only_one_side_proves_the_object stdout ----
+
+thread 'f2_no_modified_when_only_one_side_proves_the_object' (17220) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:242:5:
+assertion `left == right` failed: one-sided identity is unknown: ChangeSet { from_run_id: RunId("reg-a"), to_run_id: RunId("reg-b"), completeness: Complete, config_versions_differ: false, events: [ChangeEvent { event_id: "ev-e48f794e18a9127ef3b3", kind: Modified, path: "/scope-a/f.bin", previous_path: None, object: Some((1, 10)), previous_size: Some(50), new_size: Some(50), previous_classification: None, new_classification: None, previous_content: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), new_content: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), evidence: [PathPresentInFromRun, PathPresentInToRun, ContentIdentityDiffering] }], events_truncated: 0, counts: ChangeCounts { created: 0, deleted: 0, moved: 0, renamed: 0, modified: 1, size_changed: 0, classification_changed: 0, relationship_added: 0, relationship_removed: 0, relationship_membership_changed: 0, object_identity_changed: 0, became_inaccessible: 0, became_accessible: 0 } }
+  left: 1
+ right: 0
+
+---- f2_no_modified_without_any_object_proof stdout ----
+
+thread 'f2_no_modified_without_any_object_proof' (11116) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:227:5:
+assertion `left == right` failed: no object proof — no Modified: ChangeSet { from_run_id: RunId("reg-a"), to_run_id: RunId("reg-b"), completeness: Complete, config_versions_differ: false, events: [ChangeEvent { event_id: "ev-ee917a6de122db703f3d", kind: Modified, path: "/scope-a/f.bin", previous_path: None, object: None, previous_size: Some(50), new_size: Some(50), previous_classification: None, new_classification: None, previous_content: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), new_content: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), evidence: [PathPresentInFromRun, PathPresentInToRun, ContentIdentityDiffering] }], events_truncated: 0, counts: ChangeCounts { created: 0, deleted: 0, moved: 0, renamed: 0, modified: 1, size_changed: 0, classification_changed: 0, relationship_added: 0, relationship_removed: 0, relationship_membership_changed: 0, object_identity_changed: 0, became_inaccessible: 0, became_accessible: 0 } }
+  left: 1
+ right: 0
+
+---- f2_same_object_two_verified_differing_hashes_is_modified stdout ----
+
+thread 'f2_same_object_two_verified_differing_hashes_is_modified' (16952) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:263:5:
+assertion failed: m.evidence.contains(&EventEvidence::ObjectIdentityEqual)
+
+---- f3_alias_path_deleted_while_object_survives_through_other_alias stdout ----
+
+thread 'f3_alias_path_deleted_while_object_survives_through_other_alias' (16316) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:330:5:
+assertion `left == right` failed: exactly one deleted path event: ChangeSet { from_run_id: RunId("reg-a"), to_run_id: RunId("reg-b"), completeness: Complete, config_versions_differ: false, events: [], events_truncated: 0, counts: ChangeCounts { created: 0, deleted: 0, moved: 0, renamed: 0, modified: 0, size_changed: 0, classification_changed: 0, relationship_added: 0, relationship_removed: 0, relationship_membership_changed: 0, object_identity_changed: 0, became_inaccessible: 0, became_accessible: 0 } }
+  left: 0
+ right: 1
+
+---- f3_one_alias_survives_another_moves_away stdout ----
+
+thread 'f3_one_alias_survives_another_moves_away' (3592) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:386:5:
+assertion `left == right` failed: ChangeSet { from_run_id: RunId("reg-a"), to_run_id: RunId("reg-b"), completeness: Complete, config_versions_differ: false, events: [ChangeEvent { event_id: "ev-2c5b49760891f38edf92", kind: Created, path: "/scope-a/C.txt", previous_path: None, object: Some((9, 9)), previous_size: None, new_size: Some(10), previous_classification: None, new_classification: None, previous_content: None, new_content: None, evidence: [ObjectIdentityEqual, PathAbsentInFromRun, PathPresentInToRun, ToRunCompleteForScope] }], events_truncated: 0, counts: ChangeCounts { created: 1, deleted: 0, moved: 0, renamed: 0, modified: 0, size_changed: 0, classification_changed: 0, relationship_added: 0, relationship_removed: 0, relationship_membership_changed: 0, object_identity_changed: 0, became_inaccessible: 0, became_accessible: 0 } }
+  left: 0
+ right: 1
+
+---- f4_one_old_two_new_no_duplicate_movement stdout ----
+
+thread 'f4_one_old_two_new_no_duplicate_movement' (1448) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:515:5:
+assertion `left == right` failed
+  left: 2
+ right: 0
+
+---- f4_three_old_three_new_no_fabricated_pairings stdout ----
+
+thread 'f4_three_old_three_new_no_fabricated_pairings' (13988) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:541:5:
+assertion `left == right` failed
+  left: 3
+ right: 0
+
+---- f4_two_old_one_new_no_fabricated_mapping stdout ----
+
+thread 'f4_two_old_one_new_no_fabricated_mapping' (13232) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:497:5:
+assertion `left == right` failed
+  left: 0
+ right: 2
+
+---- f4_two_old_two_new_no_fabricated_pairings stdout ----
+
+thread 'f4_two_old_two_new_no_fabricated_pairings' (16224) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:470:5:
+assertion `left == right` failed
+  left: 2
+ right: 0
+
+---- f6_windows_run_scope_recognizes_case_variants stdout ----
+
+thread 'f6_windows_run_scope_recognizes_case_variants' (15804) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:654:5:
+assertion failed: run.covers(&[PathBuf::from(r"C:\USERS")])
+
+---- f6_windows_scope_comparison_is_case_insensitive stdout ----
+
+thread 'f6_windows_scope_comparison_is_case_insensitive' (3668) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:641:5:
+Windows-style components must compare case-insensitively
+
+---- invariants_hold_over_mixed_scenario stdout ----
+
+thread 'invariants_hold_over_mixed_scenario' (6996) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:731:9:
+assertion failed: e.evidence.contains(&EventEvidence::ObjectIdentityEqual)
+
+---- f5_non_utf8_path_round_trips_exactly_through_sqlite stdout ----
+
+thread 'f5_non_utf8_path_round_trips_exactly_through_sqlite' (2376) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:585:5:
+assertion `left == right` failed: store(path) → load(path) must be exact for every supported path
+  left: "C:\\�"
+ right: "C:\\\u{d800}"
+
+---- f1_snapshot_builder_preserves_file_id_hi_in_sqlite stdout ----
+
+thread 'f1_snapshot_builder_preserves_file_id_hi_in_sqlite' (15388) panicked at crates\spacelens-history\tests\phase5_1_regressions.rs:143:5:
+observations must persist file_id_hi (got columns ["run_id", "path", "kind", "size", "device", "inode", "modified", "category", "subcategory", "content_sha256", "obs_error"])
+
+
+failures:
+    f1_mixed_wide_id_provability_blocks_move_continuity
+    f1_mixed_wide_id_provability_is_unknown_never_equal
+    f1_snapshot_builder_preserves_file_id_hi_in_sqlite
+    f1_wide_file_id_participates_in_identity_comparison
+    f2_no_modified_when_only_one_side_proves_the_object
+    f2_no_modified_without_any_object_proof
+    f2_same_object_two_verified_differing_hashes_is_modified
+    f3_alias_path_deleted_while_object_survives_through_other_alias
+    f3_one_alias_survives_another_moves_away
+    f4_one_old_two_new_no_duplicate_movement
+    f4_three_old_three_new_no_fabricated_pairings
+    f4_two_old_one_new_no_fabricated_mapping
+    f4_two_old_two_new_no_fabricated_pairings
+    f5_non_utf8_path_round_trips_exactly_through_sqlite
+    f6_windows_run_scope_recognizes_case_variants
+    f6_windows_scope_comparison_is_case_insensitive
+    invariants_hold_over_mixed_scenario
+
+test result: FAILED. 8 passed; 17 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+

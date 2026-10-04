@@ -10,15 +10,39 @@
 //! timestamps are never proof. Deletion is claimed only when the target
 //! run `observes_full_scope()`.
 //!
+//! ## Identity semantics (Phase 5.1, Findings 1–2)
+//!
+//! Object identity is the FULL Phase 3.2 component set `(volume, file id
+//! low, file id high)`. Two identities compare ONLY on components BOTH
+//! sides proved ([`ObjectId::relation_to`]): one side proving wide file
+//! id bits and the other not is `Unknown` — never silently equal, never a
+//! fabricated difference. `Modified` therefore requires
+//! [`IdentityRelation::Equal`] plus two verified differing content
+//! identities; anything weaker is historical uncertainty, not a change
+//! claim.
+//!
+//! ## Path-level vs object-level semantics (Phase 5.1, Findings 3–4)
+//!
+//! Path history and object history are separate. A PATH present in the
+//! from-run and absent in the to-run is a path-level `Deleted` even when
+//! the object survives through another alias — object survival never
+//! suppresses path deletion. A move/rename pairing is claimed ONLY when
+//! it is provable: exactly one old location, exactly one new location,
+//! no surviving alias, and full identity continuity. Any ambiguous
+//! multi-path relocation (N old aliases → M new aliases, N·M ≠ 1) is
+//! represented conservatively: removed alias paths as `Deleted`, new
+//! alias paths as `Created` carrying object-continuity evidence — no
+//! pairwise mapping is fabricated.
+//!
 //! ## Incomplete-scan safety (Objective 12 — hard invariant)
 //!
-//! `Created` and `Deleted` events require **both** runs to have observed
-//! their full scope. A partial (cancelled/failed) run produces a
+//! `Created` and `Deleted` events require the respective run to have
+//! observed its full scope. A partial (cancelled/failed) run produces a
 //! `ChangeSet` with `completeness: Partial` in which neither created nor
 //! deleted paths are claimed — an inaccessible subtree can never become a
-//! mass deletion. Object-identity continuity (moves) and proven
-//! per-path facts (modifications, replacements) remain derivable: they
-//! compare two *observed* facts and need no scope completeness.
+//! mass deletion. Object-identity continuity (moves) and proven per-path
+//! facts (modifications, replacements) remain derivable: they compare two
+//! *observed* facts and need no scope completeness.
 //!
 //! ## Determinism
 //!
@@ -26,13 +50,15 @@
 //! bytes); event ids are content-addressed (SHA-256 over the canonical
 //! event tuple); identical input produces identical `ChangeSet`s.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-use crate::model::{ObservedEntry, RunId, RunRecord, RunStatus, Snapshot};
+use crate::model::{
+    IdentityRelation, ObjectId, ObservedEntry, RunId, RunRecord, RunStatus, Snapshot,
+};
 
 /// A run together with its snapshot — the comparison input. The
 /// relationship derivation is optional: a run that never ran the
@@ -83,14 +109,17 @@ pub enum EventKind {
     /// A path present in `to` with no continuity evidence for the run
     /// pair (requires full-scope `from`).
     Created,
-    /// A path present in `from`, absent in `to`, with no object
-    /// continuity elsewhere (requires full-scope `to`).
+    /// A path present in `from` and absent in `to` (requires full-scope
+    /// `to`). Path-level fact: emitted even when the object survives
+    /// through another alias (object survival never suppresses path
+    /// deletion).
     Deleted,
     /// Same filesystem object, parent directory changed.
     Moved,
     /// Same filesystem object, same parent, file name changed.
     Renamed,
-    /// Same object, verified content identity changed.
+    /// Same object (proven on the full identity both sides proved), two
+    /// verified content identities, and they differ.
     Modified,
     /// Same object (or unproven identity), observed size changed.
     SizeChanged,
@@ -104,7 +133,9 @@ pub enum EventKind {
     /// Same relationship id, different member set.
     RelationshipMembershipChanged,
     /// Same path, different filesystem object (replacement — not a
-    /// modification of the old object; Objective 22).
+    /// modification of the old object; Objective 22). Requires both sides
+    /// proven and differing; one-sided or mixed-provability identity is
+    /// unknown, never a replacement claim.
     ObjectIdentityChanged,
     /// Observed without error before, observed with an error now.
     BecameInaccessible,
@@ -117,9 +148,11 @@ pub enum EventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EventEvidence {
-    /// Both runs proved the same filesystem object identity.
+    /// Both runs proved the same filesystem object identity — compared on
+    /// the FULL component set both sides proved (Phase 5.1).
     ObjectIdentityEqual,
-    /// Both runs proved the path but the object identities differ.
+    /// Both runs proved the path but the object identities differ on
+    /// components both sides proved.
     ObjectIdentityDiffering,
     /// The path was absent from the from-run's observations.
     PathAbsentInFromRun,
@@ -158,10 +191,12 @@ pub struct ChangeEvent {
     pub kind: EventKind,
     /// The to-run path (the from-run path for deletions).
     pub path: PathBuf,
-    /// The from-run path for moves/renames.
+    /// The from-run path for moves/renames — present only on PROVEN
+    /// 1:1 relocations; never a fabricated pairing.
     pub previous_path: Option<PathBuf>,
-    /// Filesystem object identity when proven (either run).
-    pub object: Option<(u64, u64)>,
+    /// Filesystem object identity when proven (either run) — the full
+    /// Phase 3.2 identity, high bits included.
+    pub object: Option<ObjectId>,
     pub previous_size: Option<u64>,
     pub new_size: Option<u64>,
     pub previous_classification: Option<crate::model::ClassificationRef>,
@@ -329,8 +364,8 @@ pub fn compare(
         .iter()
         .map(|e| (e.path.as_path(), e))
         .collect();
-    let mut from_by_object: BTreeMap<(u64, u64), Vec<&Path>> = BTreeMap::new();
-    let mut to_by_object: BTreeMap<(u64, u64), Vec<&Path>> = BTreeMap::new();
+    let mut from_by_object: BTreeMap<ObjectId, Vec<&Path>> = BTreeMap::new();
+    let mut to_by_object: BTreeMap<ObjectId, Vec<&Path>> = BTreeMap::new();
     for e in &from.snapshot.entries {
         if let Some(o) = e.object {
             from_by_object.entry(o).or_default().push(e.path.as_path());
@@ -343,7 +378,12 @@ pub fn compare(
     }
 
     let mut events: Vec<ChangeEvent> = Vec::new();
-    let mut moved_paths: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
+    // Old paths consumed by PROVEN move pairings (pass 2): they are
+    // relocations, not deletions.
+    let mut moved_from_paths: BTreeSet<&Path> = BTreeSet::new();
+    // New paths claimed by PROVEN move pairings (pass 2): the Moved/
+    // Renamed event covers them; pass 4 must not double-count.
+    let mut moved_to_paths: BTreeSet<&Path> = BTreeSet::new();
 
     // ---- PASS 1: paths present in both runs -----------------------------
     // Proven per-path facts: modification, size, classification,
@@ -352,27 +392,28 @@ pub fn compare(
         let Some(t) = to_by_path.get(path) else {
             continue;
         };
-        if let (Some(of), Some(ot)) = (f.object, t.object) {
-            if of != ot {
-                // Replacement: a different object at the observed path —
-                // never claimed as a modification of the old object.
-                events.push(event(
-                    EventKind::ObjectIdentityChanged,
-                    from.run.run_id.clone(),
-                    to.run.run_id.clone(),
-                    path,
-                    None,
-                    Some(of),
-                    &[
-                        EventEvidence::ObjectIdentityDiffering,
-                        EventEvidence::PathPresentInFromRun,
-                        EventEvidence::PathPresentInToRun,
-                    ],
-                    Some(f),
-                    Some(t),
-                ));
-                continue;
-            }
+        let relation = match (f.object, t.object) {
+            (Some(of), Some(ot)) => of.relation_to(ot),
+            _ => IdentityRelation::Unknown,
+        };
+        if relation == IdentityRelation::Different {
+            // Replacement: a different object at the observed path —
+            // never claimed as a modification of the old object.
+            events.push(event(
+                EventKind::ObjectIdentityChanged,
+                from.run.run_id.clone(),
+                to.run.run_id.clone(),
+                path,
+                None,
+                f.object.or(t.object),
+                &[
+                    EventEvidence::ObjectIdentityDiffering,
+                    EventEvidence::PathPresentInFromRun,
+                    EventEvidence::PathPresentInToRun,
+                ],
+                Some(f),
+                Some(t),
+            ));
         }
         if f.size.is_some() && t.size.is_some() && f.size != t.size {
             events.push(event(
@@ -393,25 +434,30 @@ pub fn compare(
         }
         if let (Some(cf), Some(ct)) = (&f.content_sha256, &t.content_sha256) {
             if cf != ct {
-                // Modified requires a same-object pair (Objective 22:
-                // different object = replacement, handled above). Content
-                // difference at the same path with unproven identity is
-                // still a content change of whatever lives there.
-                events.push(event(
-                    EventKind::Modified,
-                    from.run.run_id.clone(),
-                    to.run.run_id.clone(),
-                    path,
-                    None,
-                    f.object.or(t.object),
-                    &[
-                        EventEvidence::ContentIdentityDiffering,
-                        EventEvidence::PathPresentInFromRun,
-                        EventEvidence::PathPresentInToRun,
-                    ],
-                    Some(f),
-                    Some(t),
-                ));
+                // Modified REQUIRES proven same-object continuity
+                // (Phase 5.1, Finding 2): object identity equal on the
+                // full component set both sides proved, two verified
+                // content identities, and they differ. Content difference
+                // with unknown identity is historical uncertainty — no
+                // modification claim.
+                if relation == IdentityRelation::Equal {
+                    events.push(event(
+                        EventKind::Modified,
+                        from.run.run_id.clone(),
+                        to.run.run_id.clone(),
+                        path,
+                        None,
+                        f.object,
+                        &[
+                            EventEvidence::ObjectIdentityEqual,
+                            EventEvidence::ContentIdentityDiffering,
+                            EventEvidence::PathPresentInFromRun,
+                            EventEvidence::PathPresentInToRun,
+                        ],
+                        Some(f),
+                        Some(t),
+                    ));
+                }
             }
         }
         if f.classification.is_some()
@@ -470,34 +516,47 @@ pub fn compare(
     }
 
     // ---- PASS 2: object continuity across differing paths ---------------
-    // Same object, different path(s): Move (parent changed) or Rename
-    // (same parent) — but ONLY when every old location of the object is
-    // gone. If at least one old path still holds the object, the new path
-    // is an ADDED ALIAS (a new path for a surviving object): pass 4
-    // reports it as `Created` with continuity evidence, which is the
-    // honest path-level fact. Object identity is the sole proof of
-    // continuity; valid even when a run is partial.
+    // A move/rename pairing is claimed ONLY where it is provable
+    // (Phase 5.1, Finding 4):
+    //
+    //   * the object is fully-identifiably continuous (the exact same
+    //     ObjectId appears in both runs — including the wide-id high
+    //     bits, so mixed-provability continuity never claims a move),
+    //   * exactly ONE old location exists and that old path is gone,
+    //   * exactly ONE new location exists and it is a new path.
+    //
+    // Everything else — N old aliases → M new aliases with N·M ≠ 1, or a
+    // surviving old alias — is represented conservatively: new alias
+    // paths become `Created` carrying object-continuity evidence (pass
+    // 4), removed paths become path-level `Deleted` (pass 3). No
+    // pairwise mapping is fabricated; an old path never maps to more
+    // than one new path.
     for (object, from_paths) in &from_by_object {
         let Some(to_paths) = to_by_object.get(object) else {
             continue;
         };
-        // Continuity kind: all old locations gone ⇒ the object moved.
-        let object_relocated = !from_paths.iter().any(|p| to_by_path.contains_key(*p));
-        if !object_relocated {
-            continue; // surviving alias/locations: pass 4 handles new paths
-        }
-        for new_path in to_paths {
-            if from_paths.contains(new_path) {
-                continue; // unchanged location
-            }
-            // The new path must genuinely be new to the run pair (a path
-            // present in both runs with the same object was handled in
-            // pass 1; with a different object in pass 1 as replacement).
-            let previous = from_paths
-                .iter()
-                .min()
-                .expect("object continuity implies at least one from-path");
-            moved_paths.insert(new_path);
+        // Surviving old locations: the object was not relocated from
+        // them; new locations are ADDED ALIASES (pass 4 handles them as
+        // Created with continuity evidence).
+        let surviving: Vec<&&Path> = from_paths
+            .iter()
+            .filter(|p| to_by_path.contains_key(**p))
+            .collect();
+        let old_gone: Vec<&&Path> = from_paths
+            .iter()
+            .filter(|p| !to_by_path.contains_key(**p))
+            .collect();
+        let new_paths: Vec<&&Path> = to_paths
+            .iter()
+            .filter(|p| !from_by_path.contains_key(**p))
+            .collect();
+        if surviving.is_empty() && old_gone.len() == 1 && new_paths.len() == 1 {
+            // Provable 1:1 relocation — the only case where an exact
+            // old→new pairing exists as evidence.
+            let previous = old_gone[0];
+            let new_path = new_paths[0];
+            moved_from_paths.insert(*previous);
+            moved_to_paths.insert(*new_path);
             let kind = move_or_rename(new_path, previous);
             let mut ev = event(
                 kind,
@@ -524,79 +583,60 @@ pub fn compare(
                 .and_then(|e| e.classification.clone());
             events.push(ev);
         }
+        // Ambiguous relocations (N old gone + M new, N·M ≠ 1): NOTHING is
+        // claimed here. Pass 3 reports each removed old path as
+        // Deleted; pass 4 reports each new path as Created with
+        // ObjectIdentityEqual continuity evidence. The old→new pairing
+        // is unprovable and is never fabricated.
     }
 
     // ---- PASS 3: deletions (full-scope to-run ONLY — hard invariant) ----
-    // An object (or path) seen in `from` and absent from `to` is deleted
-    // only when the to-run observed its entire declared scope. A partial
-    // run's missing paths are UNCERTAIN, never deletions.
+    // PATH-level, independent of object survival (Phase 5.1, Finding 3):
+    // every path present in `from` and absent in `to` is a path deletion
+    // — even when the object survives through another alias. The only
+    // exception is a PROVEN move source (pass 2): the path's object
+    // verifiably relocated to one new path.
+    // A partial run's missing paths are UNCERTAIN, never deletions.
     if to.run.status.observes_full_scope() {
-        for (object, from_paths) in &from_by_object {
-            if to_by_object.contains_key(object) {
-                continue; // object survives somewhere: no deletion
-            }
-            for p in from_paths {
-                if to_by_path.contains_key(*p) {
-                    continue; // path exists with a different object: pass 1
-                }
-                events.push(event(
-                    EventKind::Deleted,
-                    from.run.run_id.clone(),
-                    to.run.run_id.clone(),
-                    p,
-                    None,
-                    Some(*object),
-                    &[
-                        EventEvidence::PathPresentInFromRun,
-                        EventEvidence::PathAbsentInToRun,
-                        EventEvidence::ToRunCompleteForScope,
-                    ],
-                    from_by_path.get(*p).copied(),
-                    None,
-                ));
-            }
-        }
-        // Paths without provable object identity that vanished entirely.
         for (path, f) in &from_by_path {
-            if f.object.is_some() {
-                continue; // object-keyed deletion handled above
+            if to_by_path.contains_key(*path) {
+                continue; // path still observed
             }
-            if !to_by_path.contains_key(*path) {
-                events.push(event(
-                    EventKind::Deleted,
-                    from.run.run_id.clone(),
-                    to.run.run_id.clone(),
-                    path,
-                    None,
-                    None,
-                    &[
-                        EventEvidence::PathPresentInFromRun,
-                        EventEvidence::PathAbsentInToRun,
-                        EventEvidence::ToRunCompleteForScope,
-                    ],
-                    Some(f),
-                    None,
-                ));
+            if moved_from_paths.contains(*path) {
+                continue; // proven relocation source (pass 2)
             }
+            events.push(event(
+                EventKind::Deleted,
+                from.run.run_id.clone(),
+                to.run.run_id.clone(),
+                path,
+                None,
+                f.object,
+                &[
+                    EventEvidence::PathPresentInFromRun,
+                    EventEvidence::PathAbsentInToRun,
+                    EventEvidence::ToRunCompleteForScope,
+                ],
+                Some(f),
+                None,
+            ));
         }
     }
 
     // ---- PASS 4: creations (full-scope from-run ONLY) --------------------
     // A path new in `to` proves creation only when the from-run observed
     // its whole scope (a partial from-run may simply have missed it).
-    // Paths whose object already existed in `from` are moves (pass 2),
-    // not creations — except added ALIASES of a surviving object, which
-    // are new paths for an existing object and are reported as Created
-    // with continuity evidence.
+    // New locations of a surviving object are created ALIASES (reported
+    // as Created with object-continuity evidence — the honest path-level
+    // fact); move destinations were already explained by pass 2 and are
+    // never double-counted.
     if from.run.status.observes_full_scope() {
         for (path, t) in &to_by_path {
             if from_by_path.contains_key(*path) {
                 continue;
             }
-            // A move/rename destination was already explained by object
-            // continuity (pass 2) — never double-counted as a creation.
-            if moved_paths.contains(*path) {
-                continue;
+            if moved_to_paths.contains(*path) {
+                continue; // claimed by a proven move (pass 2)
             }
             let continuity = t.object.and_then(|o| from_by_object.get(&o)).is_some();
             let mut evidence = vec![
@@ -759,7 +799,7 @@ fn event(
     to_run: RunId,
     path: &Path,
     previous_path: Option<PathBuf>,
-    object: Option<(u64, u64)>,
+    object: Option<ObjectId>,
     evidence: &[EventEvidence],
     previous: Option<&ObservedEntry>,
     new: Option<&ObservedEntry>,
@@ -768,7 +808,16 @@ fn event(
     evidence.sort();
     evidence.dedup();
     let object_str = object
-        .map(|(d, i)| format!("{d:016x}-{i:016x}"))
+        .map(|o| {
+            format!(
+                "{:016x}-{:016x}-{}",
+                o.device,
+                o.inode,
+                o.file_id_hi
+                    .map(|hi| format!("{hi:016x}"))
+                    .unwrap_or_else(|| "-".to_string())
+            )
+        })
         .unwrap_or_default();
     let canonical = format!(
         "{kind:?}|{from_run}|{to_run}|{}|{}|{object_str}",

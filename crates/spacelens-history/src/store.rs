@@ -98,8 +98,10 @@ impl From<crate::model::BuildError> for StoreError {
 }
 
 /// The latest history schema version this crate understands. v1 is the
-/// Phase 0 bootstrap (spacelens-core); v2 adds the history tables.
-pub const HISTORY_SCHEMA_VERSION: u32 = 2;
+/// Phase 0 bootstrap (spacelens-core); v2 adds the history tables; v3
+/// (Phase 5.1) widens object identity with `file_id_hi` and tags every
+/// persisted path with its storage encoding.
+pub const HISTORY_SCHEMA_VERSION: u32 = 3;
 
 /// Forward-only migration: v1 (core bootstrap) → v2 (history tables).
 const MIGRATION_V2: &str = "
@@ -159,6 +161,35 @@ CREATE TABLE IF NOT EXISTS relationship_members (
 CREATE INDEX IF NOT EXISTS idx_rel_members_path ON relationship_members(path);
 ";
 
+/// Forward-only migration: v2 → v3 (Phase 5.1). Applied atomically with
+/// the version bump inside the same transaction:
+///
+/// - `observations.file_id_hi` / `relationship_members.file_id_hi` — the
+///   wide-identity high bits. Every pre-existing row keeps `NULL`: the
+///   high component was never stored by v2 and is NEVER fabricated.
+/// - the object index widened to `(device, inode, file_id_hi)`.
+/// - every pre-existing path value tagged with its storage encoding: rows
+///   containing U+FFFD are `l:`-tagged (the legacy lossy spelling,
+///   preserved exactly as the v2 store wrote it — those bytes are
+///   unrecoverable and are not invented); all other rows are `u:`-tagged
+///   (a v2 string without U+FFFD is provably the path verbatim).
+///
+/// Forward-only and idempotent-per-state: the version table gates it, and
+/// each step is safe to re-apply only within the transaction that bumps
+/// the version.
+const MIGRATION_V3: &str = "
+ALTER TABLE observations ADD COLUMN file_id_hi INTEGER;
+ALTER TABLE relationship_members ADD COLUMN file_id_hi INTEGER;
+DROP INDEX IF EXISTS idx_obs_object;
+CREATE INDEX IF NOT EXISTS idx_obs_object ON observations(device, inode, file_id_hi);
+UPDATE observations
+   SET path = CASE WHEN instr(path, '\u{FFFD}') > 0
+                   THEN 'l:' || path ELSE 'u:' || path END;
+UPDATE relationship_members
+   SET path = CASE WHEN instr(path, '\u{FFFD}') > 0
+                   THEN 'l:' || path ELSE 'u:' || path END;
+";
+
 /// A live history store. Wraps the rusqlite connection; all mutating
 /// operations are transactional.
 pub struct HistoryStore {
@@ -167,17 +198,24 @@ pub struct HistoryStore {
 
 impl HistoryStore {
     /// Open (or create) the store at `path`, applying pending migrations
-    /// (core v1 → history v2) and recovering stale `RUNNING` runs as
-    /// `FAILED` (Objective 19 — deterministic crash recovery).
+    /// (core v1 → history v2 → history v3, each atomic with its version
+    /// bump) and recovering stale `RUNNING` runs as `FAILED` (Objective
+    /// 19 — deterministic crash recovery).
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = spacelens_core::db::open(path)?;
+        let mut conn = spacelens_core::db::open(path)?;
         let current = spacelens_core::db::schema_version(&conn)?;
-        if current < HISTORY_SCHEMA_VERSION {
-            conn.execute_batch(MIGRATION_V2)?;
-            conn.execute(
-                "UPDATE schema_version SET version = ?1",
-                params![HISTORY_SCHEMA_VERSION],
-            )?;
+        if current < 2 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATION_V2)?;
+            tx.execute("UPDATE schema_version SET version = 2", params![])?;
+            tx.commit()?;
+        }
+        if current < 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATION_V3)?;
+            retag_legacy_roots(&tx)?;
+            tx.execute("UPDATE schema_version SET version = 3", params![])?;
+            tx.commit()?;
         }
         let store = HistoryStore { conn };
         store.recover_stale_runs()?;
@@ -272,18 +310,19 @@ impl HistoryStore {
         }
         let mut obs = tx.prepare(
             "INSERT INTO observations
-             (run_id, path, kind, size, device, inode, modified, category,
+             (run_id, path, kind, size, device, inode, file_id_hi, modified, category,
               subcategory, content_sha256, obs_error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         for entry in &snapshot.entries {
             obs.execute(params![
                 record.run_id.0,
-                entry.path.to_string_lossy(),
+                crate::path_encoding::encode(&entry.path),
                 serde_kind(entry.kind),
                 entry.size,
-                entry.object.map(|o| o.0 as i64),
-                entry.object.map(|o| o.1 as i64),
+                entry.object.map(|o| o.device as i64),
+                entry.object.map(|o| o.inode as i64),
+                entry.object.and_then(|o| o.file_id_hi.map(|hi| hi as i64)),
                 entry.modified.map(time_nanos),
                 entry.classification.as_ref().map(|c| c.category.clone()),
                 entry
@@ -302,8 +341,8 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             let mut rm = tx.prepare(
-                "INSERT INTO relationship_members (run_id, rel_id, path, device, inode)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO relationship_members (run_id, rel_id, path, device, inode, file_id_hi)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for r in &rel.relationships {
                 ro.execute(params![
@@ -319,9 +358,10 @@ impl HistoryStore {
                     rm.execute(params![
                         record.run_id.0,
                         r.id,
-                        m.path.to_string_lossy(),
+                        crate::path_encoding::encode(&m.path),
                         m.object.map(|o| o.volume as i64),
                         m.object.map(|o| o.file_id as i64),
+                        member_file_id_hi(snapshot, &m.path),
                     ])?;
                 }
             }
@@ -404,7 +444,7 @@ impl HistoryStore {
             }));
         }
         let mut stmt = self.conn.prepare(
-            "SELECT path, kind, size, device, inode, modified, category, subcategory,
+            "SELECT path, kind, size, device, inode, file_id_hi, modified, category, subcategory,
                     content_sha256, obs_error
              FROM observations WHERE run_id = ?1 ORDER BY path",
         )?;
@@ -413,6 +453,14 @@ impl HistoryStore {
         for r in rows {
             entries.push(r?);
         }
+        // Canonical path order is a Snapshot invariant (the tagged storage
+        // spelling orders differently); re-establish it after decode.
+        entries.sort_by(|a, b| {
+            a.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.path.as_os_str().as_encoded_bytes())
+        });
         let mut rel_stmt = self.conn.prepare(
             "SELECT rel_id, kind, size, member_count, recoverable, accounting
              FROM relationship_obs WHERE run_id = ?1 ORDER BY rel_id",
@@ -447,7 +495,7 @@ impl HistoryStore {
         let mut members_by_rel: BTreeMap2<String, MemberRows> = BTreeMap2::new();
         {
             let mut m = self.conn.prepare(
-                "SELECT rel_id, path, device, inode FROM relationship_members
+                "SELECT rel_id, path, device, inode, file_id_hi FROM relationship_members
                  WHERE run_id = ?1 ORDER BY rel_id, path",
             )?;
             let rows = m.query_map(params![run_id.0], |r| {
@@ -456,14 +504,15 @@ impl HistoryStore {
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<i64>>(2)?,
                     r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
                 ))
             })?;
             for row in rows {
-                let (rel_id, path, device, inode) = row?;
+                let (rel_id, path, device, inode, file_id_hi) = row?;
                 members_by_rel
                     .entry(rel_id)
                     .or_default()
-                    .push((path, device, inode));
+                    .push((path, device, inode, file_id_hi));
             }
         }
         let relationships = reconstruct_relationship_report(relationships, members_by_rel);
@@ -479,45 +528,26 @@ impl HistoryStore {
 
     /// History of one path across all runs, newest first (Objective 25:
     /// "what was the state of this path N days ago" becomes a straight
-    /// indexed lookup). Bounded.
+    /// indexed lookup). Bounded. The path is looked up by its lossless
+    /// storage encoding — non-UTF-8 paths are found exactly.
     pub fn history_for_path(
         &self,
         path: &Path,
         limits: &QueryLimits,
     ) -> Result<Vec<PathHistoryPoint>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT r.run_id, r.started_at, o.kind, o.size, o.device, o.inode,
+            "SELECT r.run_id, r.started_at, o.kind, o.size, o.device, o.inode, o.file_id_hi,
                     o.modified, o.category, o.subcategory, o.content_sha256, o.obs_error
              FROM observations o JOIN scan_runs r ON r.run_id = o.run_id
              WHERE o.path = ?1
              ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(
-            params![path.to_string_lossy(), limits.max_results as i64],
-            |r| {
-                Ok(PathHistoryPoint {
-                    run_id: RunId(r.get(0)?),
-                    started_at: time_from_nanos_opt(r.get::<_, Option<i64>>(1)?),
-                    kind: serde_kind_from(r.get::<_, String>(2)?),
-                    size: r.get(3)?,
-                    object: r
-                        .get::<_, Option<i64>>(4)?
-                        .zip(r.get::<_, Option<i64>>(5)?)
-                        .map(|(d, i)| (d as u64, i as u64)),
-                    classification: match (
-                        r.get::<_, Option<String>>(7)?,
-                        r.get::<_, Option<String>>(8)?,
-                    ) {
-                        (Some(c), s) => Some(ClassificationRef {
-                            category: c,
-                            subcategory: s,
-                        }),
-                        _ => None,
-                    },
-                    content_sha256: r.get(9)?,
-                    observation_error: r.get(10)?,
-                })
-            },
+            params![
+                crate::path_encoding::encode(path),
+                limits.max_results as i64
+            ],
+            map_history_point,
         )?;
         let mut out = Vec::new();
         for r in rows {
@@ -527,21 +557,29 @@ impl HistoryStore {
     }
 
     /// History of one filesystem object across runs (by proven identity).
+    /// Rows that never stored a `file_id_hi` are returned only when the
+    /// caller's `file_id_hi` is `None` (legacy pair-only identity).
     pub fn history_for_object(
         &self,
         volume: u64,
         file_id: u64,
+        file_id_hi: Option<u64>,
         limits: &QueryLimits,
     ) -> Result<Vec<PathHistoryPoint>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT r.run_id, r.started_at, o.kind, o.size, o.device, o.inode,
+            "SELECT r.run_id, r.started_at, o.kind, o.size, o.device, o.inode, o.file_id_hi,
                     o.modified, o.category, o.subcategory, o.content_sha256, o.obs_error
              FROM observations o JOIN scan_runs r ON r.run_id = o.run_id
-             WHERE o.device = ?1 AND o.inode = ?2
-             ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?3",
+             WHERE o.device = ?1 AND o.inode = ?2 AND o.file_id_hi IS ?3
+             ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?4",
         )?;
         let rows = stmt.query_map(
-            params![volume as i64, file_id as i64, limits.max_results as i64],
+            params![
+                volume as i64,
+                file_id as i64,
+                file_id_hi.map(|hi| hi as i64),
+                limits.max_results as i64
+            ],
             map_history_point,
         )?;
         let mut out = Vec::new();
@@ -558,7 +596,7 @@ impl HistoryStore {
         limits: &QueryLimits,
     ) -> Result<Vec<PathHistoryPoint>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT r.run_id, r.started_at, o.kind, o.size, o.device, o.inode,
+            "SELECT r.run_id, r.started_at, o.kind, o.size, o.device, o.inode, o.file_id_hi,
                     o.modified, o.category, o.subcategory, o.content_sha256, o.obs_error
              FROM observations o JOIN scan_runs r ON r.run_id = o.run_id
              WHERE o.content_sha256 = ?1
@@ -724,7 +762,9 @@ pub struct PathHistoryPoint {
     pub started_at: Option<SystemTime>,
     pub kind: ObservedKind,
     pub size: Option<u64>,
-    pub object: Option<(u64, u64)>,
+    /// Full proven object identity (high bits included; `None` when the
+    /// storing run could not prove identity at all).
+    pub object: Option<crate::model::ObjectId>,
     pub classification: Option<ClassificationRef>,
     pub content_sha256: Option<String>,
     pub observation_error: Option<String>,
@@ -781,7 +821,24 @@ impl<K: Ord, V> std::ops::Deref for BTreeMap2<K, V> {
     }
 }
 
-type MemberRows = Vec<(String, Option<i64>, Option<i64>)>;
+type MemberRows = Vec<(String, Option<i64>, Option<i64>, Option<i64>)>;
+
+/// The proven wide-identity high bits for a relationship member path,
+/// taken from the run's snapshot (the Phase 4 `ObjectRef` publishes the
+/// pair only — the full identity lives in the observation rows). The
+/// snapshot is path-ordered (a `Snapshot` invariant), so this is a
+/// bounded binary search per member, and `None` is returned whenever the
+/// member was not observed in the snapshot — never fabricated.
+fn member_file_id_hi(snapshot: &Snapshot, member_path: &Path) -> Option<i64> {
+    let bytes = member_path.as_os_str().as_encoded_bytes();
+    snapshot
+        .entries
+        .binary_search_by(|e| e.path.as_os_str().as_encoded_bytes().cmp(bytes))
+        .ok()
+        .and_then(|idx| snapshot.entries[idx].object)
+        .and_then(|o| o.file_id_hi)
+        .map(|hi| hi as i64)
+}
 
 fn reconstruct_relationship_report(
     rows: Vec<RelRow>,
@@ -804,10 +861,13 @@ fn reconstruct_relationship_report(
             StorageAccounting::Estimated
         };
         let mut rel_members = Vec::new();
-        for (path, device, inode) in members.get(&row.id).into_iter().flatten() {
+        for (path, device, inode, _file_id_hi) in members.get(&row.id).into_iter().flatten() {
             rel_members.push(MemberRef {
                 entry_id: 0,
-                path: PathBuf::from(path),
+                path: crate::path_encoding::decode(path)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| PathBuf::from(path.as_str())),
                 object: device.zip(*inode).map(|(d, i)| ObjectRef {
                     volume: d as u64,
                     file_id: i as u64,
@@ -898,7 +958,7 @@ fn map_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
         run_id: RunId(r.get(0)?),
         started_at: time_from_nanos(r.get::<_, i64>(1)?),
         completed_at: r.get::<_, Option<i64>>(2)?.map(time_from_nanos),
-        roots: serde_json::from_str(&roots_json).unwrap_or_default(),
+        roots: serde_roots_from(&roots_json),
         platform: r.get(4)?,
         config: serde_json::from_str(&config_json).unwrap_or_else(|_| ConfigFingerprint::current()),
         status: serde_status_from(&r.get::<_, String>(6)?),
@@ -917,40 +977,21 @@ fn map_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
 }
 
 fn map_obs_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ObservedEntry> {
+    let stored_path: String = r.get(0)?;
+    let path = crate::path_encoding::decode(&stored_path)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| PathBuf::from(stored_path.as_str()));
     Ok(ObservedEntry {
-        path: PathBuf::from(r.get::<_, String>(0)?),
+        path,
         kind: serde_kind_from(r.get::<_, String>(1)?),
         size: r.get(2)?,
-        object: r
-            .get::<_, Option<i64>>(3)?
-            .zip(r.get::<_, Option<i64>>(4)?)
-            .map(|(d, i)| (d as u64, i as u64)),
-        modified: r.get::<_, Option<i64>>(5)?.map(time_from_nanos),
-        classification: match (
-            r.get::<_, Option<String>>(6)?,
-            r.get::<_, Option<String>>(7)?,
-        ) {
-            (Some(c), s) => Some(ClassificationRef {
-                category: c,
-                subcategory: s,
-            }),
-            _ => None,
-        },
-        content_sha256: r.get(8)?,
-        observation_error: r.get(9)?,
-    })
-}
-
-fn map_history_point(r: &rusqlite::Row<'_>) -> rusqlite::Result<PathHistoryPoint> {
-    Ok(PathHistoryPoint {
-        run_id: RunId(r.get(0)?),
-        started_at: time_from_nanos_opt(r.get::<_, Option<i64>>(1)?),
-        kind: serde_kind_from(r.get::<_, String>(2)?),
-        size: r.get(3)?,
-        object: r
-            .get::<_, Option<i64>>(4)?
-            .zip(r.get::<_, Option<i64>>(5)?)
-            .map(|(d, i)| (d as u64, i as u64)),
+        object: object_from_columns(
+            r.get::<_, Option<i64>>(3)?, // device
+            r.get::<_, Option<i64>>(4)?, // inode
+            r.get::<_, Option<i64>>(5)?, // file_id_hi
+        ),
+        modified: r.get::<_, Option<i64>>(6)?.map(time_from_nanos),
         classification: match (
             r.get::<_, Option<String>>(7)?,
             r.get::<_, Option<String>>(8)?,
@@ -966,12 +1007,108 @@ fn map_history_point(r: &rusqlite::Row<'_>) -> rusqlite::Result<PathHistoryPoint
     })
 }
 
+/// Object identity from the storage columns: the pair is required (the
+/// pre-v3 rows stored pair-only identity — an honest `file_id_hi: None`,
+/// never fabricated), the high bits attach exactly where they were
+/// proven and stored.
+fn object_from_columns(
+    device: Option<i64>,
+    inode: Option<i64>,
+    file_id_hi: Option<i64>,
+) -> Option<crate::model::ObjectId> {
+    device.zip(inode).map(|(d, i)| crate::model::ObjectId {
+        device: d as u64,
+        inode: i as u64,
+        file_id_hi: file_id_hi.map(|hi| hi as u64),
+    })
+}
+
+fn map_history_point(r: &rusqlite::Row<'_>) -> rusqlite::Result<PathHistoryPoint> {
+    Ok(PathHistoryPoint {
+        run_id: RunId(r.get(0)?),
+        started_at: time_from_nanos_opt(r.get::<_, Option<i64>>(1)?),
+        kind: serde_kind_from(r.get::<_, String>(2)?),
+        size: r.get(3)?,
+        object: object_from_columns(
+            r.get::<_, Option<i64>>(4)?, // device
+            r.get::<_, Option<i64>>(5)?, // inode
+            r.get::<_, Option<i64>>(6)?, // file_id_hi
+        ),
+        classification: match (
+            r.get::<_, Option<String>>(8)?,
+            r.get::<_, Option<String>>(9)?,
+        ) {
+            (Some(c), s) => Some(ClassificationRef {
+                category: c,
+                subcategory: s,
+            }),
+            _ => None,
+        },
+        content_sha256: r.get(10)?,
+        observation_error: r.get(11)?,
+    })
+}
+
+/// Roots serialization for the run row: each root is stored losslessly
+/// under its path-storage tag (see [`crate::path_encoding`]), so scope
+/// comparisons after a reload see the exact declared roots.
 fn serde_roots(roots: &[PathBuf]) -> String {
     let as_strs: Vec<String> = roots
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| crate::path_encoding::encode(p))
         .collect();
     serde_json::to_string(&as_strs).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Decode roots written by this store (tagged) or by the pre-repair
+/// store (untagged legacy strings — preserved as-represented).
+fn serde_roots_from(json: &str) -> Vec<PathBuf> {
+    serde_json::from_str::<Vec<String>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|stored| {
+            crate::path_encoding::decode(&stored)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| PathBuf::from(stored))
+        })
+        .collect()
+}
+
+/// v2→v3 roots retag: the run-row `roots` JSON of pre-v3 stores holds
+/// untagged (possibly lossy) root strings. Tag them with the same rule
+/// as the observation paths so the v3 decoder reads them honestly:
+/// U+FFFD-bearing values are legacy-lossy, all others are the verbatim
+/// root. Applied within the v3 migration transaction only.
+fn retag_legacy_roots(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let mut stmt = tx.prepare("SELECT run_id, roots FROM scan_runs")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    let mut update = tx.prepare("UPDATE scan_runs SET roots = ?2 WHERE run_id = ?1")?;
+    for (run_id, roots_json) in rows {
+        let tagged: Vec<String> = serde_json::from_str::<Vec<String>>(&roots_json)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|root| {
+                if root.contains('\u{FFFD}') {
+                    format!("l:{root}")
+                } else if root.starts_with("u:") || root.starts_with("e:") || root.starts_with("l:")
+                {
+                    root
+                } else {
+                    format!("u:{root}")
+                }
+            })
+            .collect();
+        update.execute(params![
+            run_id,
+            serde_json::to_string(&tagged).unwrap_or_default()
+        ])?;
+    }
+    Ok(())
 }
 
 fn serde_status(s: RunStatus) -> &'static str {

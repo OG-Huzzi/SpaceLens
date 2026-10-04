@@ -49,6 +49,10 @@ fn run_record(id: &str, offset: u64, status: RunStatus, roots: &[&str]) -> RunRe
     }
 }
 
+fn oid(device: u64, inode: u64) -> spacelens_history::ObjectId {
+    spacelens_history::ObjectId::from_proven(device, inode, None)
+}
+
 fn fs_entry(path: &str, kind: EntryKind, size: u64, object: Option<(u64, u64)>) -> FsEntry {
     let (device, inode) = match object {
         Some((d, i)) => (Some(d), Some(i)),
@@ -157,7 +161,7 @@ fn run_lifecycle_start_complete() {
             path: PathBuf::from("/scope-a/file1.bin"),
             kind: ObservedKind::File,
             size: Some(1024),
-            object: Some((1, 42)),
+            object: Some(oid(1, 42)),
             modified: Some(entry_time()),
             classification: Some(ClassificationRef::from_parts(Category::Documents, None)),
             content_sha256: Some(CONTENT_ONE.to_string()),
@@ -167,7 +171,7 @@ fn run_lifecycle_start_complete() {
             path: PathBuf::from("/scope-a/file2.bin"),
             kind: ObservedKind::File,
             size: Some(2048),
-            object: Some((1, 43)),
+            object: Some(oid(1, 43)),
             modified: Some(entry_time()),
             classification: Some(ClassificationRef::from_parts(
                 Category::Archives,
@@ -180,7 +184,7 @@ fn run_lifecycle_start_complete() {
             path: PathBuf::from("/scope-a/sub"),
             kind: ObservedKind::Dir,
             size: None,
-            object: Some((1, 100)),
+            object: Some(oid(1, 100)),
             modified: Some(entry_time()),
             classification: None,
             content_sha256: None,
@@ -415,10 +419,10 @@ fn history_for_path_across_runs_ordered_newest_first() {
     assert_eq!(points.len(), 2);
     assert_eq!(points[0].run_id, newer.run_id);
     assert_eq!(points[0].size, Some(250));
-    assert_eq!(points[0].object, Some((1, 10)));
+    assert_eq!(points[0].object, Some(oid(1, 10)));
     assert_eq!(points[1].run_id, older.run_id);
     assert_eq!(points[1].size, Some(100));
-    assert_eq!(points[1].object, Some((1, 10)));
+    assert_eq!(points[1].object, Some(oid(1, 10)));
 }
 
 #[test]
@@ -449,11 +453,11 @@ fn history_for_object_and_content() {
 
     // By proven object identity: exactly the one entry.
     let by_object = store
-        .history_for_object(1, 42, &QueryLimits::default())
+        .history_for_object(1, 42, None, &QueryLimits::default())
         .unwrap();
     assert_eq!(by_object.len(), 1);
     assert_eq!(by_object[0].run_id, run_one.run_id);
-    assert_eq!(by_object[0].object, Some((1, 42)));
+    assert_eq!(by_object[0].object, Some(oid(1, 42)));
     assert_eq!(by_object[0].content_sha256.as_deref(), Some(CONTENT_SHARED));
 
     // By content identity: both observations (one per run).
