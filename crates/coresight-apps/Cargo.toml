@@ -1,0 +1,21 @@
+[package]
+name = "coresight-apps"
+version = "0.0.0"
+edition = "2021"
+description = "CoreSight application intelligence — Phase 6 (application inventory, footprints, evidence, ownership)"
+license = "UNLICENSED"
+
+[lib]
+name = "coresight_apps"
+crate-type = ["lib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"

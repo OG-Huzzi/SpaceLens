@@ -46,6 +46,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "coresight-apps"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "coresight-classifier"
 version = "0.0.0"
 dependencies = [
