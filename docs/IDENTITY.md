@@ -1,4 +1,4 @@
-# SpaceLens — File Identity, Hashing & Duplicate Relationships (Phase 3 / 3.1 / 3.2)
+# CoreSight — File Identity, Hashing & Duplicate Relationships (Phase 3 / 3.1 / 3.2)
 
 Status: Phase 3.2 hardened and verified. CI matrix verification recorded in
 `progress/PHASE_3_2_STATUS.md`. This document describes the implementation
@@ -11,7 +11,7 @@ is stated where it applies.
 |---|---|---|
 | **Path identity** | `FsEntry::path`, `FsEntry::id` | The scanned location. Two entries at different paths are always distinct entries. |
 | **Filesystem object identity** | `FileIdentity` (engine) | Which file object a path refers to. Proven from an *open handle* (or a query-only handle at scan time), never from a path string. Hard links share it. |
-| **Content identity** | `ContentHash` (spacelens-identity) | Which bytes an entry holds: SHA-256 over content. Two different objects can hold identical bytes. |
+| **Content identity** | `ContentHash` (coresight-identity) | Which bytes an entry holds: SHA-256 over content. Two different objects can hold identical bytes. |
 
 Example: `A:\Photos\a.jpg`, `B:\Backup\a.jpg`, `C:\Old\a.jpg` may be three
 entries (3 path identities), possibly three objects, but **one** content
@@ -334,7 +334,7 @@ finishes the engine cannot honestly estimate remaining work, and byte-based
 progress would require reading every byte candidate filtering is trying to
 skip.
 
-## API surface (`spacelens.v1.identity.*`)
+## API surface (`coresight.v1.identity.*`)
 
 `run_duplicates`, `DuplicateOptions`, `DuplicateReport`, `DuplicateGroup`,
 `DuplicateMember`, `DuplicateStatus` (incl. `CompletedWithLimits`),

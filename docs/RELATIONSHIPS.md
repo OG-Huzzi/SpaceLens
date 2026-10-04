@@ -1,4 +1,4 @@
-# SpaceLens — Relationship & Duplicate Intelligence (Phase 4)
+# CoreSight — Relationship & Duplicate Intelligence (Phase 4)
 
 Status: implemented and verified. This document describes the
 implementation as it exists — every claim is backed by a test, every
@@ -24,7 +24,7 @@ Content identity         ContentHash — SHA-256 over bytes, published only
        ↓
 Relationship identity    THIS LAYER — typed, evidenced, deterministic
                          statements derived PURELY from the verified
-                         pipeline output (crates/spacelens-identity ::
+                         pipeline output (crates/coresight-identity ::
                          relationships).
 ```
 
@@ -62,7 +62,7 @@ masquerades as a content duplicate (there is no second copy).
 
 Evidence is **categorical**, never a vague confidence score. Every
 relationship's evidence list is non-empty, sorted canonically, and
-answers "why does SpaceLens believe these entries are related?":
+answers "why does CoreSight believe these entries are related?":
 
 - *Exact duplicate:* `CONTENT_HASH_EQUAL` (+ `SIZE_EQUAL` as supporting
   fact) — the published content hash proves byte equality under the
@@ -154,7 +154,7 @@ clean lookups designed so storage search, history, intelligent uninstall,
 cleanup recommendations, and diagnostics (later phases) can be built
 without redesigning the relationship model.
 
-## API / IPC contract (`spacelens.v1.relationship.*`)
+## API / IPC contract (`coresight.v1.relationship.*`)
 
 `RelationshipReport`, `Relationship`, `RelationshipKind`, `Evidence`,
 `MemberRef`, `ObjectRef`, `AliasSet`, `ContentRef`, `Undetermined`,

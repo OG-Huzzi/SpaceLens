@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "SpaceLens",
+  "productName": "CoreSight",
   "version": "0.0.0",
-  "identifier": "com.spacelens.app",
+  "identifier": "com.coresight.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -10,7 +10,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [{ "title": "SpaceLens", "width": 1100, "height": 720, "minWidth": 880, "minHeight": 600 }],
+    "windows": [{ "title": "CoreSight", "width": 1100, "height": 720, "minWidth": 880, "minHeight": 600 }],
     "security": { "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost" }
   },
   "bundle": {

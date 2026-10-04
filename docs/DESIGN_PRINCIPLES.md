@@ -1,4 +1,4 @@
-# SpaceLens — Design Principles
+# CoreSight — Design Principles
 
 Status: Phase 0. Governs all future UI work. The goal: look like a finished
 commercial product, not a generated dashboard.

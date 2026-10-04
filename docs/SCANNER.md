@@ -1,7 +1,7 @@
-# SpaceLens — Scanner Architecture (Phase 1)
+# CoreSight — Scanner Architecture (Phase 1)
 
 Status: Phase 1. Describes the filesystem engine as implemented in
-`crates/spacelens-engine`. Extends, does not replace, `docs/ARCHITECTURE.md`.
+`crates/coresight-engine`. Extends, does not replace, `docs/ARCHITECTURE.md`.
 
 ## Where the scanner sits
 
@@ -10,7 +10,7 @@ React/TS UI (untouched in Phase 1)
         ↕ typed IPC (Phase 8/9)
 Tauri shell (not compiled yet — MSVC CI)
         ↕
-spacelens-engine   ← this phase (pure; no DB, no UI, no network)
+coresight-engine   ← this phase (pure; no DB, no UI, no network)
         ↕ platform traits
 StdFs / DriveInfo / SysDirs impls (std + thin windows-sys FFI)
 ```

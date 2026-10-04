@@ -4,7 +4,7 @@ export default function App() {
   const compatible = isContractCompatible(CONTRACT_VERSION);
   return (
     <main style={styles.page}>
-      <h1 style={styles.title}>SpaceLens</h1>
+      <h1 style={styles.title}>CoreSight</h1>
       <p style={styles.sub}>Complex engine. Simple experience.</p>
       <p style={styles.note}>
         Phase 0 scaffold — contract {CONTRACT_VERSION}{" "}

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/spacelens-core", "crates/spacelens-engine", "crates/spacelens-classifier", "crates/spacelens-identity", "crates/spacelens-history"]
+members = ["crates/coresight-core", "crates/coresight-engine", "crates/coresight-classifier", "crates/coresight-identity", "crates/coresight-history"]
 
 # The Tauri shell crate (src-tauri) is a config-level contract and is NOT a
 # workspace member until MSVC-based CI exists, because linking Tauri on
 # Windows requires the MSVC toolchain (see progress/PHASE_0_STATUS.md —
-# this machine has the GNU toolchain only). Phase 1 adds `spacelens-engine`,
+# this machine has the GNU toolchain only). Phase 1 adds `coresight-engine`,
 # the pure filesystem engine (no DB, no UI, no network dependencies).

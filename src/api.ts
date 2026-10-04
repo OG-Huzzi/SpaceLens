@@ -1,5 +1,5 @@
 /**
- * Typed mirror of `spacelens.v1.*` (docs/API_CONTRACTS.md, crates/spacelens-core/src/contract.rs).
+ * Typed mirror of `coresight.v1.*` (docs/API_CONTRACTS.md, crates/coresight-core/src/contract.rs).
  * The UI never handles filesystem paths — only categories and opportunities.
  */
 

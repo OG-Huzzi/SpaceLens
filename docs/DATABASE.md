@@ -1,4 +1,4 @@
-# SpaceLens — Database Architecture (SQLite)
+# CoreSight — Database Architecture (SQLite)
 
 Status: Phase 0 conceptual schema. Implemented from Phase 1. Owner: Rust
 (`rusqlite`, WAL mode). The frontend NEVER opens the DB.

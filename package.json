@@ -1,9 +1,9 @@
 {
-  "name": "spacelens",
+  "name": "coresight",
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "SpaceLens frontend — Phase 0 scaffold (no product UI)",
+  "description": "CoreSight frontend — Phase 0 scaffold (no product UI)",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

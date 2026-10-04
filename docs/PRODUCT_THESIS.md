@@ -1,8 +1,8 @@
-# SpaceLens — Product Thesis
+# CoreSight — Product Thesis
 
 Status: Phase 0 foundation document. Hypotheses to be validated with real users before Phase 1 scope is locked.
 
-## Who SpaceLens is for
+## Who CoreSight is for
 
 Primary: non-technical to semi-technical desktop owners (Windows first, then macOS/Linux)
 who hit "disk full" and feel anxiety, not curiosity. They do not know what AppData,
@@ -62,7 +62,7 @@ Common gaps across all of them:
   settle for two free tools. One license for all machines is a concrete reason
   to switch.
 
-## What SpaceLens does differently
+## What CoreSight does differently
 
 1. **Explain, don't expose.** Categories in human language first
    ("Games — 312 GB"), technical paths one layer down, always.
@@ -76,7 +76,7 @@ Common gaps across all of them:
 5. **Cross-platform from day one, one purchase.** Windows + macOS + Linux,
    one license, local-first, privacy-first (nothing leaves the machine).
 
-## What SpaceLens deliberately does NOT do (v1)
+## What CoreSight deliberately does NOT do (v1)
 
 - No "PC optimizer / speed booster" claims. No registry cleaners. No snake oil.
 - No automatic deletion. No background cleaning daemons.
@@ -96,7 +96,7 @@ customer-facing copy should promise the outcome, not the architecture.)
 
 ## Central hypothesis — verdict
 
-> "Existing tools expose storage. SpaceLens should explain storage."
+> "Existing tools expose storage. CoreSight should explain storage."
 
 **Verdict: strong enough to build on, with two conditions.**
 First, "explain" must cash out as *safe decisions*, not prettier charts — the

@@ -1,4 +1,4 @@
-# SpaceLens — Cross-Platform Strategy
+# CoreSight — Cross-Platform Strategy
 
 Status: Phase 0. Rule: shared by default, isolated by trait. Never a Windows-only
 core with ports bolted on later.

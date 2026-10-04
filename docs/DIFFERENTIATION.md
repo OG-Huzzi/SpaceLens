@@ -1,4 +1,4 @@
-# SpaceLens — Differentiation Analysis
+# CoreSight — Differentiation Analysis
 
 Status: Phase 0. Each candidate concept scored on user value, differentiation,
 feasibility, performance, safety, and commercial value. Verdicts bind Phase 1+

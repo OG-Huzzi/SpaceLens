@@ -1,4 +1,4 @@
-# SpaceLens — Multi-AI Development Rules
+# CoreSight — Multi-AI Development Rules
 
 Status: Phase 0. Binding on every agent (human or AI) touching this repo.
 Violations are reverted on sight.

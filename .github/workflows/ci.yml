@@ -1,7 +1,7 @@
-# SpaceLens CI — Phase 3.
+# CoreSight CI — Phase 3.
 #
-# Verifies the Rust workspace (spacelens-core + spacelens-engine +
-# spacelens-classifier + spacelens-identity) on all three target platforms
+# Verifies the Rust workspace (coresight-core + coresight-engine +
+# coresight-classifier + coresight-identity) on all three target platforms
 # and the frontend scaffold. Native Tauri compilation is intentionally NOT
 # attempted yet: the shell crate is still a config-level contract and its
 # bundle icons do not exist until the packaging work (see
@@ -46,19 +46,19 @@ jobs:
         run: cargo test -j 2 --workspace
 
       - name: Phase 1 perf smoke (correctness asserted, timing reported)
-        run: cargo test -j 2 -p spacelens-engine -- --ignored --nocapture
+        run: cargo test -j 2 -p coresight-engine -- --ignored --nocapture
 
       - name: Phase 2 perf smoke (10k/100k/1M synthetic; linear-scaling guard)
-        run: cargo test -j 2 -p spacelens-classifier -- --ignored --nocapture
+        run: cargo test -j 2 -p coresight-classifier -- --ignored --nocapture
 
       - name: Phase 3+4 perf smoke (identity pipeline + relationship engine; hostile workloads, linear-scaling guard)
-        run: cargo test -j 2 -p spacelens-identity -- --ignored --nocapture --skip huge_file_streams_beyond_4gib
+        run: cargo test -j 2 -p coresight-identity -- --ignored --nocapture --skip huge_file_streams_beyond_4gib
 
       - name: Phase 5 perf smoke (history comparison scaling; O(n+m) guard)
-        run: cargo test -j 2 -p spacelens-history -- --ignored --nocapture
+        run: cargo test -j 2 -p coresight-history -- --ignored --nocapture
 
       - name: Phase 3 >4 GiB streaming proof (release mode, real-speed SHA-256 over 10 GiB virtual content)
-        run: cargo test -j 2 -p spacelens-identity --release --test perf_tests huge_file_streams_beyond_4gib -- --ignored --nocapture
+        run: cargo test -j 2 -p coresight-identity --release --test perf_tests huge_file_streams_beyond_4gib -- --ignored --nocapture
 
   frontend:
     runs-on: ubuntu-latest

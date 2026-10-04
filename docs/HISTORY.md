@@ -1,4 +1,4 @@
-# SpaceLens — System Memory & Change History (Phase 5)
+# CoreSight — System Memory & Change History (Phase 5)
 
 Status: implemented and verified. This document describes the
 implementation as it exists — every claim is backed by a test, every
@@ -11,7 +11,7 @@ only: no recommendations, no cleanup ranking, no destructive operations**
 ```text
 Observe → Classify → Identify → Relate
                                   ↓
-                               Remember      ← Phase 5 (crates/spacelens-history)
+                               Remember      ← Phase 5 (crates/coresight-history)
 ```
 
 ## What "memory" means (six distinct concepts — never merged)
@@ -118,7 +118,7 @@ Objective 8), but consumers read them against the respective configs.
 
 ## Persistence (Objectives 15–18)
 
-- **Extends the existing architecture**: `spacelens_core::db` owns the
+- **Extends the existing architecture**: `coresight_core::db` owns the
   connection and the forward-only `schema_version` migrations. History
   adds migration **v2** (`scan_runs`, `observations`,
   `relationship_obs`, `relationship_members`) to the same database.

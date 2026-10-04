@@ -1,4 +1,4 @@
-# SpaceLens — UX Architecture
+# CoreSight — UX Architecture
 
 Status: Phase 0. Direction, not final mockups. No production UI is built in Phase 0.
 

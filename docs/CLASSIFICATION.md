@@ -1,4 +1,4 @@
-# SpaceLens Classification Engine — Phase 2
+# CoreSight Classification Engine — Phase 2
 
 Status: **REPAIRED + REVERIFIED** (independent audit repair pass) — see
 `progress/PHASE_2_STATUS.md` for the authoritative verification record.
@@ -13,7 +13,7 @@ do with it?" (recommendations belong to later phases).
 ## Crate layout
 
 ```
-crates/spacelens-classifier/
+crates/coresight-classifier/
   src/
     lib.rs          crate root, contracts, re-exports
     category.rs     Category (18) + Subcategory taxonomy, stable IPC codes
@@ -31,8 +31,8 @@ crates/spacelens-classifier/
     perf_tests.rs        ignored benchmark: 10k / 100k / 1M entries
 ```
 
-Dependency chain (docs/ARCHITECTURE.md): `spacelens-engine →
-spacelens-classifier`. The classifier is **pure**: no I/O of any kind, no
+Dependency chain (docs/ARCHITECTURE.md): `coresight-engine →
+coresight-classifier`. The classifier is **pure**: no I/O of any kind, no
 file-content reads, no network, no database, no UI. It classifies from
 path/name/extension/metadata only.
 
@@ -50,7 +50,7 @@ v1 IPC surface.
 **`Applications` vs `ApplicationData` (deliberate distinction):** application
 *code* (`Program Files`, `/Applications`, `/opt`) and application-*owned data*
 (`AppData`, `ProgramData`, `~/Library/Application Support`, `~/.config`,
-`~/.local/share`) are different categories. SpaceLens must be able to answer
+`~/.local/share`) are different categories. CoreSight must be able to answer
 "how much space does this application use?" without conflating the program
 with the data it produced.
 
@@ -58,7 +58,7 @@ with the data it produced.
 - `Other` = the entry is *understood* at a basic level (a regular file, or a
   directory, with a usable name) but no more useful primary category applies.
   This is the normal fallback and is expected to be well-populated.
-- `Unknown` = SpaceLens genuinely lacks trustworthy information. Reachable by
+- `Unknown` = CoreSight genuinely lacks trustworthy information. Reachable by
   exactly three detectable conditions, all tested:
   1. the observation carries an error (metadata incomplete),
   2. no usable name can be derived from the path,
@@ -308,7 +308,7 @@ Feed it every classification; it retains only counters. `report()` emits all
 ## Performance
 
 Benchmark (`tests/perf_tests.rs`, ignored; run with
-`cargo test -p spacelens-classifier -- --ignored --nocapture`): a deliberately
+`cargo test -p coresight-classifier -- --ignored --nocapture`): a deliberately
 varied synthetic workload — rooted locations on all three platforms, installer
 name/extension conflicts, parent/child chains, both path separators —
 classification + streaming aggregation + context tracking, no disk I/O.

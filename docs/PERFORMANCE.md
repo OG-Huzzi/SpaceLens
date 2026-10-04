@@ -1,4 +1,4 @@
-# SpaceLens — Performance Strategy
+# CoreSight — Performance Strategy
 
 Status: Phase 0. Budgets are targets to design against, measured from Phase 1.
 No premature optimization; no unmeasured claims.

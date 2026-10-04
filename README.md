@@ -1,4 +1,4 @@
-# SpaceLens
+# CoreSight
 
 > **Complex engine. Simple experience.**
 
@@ -10,7 +10,7 @@ here; see `progress/CURRENT_PHASE.md` and `progress/PHASE_0_STATUS.md`.
 
 ## Layout
 
-- `crates/spacelens-core/` — Rust core scaffold: `v1` IPC contract types + SQLite bootstrap. Built + tested.
+- `crates/coresight-core/` — Rust core scaffold: `v1` IPC contract types + SQLite bootstrap. Built + tested.
 - `src/` — React + TypeScript scaffold (`npm run build`).
 - `src-tauri/` — Tauri 2 shell contract (config + capabilities). First compiled in MSVC CI (Phase 1+).
 - `docs/` — product + architecture foundation (13 documents).
@@ -19,7 +19,7 @@ here; see `progress/CURRENT_PHASE.md` and `progress/PHASE_0_STATUS.md`.
 ## Verify (Phase 0)
 
 ```sh
-cargo test -p spacelens-core   # Rust + SQLite (needs gcc for rusqlite bundled)
+cargo test -p coresight-core   # Rust + SQLite (needs gcc for rusqlite bundled)
 npm install && npm run build   # React + TypeScript + Vite
 ```
 

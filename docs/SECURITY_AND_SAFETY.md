@@ -1,4 +1,4 @@
-# SpaceLens — Security & Safety Architecture
+# CoreSight — Security & Safety Architecture
 
 Status: Phase 0. Safety is a CORE PRODUCT REQUIREMENT, not a feature.
 A storage manager bug can destroy irreplaceable data; this document is the

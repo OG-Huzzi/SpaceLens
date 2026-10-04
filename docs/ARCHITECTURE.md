@@ -1,4 +1,4 @@
-# SpaceLens — Technical Architecture
+# CoreSight — Technical Architecture
 
 Status: Phase 0 contract. Evaluated against the proposed stack; stack is KEPT.
 Minimal scaffold validation in Phase 0; full implementation starts Phase 1.
@@ -58,12 +58,12 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
 ## Core engine module boundaries (implemented so far)
 
 - `scanner` — parallel walk, metadata collection, progress/cancel. Knows nothing
-  of categories or UI. (Phase 1: `crates/spacelens-engine`.)
+  of categories or UI. (Phase 1: `crates/coresight-engine`.)
 - `classifier` — maps entries → human categories + app attribution. Pure function
   over metadata; rule tables versioned and testable without a disk.
-  (Phase 2/2.1: `crates/spacelens-classifier`.)
+  (Phase 2/2.1: `crates/coresight-classifier`.)
 - `hasher` / `duplicates` — content hashing (SHA-256), exact-duplicate grouping
-  with hardlink collapse. (Phase 3: `crates/spacelens-identity`, docs/IDENTITY.md.)
+  with hardlink collapse. (Phase 3: `crates/coresight-identity`, docs/IDENTITY.md.)
   Phase 3.1 hardened the same layer: no-follow content opens (links that
   replace an observed file are refused, never followed), observed-vs-opened
   object verification (`Replaced`), handle-proven mutation brackets
@@ -81,13 +81,13 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   scope boundaries enforced; configuration fingerprints preserved), a
   query API (path/object/content/relationship history), deterministic
   bounded retention, and crash recovery
-  (`crates/spacelens-history`, docs/HISTORY.md).
+  (`crates/coresight-history`, docs/HISTORY.md).
 - `relationships` — the Phase 4 relationship-intelligence layer: typed
   relationship kinds (hard-link aliases vs content duplicates), categorical
   evidence, deterministic ordering, conservative recoverability, undetermined
   summaries, and a query index. A PURE derivation over the verified pipeline
   output — no I/O, no destructive actions, no recommendations yet
-  (`crates/spacelens-identity::relationships`, docs/RELATIONSHIPS.md).
+  (`crates/coresight-identity::relationships`, docs/RELATIONSHIPS.md).
   The persistent hash cache belongs with persistence (later phase); Phase 3
   deliberately added no database.
 - `recommender` — produces opportunities with reasons + recovery estimates.

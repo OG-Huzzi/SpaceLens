@@ -46,6 +46,62 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "coresight-classifier"
+version = "0.0.0"
+dependencies = [
+ "coresight-engine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "coresight-core"
+version = "0.0.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "coresight-engine"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "coresight-history"
+version = "0.0.0"
+dependencies = [
+ "coresight-classifier",
+ "coresight-core",
+ "coresight-engine",
+ "coresight-identity",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "coresight-identity"
+version = "0.0.0"
+dependencies = [
+ "coresight-engine",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -310,62 +366,6 @@ name = "smallvec"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
-
-[[package]]
-name = "spacelens-classifier"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "spacelens-engine",
-]
-
-[[package]]
-name = "spacelens-core"
-version = "0.0.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "spacelens-engine"
-version = "0.0.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "spacelens-history"
-version = "0.0.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "spacelens-classifier",
- "spacelens-core",
- "spacelens-engine",
- "spacelens-identity",
- "tempfile",
-]
-
-[[package]]
-name = "spacelens-identity"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "spacelens-engine",
- "tempfile",
-]
 
 [[package]]
 name = "syn"

@@ -1,4 +1,4 @@
-# SpaceLens — Business Model
+# CoreSight — Business Model
 
 Status: Phase 0 analysis. No payment or licensing code is built in Phase 0.
 
@@ -59,10 +59,10 @@ to subscription.
 - App-store and OS-vendor risk: Apple/Microsoft sherlocking, store commission,
   notarization/sandbox limits on filesystem access. Mitigation: direct sale as
   primary channel; stores as secondary.
-- **Brand collision (documented, not resolved):** "SpaceLens"/"Spacelens" marks
-  exist in adjacent spaces — spacelens.com (e-commerce/blockchain), an iOS
-  "SpaceLens: Storage Cleaner Pro", and notably an npm/Qt disk-analysis tool
-  also named spacelens. Legal clearance + possible qualifier (e.g. "SpaceLens
+- **Brand collision (documented, not resolved):** "CoreSight"/"CoreSight" marks
+  exist in adjacent spaces — coresight.com (e-commerce/blockchain), an iOS
+  "CoreSight: Storage Cleaner Pro", and notably an npm/Qt disk-analysis tool
+  also named coresight. Legal clearance + possible qualifier (e.g. "CoreSight
   Disk Intelligence") must precede paid launch. No legal claims made here.
 - Single-OS users may compare only against their free native tool. Mitigation:
   free tier must beat WizTree/GrandPerspective on clarity, not just match on speed.

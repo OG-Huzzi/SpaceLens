@@ -1,4 +1,4 @@
-# SpaceLens — Testing Strategy
+# CoreSight — Testing Strategy
 
 Status: Phase 0. Philosophy + required suites. Implemented progressively from
 Phase 1; adversarial + perf gates harden by Phase 10.

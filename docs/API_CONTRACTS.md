@@ -1,4 +1,4 @@
-# SpaceLens — IPC / API Contracts
+# CoreSight — IPC / API Contracts
 
 Status: Phase 0. Versioned contract (`v1`). Breaking changes require a version
 bump and a migration note. The frontend must never need filesystem knowledge.
@@ -7,33 +7,33 @@ bump and a migration note. The frontend must never need filesystem knowledge.
 
 Tauri 2 commands (request/response) + events (Rust→UI streams).
 All payloads JSON, `camelCase`, sizes in bytes (integers), timestamps RFC 3339 UTC.
-API namespace: `spacelens.v1.*`.
+API namespace: `coresight.v1.*`.
 
 ## Commands (UI → Rust)
 
-- `spacelens.v1.startScan { driveId, fullRescan? } → { scanId }`
-- `spacelens.v1.cancelScan { scanId } → { cancelled: true }`
-- `spacelens.v1.getDriveSummary { driveId } → DriveSummary`
+- `coresight.v1.startScan { driveId, fullRescan? } → { scanId }`
+- `coresight.v1.cancelScan { scanId } → { cancelled: true }`
+- `coresight.v1.getDriveSummary { driveId } → DriveSummary`
   (totals, exclusions note, last scan, snapshot count)
-- `spacelens.v1.getCategories { scanId, parentCategory? } → Category[]`
+- `coresight.v1.getCategories { scanId, parentCategory? } → Category[]`
   `{ id, name, bytes, shareOfParent, deltaSinceLast?, itemCount }` — no paths.
-- `spacelens.v1.getOpportunities { scanId } → Opportunity[]`
+- `coresight.v1.getOpportunities { scanId } → Opportunity[]`
   `{ id, tier: safe|review, title, whatItIs, whyRecommended, bytes,
      recoverableBytes, staysUntouched, consequence, preview }`
-- `spacelens.v1.previewPlan { opportunityIds } → PlanPreview`
+- `coresight.v1.previewPlan { opportunityIds } → PlanPreview`
   (exact items-or-rules, bytes, destination, undo path, warnings)
-- `spacelens.v1.confirmPlan { planId, ackedWarnings } → { accepted, rejected[] }`
+- `coresight.v1.confirmPlan { planId, ackedWarnings } → { accepted, rejected[] }`
   (safety validation runs HERE, synchronously, before any action)
-- `spacelens.v1.executePlan { planId } → { results, freedBytes, leftovers[] }`
-- `spacelens.v1.getHistory { driveId } → SnapshotDelta[]`
-- `spacelens.v1.listDrives → Drive[]` (connected + remembered-offline)
+- `coresight.v1.executePlan { planId } → { results, freedBytes, leftovers[] }`
+- `coresight.v1.getHistory { driveId } → SnapshotDelta[]`
+- `coresight.v1.listDrives → Drive[]` (connected + remembered-offline)
 
 ## Events (Rust → UI)
 
-- `spacelens.v1.scanProgress { scanId, filesSeen, bytesSeen, currentCategory?, etaSec? }`
+- `coresight.v1.scanProgress { scanId, filesSeen, bytesSeen, currentCategory?, etaSec? }`
   throttled ≤4/sec.
-- `spacelens.v1.scanComplete { scanId, status, summary }`
-- `spacelens.v1.planVerified { planId, freedBytes, leftovers[] }`
+- `coresight.v1.scanComplete { scanId, status, summary }`
+- `coresight.v1.planVerified { planId, freedBytes, leftovers[] }`
 
 ## Errors
 
@@ -45,7 +45,7 @@ unknown codes show a generic safe fallback, never a stack trace.
 
 ## Identity contracts (Phase 3 / 3.1)
 
-Namespace: `spacelens.v1.identity.*` (engine-side in `crates/spacelens-identity`;
+Namespace: `coresight.v1.identity.*` (engine-side in `crates/coresight-identity`;
 IPC payload shapes follow the same camelCase + bytes-as-integers rules as
 above). Content identity = SHA-256 (`HashAlgorithm::Sha256`, tag `"sha256"`);
 a content identity is meaningless without its algorithm tag. Duplicate groups
@@ -86,8 +86,8 @@ future phases and are covered by engine tests.
 
 ## Relationship contracts (Phase 4)
 
-Namespace: `spacelens.v1.relationship.*` (engine-side in
-`crates/spacelens-identity::relationships`; payload shapes follow the same
+Namespace: `coresight.v1.relationship.*` (engine-side in
+`crates/coresight-identity::relationships`; payload shapes follow the same
 camelCase + bytes-as-integers rules as above). The relationship layer is a
 PURE derivation over one verified duplicate-pipeline run — no I/O, no
 deletion, no recommendations. See docs/RELATIONSHIPS.md for full semantics.
@@ -118,8 +118,8 @@ and are covered by engine tests.
 
 ## History contracts (Phase 5)
 
-Namespace: `spacelens.v1.history.*` (engine-side in
-`crates/spacelens-history`; payload shapes follow the same camelCase +
+Namespace: `coresight.v1.history.*` (engine-side in
+`crates/coresight-history`; payload shapes follow the same camelCase +
 bytes-as-integers rules as above). System Memory persists one
 normalized snapshot per committed run and derives typed, evidence-backed
 change events on demand — see docs/HISTORY.md for full semantics.

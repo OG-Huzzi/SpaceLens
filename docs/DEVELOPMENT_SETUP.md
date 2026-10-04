@@ -1,7 +1,7 @@
-# SpaceLens — Development Setup
+# CoreSight — Development Setup
 
 Reproducibility contract for this repository. Any agent or developer cloning
-`https://github.com/OG-Huzzi/SpaceLens` should be able to reproduce the
+`https://github.com/OG-Huzzi/CoreSight` should be able to reproduce the
 environment from this document alone.
 
 ## Prerequisites
@@ -22,7 +22,7 @@ MSVC + Windows SDK are **not** installed (see limitations).
 ## Resource constraints (8 GB RAM, C: nearly full)
 
 - **Never install tools on C:.** C: had <1 GB free at Phase 0.5 start; all
-  SpaceLens development data lives on D:.
+  CoreSight development data lives on D:.
 - **Rust homes on D:** — user env vars `CARGO_HOME=D:\.cargo`,
   `RUSTUP_HOME=D:\.rustup`, and `D:\.cargo\bin` on the user PATH.
 - **npm cache on D:** — user `.npmrc` sets `cache=D:\.npm-cache`.
@@ -36,7 +36,7 @@ MSVC + Windows SDK are **not** installed (see limitations).
 ```sh
 # Rust core (format + tests)
 cargo fmt --check
-cargo test -j 2 -p spacelens-core
+cargo test -j 2 -p coresight-core
 
 # Frontend (typecheck + production build)
 npm install        # only if node_modules is missing
@@ -53,7 +53,7 @@ member; it first compiles in MSVC CI (Phase 1+). See
 ## Known Windows limitations
 
 1. **No MSVC / Windows SDK** — a native `tauri build` cannot run on this
-   machine. Verify locally with: fmt, `cargo test -j 2 -p spacelens-core`,
+   machine. Verify locally with: fmt, `cargo test -j 2 -p coresight-core`,
    `npm run build`, Tauri CLI + config JSON validation. Full Tauri compile and
    bundling must happen in MSVC CI.
 2. **C: free space is small** — keep caches/artifacts on D:; check
