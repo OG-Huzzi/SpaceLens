@@ -5,8 +5,7 @@
 Cross-platform storage intelligence desktop app (Windows / macOS / Linux).
 One-time purchase. Privacy-first. Offline by design.
 
-**Phase 0** — product validation + foundation only. No product engine is built
-here; see `progress/CURRENT_PHASE.md` and `progress/PHASE_0_STATUS.md`.
+See `progress/CURRENT_PHASE.md` for the current state.
 
 ## What it does now
 
@@ -23,7 +22,7 @@ here; see `progress/CURRENT_PHASE.md` and `progress/PHASE_0_STATUS.md`.
 - `docs/` — product + architecture foundation (13 documents).
 - `progress/` — phase tracking for multi-agent handoff.
 
-## Verify (Phase 0)
+## Verify
 
 ```sh
 cargo test --workspace   # full Rust workspace (needs gcc for rusqlite bundled)
