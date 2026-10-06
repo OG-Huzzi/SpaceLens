@@ -67,13 +67,16 @@ impl RegistryView for FakeRegistry {
     }
 }
 
+// Registry keys keep BACKSLASH separators: `split_hive_path` and the
+// production view constants use `HKLM\...` key syntax (registry
+// semantics, not filesystem paths).
 fn root(view: UninstallView) -> &'static str {
     match view {
-        UninstallView::Hklm64 => "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        UninstallView::Hklm64 => r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         UninstallView::Hklm32 => {
-            "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
         }
-        UninstallView::Hkcu => "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        UninstallView::Hkcu => r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
     }
 }
 
@@ -337,7 +340,7 @@ fn a3_overlong_names_are_rejected_not_truncated_and_counted() {
 fn a3_footprint_children_bound_is_exact_and_deterministic() {
     // 10 children under ProgramData, bound of 3.
     let children: Vec<String> = (0..10)
-        .map(|i| format!("C:/ProgramData\\App{i:02}"))
+        .map(|i| format!("C:/ProgramData/App{i:02}"))
         .collect();
     let child_refs: Vec<&str> = children.iter().map(String::as_str).collect();
     let fs = FakeFs::default().with_dirs("C:/ProgramData", &child_refs);
@@ -365,9 +368,9 @@ fn a3_footprint_candidate_bound_is_exact() {
     let fs = FakeFs::default().with_dirs(
         "C:/ProgramData",
         &[
-            "C:/ProgramData\\Alpha",
-            "C:/ProgramData\\Alpha2",
-            "C:/ProgramData\\AlphaCache",
+            "C:/ProgramData/Alpha",
+            "C:/ProgramData/Alpha2",
+            "C:/ProgramData/AlphaCache",
         ],
     );
     let roots = KnownRoots {
@@ -423,7 +426,11 @@ fn a3_oversized_skipped_subkeys_are_counted_into_partial_coverage() {
     assert_eq!(outcome.records.len(), 1);
     assert_eq!(outcome.coverage.status, SourceStatus::Partial);
     let note = outcome.coverage.note.unwrap();
-    assert!(note.contains('2'), "exact skip count reported: {note}");
+    // 2 skipped subkeys per view x 3 views = exactly 6, verbatim.
+    assert!(
+        note.contains("6 subkeys were skipped"),
+        "exact skip count reported: {note}"
+    );
 }
 
 #[test]
@@ -493,9 +500,9 @@ fn a4_footprint_candidates_are_identical_under_app_permutations() {
     let fs = FakeFs::default().with_dirs(
         "C:/ProgramData",
         &[
-            "C:/ProgramData\\Alpha",
-            "C:/ProgramData\\Beta",
-            "C:/ProgramData\\Gamma",
+            "C:/ProgramData/Alpha",
+            "C:/ProgramData/Beta",
+            "C:/ProgramData/Gamma",
         ],
     );
     let roots = KnownRoots {
@@ -519,7 +526,7 @@ fn a5_weak_name_evidence_never_becomes_definite_ownership() {
     // A directory that merely shares the app's name must map to at most
     // Possible ownership, never Definite/Probable.
     let apps = [app("Steam", Some("Valve"))];
-    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\Steam"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData/Steam"]);
     let roots = KnownRoots {
         program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
@@ -548,7 +555,7 @@ fn a5_shared_runtime_directory_is_not_exclusive_app_data() {
         app("App One", Some("Vendor A")),
         app("App Two", Some("Vendor B")),
     ];
-    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\Shared"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData/Shared"]);
     let roots = KnownRoots {
         program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
@@ -569,8 +576,8 @@ fn a5_shared_runtime_records_carry_no_confirmed_footprint() {
     let fs = FakeFs::default().with_dirs(
         "C:/ProgramData",
         &[
-            "C:/ProgramData\\Microsoft",
-            "C:/ProgramData\\Microsoft Visual C++ Redistributable",
+            "C:/ProgramData/Microsoft",
+            "C:/ProgramData/Microsoft Visual C++ Redistributable",
         ],
     );
     let roots = KnownRoots {
@@ -591,7 +598,7 @@ fn a5_shared_runtime_records_carry_no_confirmed_footprint() {
 #[test]
 fn a5_install_location_evidence_is_the_only_confirmed_source() {
     let mut a = app("VLC media player", Some("VideoLAN"));
-    a.install_location = Some(PathBuf::from("C:/Program Files\\VideoLAN\\VLC"));
+    a.install_location = Some(PathBuf::from("C:/Program Files/VideoLAN/VLC"));
     let fs = FakeFs::default();
     let report = discover_footprints(
         &[a],

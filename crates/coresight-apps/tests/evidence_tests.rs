@@ -61,7 +61,7 @@ fn app(name: &str) -> ApplicationRecord {
 #[test]
 fn every_candidate_carries_explicit_evidence() {
     let apps = [app("VLC media player")];
-    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\vlc"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData/vlc"]);
     let roots = KnownRoots {
         program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
@@ -79,7 +79,7 @@ fn every_candidate_carries_explicit_evidence() {
 #[test]
 fn no_candidate_is_confirmed_without_install_location_evidence() {
     let apps = [app("VLC media player")];
-    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\vlc"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData/vlc"]);
     let roots = KnownRoots {
         program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
@@ -115,7 +115,7 @@ fn ownership_strength_never_upgrades_weak_evidence() {
 #[test]
 fn weak_association_explanation_is_tentative() {
     let a = app("VLC media player");
-    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\vlc"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData/vlc"]);
     let roots = KnownRoots {
         program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
@@ -143,10 +143,10 @@ fn strong_association_explanation_cites_evidence() {
     let mut a = app("Spotify");
     a.publisher = Some("Spotify AB".into());
     let fs = FakeFs::default()
-        .with_dirs("C:/ProgramData", &["C:/ProgramData\\Spotify AB"])
+        .with_dirs("C:/ProgramData", &["C:/ProgramData/Spotify AB"])
         .with_dirs(
-            "C:/ProgramData\\Spotify AB",
-            &["C:/ProgramData\\Spotify AB\\Spotify"],
+            "C:/ProgramData/Spotify AB",
+            &["C:/ProgramData/Spotify AB/Spotify"],
         );
     let roots = KnownRoots {
         program_data: Some(PathBuf::from("C:/ProgramData")),
