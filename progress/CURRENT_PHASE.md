@@ -72,9 +72,19 @@
 
 `.github/workflows/ci.yml` runs the full gate on Windows/Linux/macOS plus
 the frontend. `--workspace` includes `coresight-apps` and
-`coresight-history` automatically. Status is recorded here only from an
-actual observed CI run; see the commit history for the run result of the
-repair push.
+`coresight-history` automatically.
+
+**CI VERIFIED (2026-10-06): run 37483779232 for commit `e697fec` —
+rust ubuntu SUCCESS, rust windows SUCCESS, rust macos SUCCESS,
+frontend SUCCESS.**
+https://github.com/OG-Huzzi/SpaceLens/actions/runs/37483779232
+
+Repair sequence recorded: `20778a1` (gate + audit repairs) exposed two
+pre-existing platform-dependent test-fixture bugs on Linux/macOS that
+Clippy had previously gated (`db1b612` phase-6 fake-fs fixtures,
+`d782e4e` registry-key separators, `e697fec` path-coverage fixture) —
+all fixed as fixture corrections; product code unchanged in those
+commits.
 
 ## Known limitations
 

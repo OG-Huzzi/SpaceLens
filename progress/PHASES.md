@@ -51,9 +51,11 @@ current-state claims. Current-state documents use CoreSight.
   - [ ] **PHASE 6.0 (foundation) — application intelligence `coresight-apps`.**
     IMPLEMENTED + audited (domain, Win32 uninstall discovery, MSIX
     abstracted, footprint evidence, ownership strength, explanations;
-    five-state source coverage; bounded/deterministic; 60 tests).
-    NOT VERIFIED as a phase: no CI run recorded since the audit, and
-    persistence is not built. See `progress/CURRENT_PHASE.md`.
+    five-state source coverage; bounded/deterministic; 60 tests). CI
+    gate green on all three OSes + frontend (run 37483779232). Still
+    NOT VERIFIED as a phase: persistence is not built and the phase's
+    own success criteria (platform-matrix parity review) are unmet.
+    See `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.
