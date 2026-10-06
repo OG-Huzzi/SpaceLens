@@ -1315,10 +1315,12 @@ fn decode_roots_strict(json: &str) -> Result<Vec<PathBuf>, String> {
     let stored: Vec<String> =
         serde_json::from_str(json).map_err(|e| format!("not a string array: {e}"))?;
     let mut roots = Vec::with_capacity(stored.len());
-    for value in stored {
-        let decoded = crate::path_encoding::decode(&value)
-            .map_err(|e| format!("malformed value: {e}"))?
-            .ok_or_else(|| format!("undecodable value {:?}", value))?;
+    // Error text never quotes the stored value: paths stay inside the
+    // store file, and the store's error contract embeds no path text.
+    for (index, value) in stored.iter().enumerate() {
+        let decoded = crate::path_encoding::decode(value)
+            .map_err(|e| format!("malformed value at index {index}: {e}"))?
+            .ok_or_else(|| format!("undecodable value at index {index}"))?;
         roots.push(decoded);
     }
     Ok(roots)
