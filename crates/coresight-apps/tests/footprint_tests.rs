@@ -77,7 +77,7 @@ fn confirmed_install_location_candidate() {
     let apps = [app(
         "VLC media player",
         "VideoLAN",
-        Some("C:\\Program Files\\VideoLAN\\VLC"),
+        Some("C:/Program Files\\VideoLAN\\VLC"),
     )];
     let out = discover(&apps, &KnownRoots::default(), &FakeFs::default());
     let inst = out
@@ -92,11 +92,11 @@ fn confirmed_install_location_candidate() {
 fn user_data_under_standard_root_is_probable() {
     let apps = [app("VLC media player", "VideoLAN", None)];
     let fs = FakeFs::default().with_dirs(
-        "C:\\Users\\U\\AppData\\Roaming",
-        &["C:\\Users\\U\\AppData\\Roaming\\vlc"],
+        "C:/Users\\U\\AppData\\Roaming",
+        &["C:/Users\\U\\AppData\\Roaming\\vlc"],
     );
     let roots = KnownRoots {
-        roaming_app_data: Some(PathBuf::from("C:\\Users\\U\\AppData\\Roaming")),
+        roaming_app_data: Some(PathBuf::from("C:/Users\\U\\AppData\\Roaming")),
         ..Default::default()
     };
     let out = discover(&apps, &roots, &fs);
@@ -114,19 +114,19 @@ fn user_data_under_standard_root_is_probable() {
 #[test]
 fn publisher_directory_with_app_child_is_strong() {
     let apps = [app("Spotify", "Spotify AB", None)];
-    let fs = FakeFs::default().with_dirs("C:\\ProgramData", &["C:\\ProgramData\\Spotify AB"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\Spotify AB"]);
     let fs = fs.with_dirs(
-        "C:\\ProgramData\\Spotify AB",
-        &["C:\\ProgramData\\Spotify AB\\Spotify"],
+        "C:/ProgramData\\Spotify AB",
+        &["C:/ProgramData\\Spotify AB\\Spotify"],
     );
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let out = discover(&apps, &roots, &fs);
     let cand = out
         .iter()
-        .find(|c| c.path.as_path() == Path::new("C:\\ProgramData\\Spotify AB\\Spotify"))
+        .find(|c| c.path.as_path() == Path::new("C:/ProgramData\\Spotify AB\\Spotify"))
         .expect("strong candidate");
     assert_eq!(cand.confidence, Confidence::Strong);
 }
@@ -135,14 +135,14 @@ fn publisher_directory_with_app_child_is_strong() {
 fn cache_and_logs_are_typed() {
     let apps = [app("MyApp", "Vendor", None)];
     let fs = FakeFs::default().with_dirs(
-        "C:\\Users\\U\\AppData\\Local",
+        "C:/Users\\U\\AppData\\Local",
         &[
-            "C:\\Users\\U\\AppData\\Local\\MyAppCache",
-            "C:\\Users\\U\\AppData\\Local\\MyAppLogs",
+            "C:/Users\\U\\AppData\\Local\\MyAppCache",
+            "C:/Users\\U\\AppData\\Local\\MyAppLogs",
         ],
     );
     let roots = KnownRoots {
-        local_app_data: Some(PathBuf::from("C:\\Users\\U\\AppData\\Local")),
+        local_app_data: Some(PathBuf::from("C:/Users\\U\\AppData\\Local")),
         ..Default::default()
     };
     let out = discover(&apps, &roots, &fs);
@@ -154,11 +154,11 @@ fn cache_and_logs_are_typed() {
 fn unrelated_same_name_directory_is_possible_not_confirmed() {
     let apps = [app("VLC media player", "VideoLAN", None)];
     let fs = FakeFs::default().with_dirs(
-        "C:\\Users\\U\\AppData\\Roaming",
-        &["C:\\Users\\U\\AppData\\Roaming\\vlc"],
+        "C:/Users\\U\\AppData\\Roaming",
+        &["C:/Users\\U\\AppData\\Roaming\\vlc"],
     );
     let roots = KnownRoots {
-        roaming_app_data: Some(PathBuf::from("C:\\Users\\U\\AppData\\Roaming")),
+        roaming_app_data: Some(PathBuf::from("C:/Users\\U\\AppData\\Roaming")),
         ..Default::default()
     };
     let out = discover(&apps, &roots, &fs);
@@ -174,9 +174,9 @@ fn shared_runtime_directory_does_not_claim_ownership() {
     // cache-like dir under ProgramData is only Probable — never
     // Confirmed ownership of a random same-named dir.
     let apps = [app("Microsoft VC++ Redistributable", "Microsoft", None)];
-    let fs = FakeFs::default().with_dirs("C:\\ProgramData", &["C:\\ProgramData\\Microsoft DCOM"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\Microsoft DCOM"]);
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let out = discover(&apps, &roots, &fs);
@@ -187,9 +187,9 @@ fn shared_runtime_directory_does_not_claim_ownership() {
 #[test]
 fn missing_install_location_still_scans_standard_roots() {
     let apps = [app("Portable Tool", "Vendor", None)];
-    let fs = FakeFs::default().with_dirs("C:\\ProgramData", &["C:\\ProgramData\\Portable Tool"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\Portable Tool"]);
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let out = discover(&apps, &roots, &fs);
@@ -200,12 +200,12 @@ fn missing_install_location_still_scans_standard_roots() {
 fn shortcut_entries_are_detected() {
     let apps = [app("Example", "Vendor", None)];
     let fs = FakeFs::default().with_entries(
-        "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
-        &["C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Example.lnk"],
+        "C:/ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+        &["C:/ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Example.lnk"],
     );
     let roots = KnownRoots {
         start_menu_programs: Some(PathBuf::from(
-            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+            "C:/ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
         )),
         ..Default::default()
     };
@@ -224,11 +224,11 @@ fn normalize_name_collapses_separators() {
 fn determinism_same_input_same_order() {
     let apps = [app("Alpha", "Vendor", None), app("Beta", "Vendor", None)];
     let fs = FakeFs::default().with_dirs(
-        "C:\\ProgramData",
-        &["C:\\ProgramData\\Alpha", "C:\\ProgramData\\Beta"],
+        "C:/ProgramData",
+        &["C:/ProgramData\\Alpha", "C:/ProgramData\\Beta"],
     );
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let a = discover(&apps, &roots, &fs);

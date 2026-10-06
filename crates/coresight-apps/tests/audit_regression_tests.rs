@@ -337,12 +337,12 @@ fn a3_overlong_names_are_rejected_not_truncated_and_counted() {
 fn a3_footprint_children_bound_is_exact_and_deterministic() {
     // 10 children under ProgramData, bound of 3.
     let children: Vec<String> = (0..10)
-        .map(|i| format!("C:\\ProgramData\\App{i:02}"))
+        .map(|i| format!("C:/ProgramData\\App{i:02}"))
         .collect();
     let child_refs: Vec<&str> = children.iter().map(String::as_str).collect();
-    let fs = FakeFs::default().with_dirs("C:\\ProgramData", &child_refs);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &child_refs);
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let limits = DiscoveryLimits {
@@ -363,15 +363,15 @@ fn a3_footprint_children_bound_is_exact_and_deterministic() {
 fn a3_footprint_candidate_bound_is_exact() {
     let apps = [app("Alpha", None)];
     let fs = FakeFs::default().with_dirs(
-        "C:\\ProgramData",
+        "C:/ProgramData",
         &[
-            "C:\\ProgramData\\Alpha",
-            "C:\\ProgramData\\Alpha2",
-            "C:\\ProgramData\\AlphaCache",
+            "C:/ProgramData\\Alpha",
+            "C:/ProgramData\\Alpha2",
+            "C:/ProgramData\\AlphaCache",
         ],
     );
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let limits = DiscoveryLimits {
@@ -491,15 +491,15 @@ fn a4_inventory_is_identical_under_input_permutations() {
 #[test]
 fn a4_footprint_candidates_are_identical_under_app_permutations() {
     let fs = FakeFs::default().with_dirs(
-        "C:\\ProgramData",
+        "C:/ProgramData",
         &[
-            "C:\\ProgramData\\Alpha",
-            "C:\\ProgramData\\Beta",
-            "C:\\ProgramData\\Gamma",
+            "C:/ProgramData\\Alpha",
+            "C:/ProgramData\\Beta",
+            "C:/ProgramData\\Gamma",
         ],
     );
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let order_1 = vec![app("Alpha", None), app("Beta", None), app("Gamma", None)];
@@ -519,9 +519,9 @@ fn a5_weak_name_evidence_never_becomes_definite_ownership() {
     // A directory that merely shares the app's name must map to at most
     // Possible ownership, never Definite/Probable.
     let apps = [app("Steam", Some("Valve"))];
-    let fs = FakeFs::default().with_dirs("C:\\ProgramData", &["C:\\ProgramData\\Steam"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\Steam"]);
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let report = discover_footprints(&apps, &roots, &fs, &DiscoveryLimits::default());
@@ -548,9 +548,9 @@ fn a5_shared_runtime_directory_is_not_exclusive_app_data() {
         app("App One", Some("Vendor A")),
         app("App Two", Some("Vendor B")),
     ];
-    let fs = FakeFs::default().with_dirs("C:\\ProgramData", &["C:\\ProgramData\\Shared"]);
+    let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData\\Shared"]);
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let report = discover_footprints(&apps, &roots, &fs, &DiscoveryLimits::default());
@@ -567,14 +567,14 @@ fn a5_shared_runtime_records_carry_no_confirmed_footprint() {
     let mut vc = app("Microsoft Visual C++ Redistributable", Some("Microsoft"));
     vc.kind = PackageKind::SharedRuntime;
     let fs = FakeFs::default().with_dirs(
-        "C:\\ProgramData",
+        "C:/ProgramData",
         &[
-            "C:\\ProgramData\\Microsoft",
-            "C:\\ProgramData\\Microsoft Visual C++ Redistributable",
+            "C:/ProgramData\\Microsoft",
+            "C:/ProgramData\\Microsoft Visual C++ Redistributable",
         ],
     );
     let roots = KnownRoots {
-        program_data: Some(PathBuf::from("C:\\ProgramData")),
+        program_data: Some(PathBuf::from("C:/ProgramData")),
         ..Default::default()
     };
     let report = discover_footprints(&[vc], &roots, &fs, &DiscoveryLimits::default());
@@ -591,7 +591,7 @@ fn a5_shared_runtime_records_carry_no_confirmed_footprint() {
 #[test]
 fn a5_install_location_evidence_is_the_only_confirmed_source() {
     let mut a = app("VLC media player", Some("VideoLAN"));
-    a.install_location = Some(PathBuf::from("C:\\Program Files\\VideoLAN\\VLC"));
+    a.install_location = Some(PathBuf::from("C:/Program Files\\VideoLAN\\VLC"));
     let fs = FakeFs::default();
     let report = discover_footprints(
         &[a],
