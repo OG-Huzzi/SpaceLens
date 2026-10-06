@@ -121,12 +121,34 @@ Objective 8), but consumers read them against the respective configs.
 - **Extends the existing architecture**: `coresight_core::db` owns the
   connection and the forward-only `schema_version` migrations. History
   adds migration **v2** (`scan_runs`, `observations`,
-  `relationship_obs`, `relationship_members`) to the same database.
-  No second database abstraction; no DB access in observation code.
+  `relationship_obs`, `relationship_members`), **v3** (Phase 5.1:
+  `file_id_hi` identity columns + lossless tagged path storage), and
+  **v4** (persisted relationship-report status/truncation) to the same
+  database. No second database abstraction; no DB access in observation
+  code.
+- **Version safety**: a store whose `schema_version` is NEWER than the
+  build is refused (`StoreError::SchemaTooNew`) without modification —
+  forward-only means an older binary never partially interprets a newer
+  store. Migrations run one transaction per step, atomic with their
+  version bump, idempotent per state.
+- **Strict decode**: persisted status, entry kind, configuration
+  fingerprint, roots, stored paths, and relationship fields decode
+  strictly. A value this build cannot decode is a typed corruption
+  error — never silently replaced with a default (an unknown status is
+  not `Running`; a corrupt config is not the current config; corrupt
+  roots are not an empty scope). Untagged pre-repair path values remain
+  loadable as-represented (legacy preservation, not corruption).
+- **Relationship completeness is a stored fact** (v4): a run whose
+  relationship derivation was partial reloads as partial; a run that
+  never ran the relationship layer reloads with no report at all (the
+  pre-audit behavior fabricated `Completed` on reload, which could
+  produce false relationship-added/removed events in comparisons).
 - WAL journal + foreign keys (inherited from core's open).
 - Events are **not persisted**: they are pure derivations of stored
   snapshots (recomputable, deterministic), keeping one source of truth
-  and storage bounded.
+  and storage bounded. Event ids are content-addressed over a LOSSLESS
+  path encoding: distinct non-UTF-8 paths that `Path::display()` would
+  collapse to the same U+FFFD spelling receive distinct ids.
 
 ## Retention (Objective 17)
 

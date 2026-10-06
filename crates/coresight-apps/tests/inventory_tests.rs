@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use coresight_apps::{
     merge_inventory, ApplicationProvider, DiscoveryLimits, PackageKind, ProviderError,
-    RegistryValue, RegistryView, UninstallView, Win32UninstallEnumerator, WindowsAppxProvider,
+    ProviderOutcome, RegistryValue, RegistryView, SourceCoverage, UninstallView,
+    Win32UninstallEnumerator, WindowsAppxProvider,
 };
 
 #[derive(Default)]
@@ -110,14 +111,10 @@ fn multiple_views_merge_duplicate_entries() {
     let enumerator = Win32UninstallEnumerator::new(fake);
     let records = enumerator.enumerate().unwrap();
     let inventory = merge_inventory(
-        vec![(
+        vec![ProviderOutcome {
             records,
-            coresight_apps::SourceCoverage {
-                source: "win32-uninstall".into(),
-                enumerated: true,
-                note: None,
-            },
-        )],
+            coverage: SourceCoverage::complete("win32-uninstall"),
+        }],
         &DiscoveryLimits::default(),
     );
     assert_eq!(inventory.records.len(), 2);
@@ -236,14 +233,10 @@ fn duplicate_registry_entries_collapse_preferred_complete() {
 
     let records = Win32UninstallEnumerator::new(fake).enumerate().unwrap();
     let inventory = merge_inventory(
-        vec![(
+        vec![ProviderOutcome {
             records,
-            coresight_apps::SourceCoverage {
-                source: "win32-uninstall".into(),
-                enumerated: true,
-                note: None,
-            },
-        )],
+            coverage: SourceCoverage::complete("win32-uninstall"),
+        }],
         &DiscoveryLimits::default(),
     );
     assert_eq!(inventory.records.len(), 1);
@@ -271,14 +264,10 @@ fn real_registry_enumeration_is_deterministic_and_nonfabricated() {
         ));
     }
     let inv = merge_inventory(
-        vec![(
-            a,
-            coresight_apps::SourceCoverage {
-                source: "win32-uninstall".into(),
-                enumerated: true,
-                note: None,
-            },
-        )],
+        vec![ProviderOutcome {
+            records: a,
+            coverage: SourceCoverage::complete("win32-uninstall"),
+        }],
         &DiscoveryLimits::default(),
     );
     // Deterministic ordering.

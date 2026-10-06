@@ -3,15 +3,50 @@
 
 use std::collections::BTreeMap;
 
-use crate::domain::{ApplicationRecord, DiscoveryLimits, Inventory, PackageKind, SourceCoverage};
+use crate::domain::{
+    ApplicationRecord, DiscoveryLimits, Inventory, PackageKind, SourceCoverage, SourceStatus,
+};
 
 /// A source of application records.
 pub trait ApplicationProvider {
     /// Source tag (e.g. `"win32-uninstall"`).
     fn source_tag(&self) -> &'static str;
-    /// Enumerate. `Ok` may be an honestly-empty list only when
-    /// `SourceCoverage` says so; errors are never silently swallowed.
+    /// Enumerate. `Ok` may be an honestly-empty list only when the
+    /// returned coverage says the source was genuinely read; a source
+    /// that could not be read must return `Err` (or override
+    /// [`ApplicationProvider::enumerate_outcome`] to report its honest
+    /// partial coverage) — never a silent empty success.
     fn enumerate(&self) -> Result<Vec<ApplicationRecord>, ProviderError>;
+
+    /// The honest full result: records together with the coverage that
+    /// describes how they were obtained. The default implementation maps
+    /// `Ok` to `Complete` coverage and each error kind to its explicit
+    /// non-success status. Providers whose "success" may itself be
+    /// partial (some views read, others failed) override this.
+    fn enumerate_outcome(&self) -> ProviderOutcome {
+        match self.enumerate() {
+            Ok(records) => ProviderOutcome {
+                records,
+                coverage: SourceCoverage::complete(self.source_tag()),
+            },
+            Err(ProviderError::Unsupported(note)) => ProviderOutcome {
+                records: Vec::new(),
+                coverage: SourceCoverage::with_status(
+                    self.source_tag(),
+                    SourceStatus::Unsupported,
+                    Some(note),
+                ),
+            },
+            Err(ProviderError::Failed(note)) => ProviderOutcome {
+                records: Vec::new(),
+                coverage: SourceCoverage::with_status(
+                    self.source_tag(),
+                    SourceStatus::Failed,
+                    Some(note),
+                ),
+            },
+        }
+    }
 }
 
 /// Packaged applications (MSIX/AppX) provider — abstracted so the
@@ -27,7 +62,8 @@ pub enum ProviderError {
     /// non-Windows host, or a Windows build whose Appx inventory is
     /// not yet implemented).
     Unsupported(String),
-    /// The source was queried and failed.
+    /// The source was queried and could not be read. Never an empty
+    /// success.
     Failed(String),
 }
 
@@ -42,20 +78,35 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-/// Merge provider outputs into a deterministic [`Inventory`]:
+/// One provider's output: records plus the coverage that describes how
+/// they were obtained. `merge_inventory` consumes only this type, so a
+/// failed or unsupported source can never enter an inventory as an
+/// unqualified empty result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOutcome {
+    pub records: Vec<ApplicationRecord>,
+    pub coverage: SourceCoverage,
+}
+
+/// Merge provider outcomes into a deterministic [`Inventory`]:
 /// duplicates collapse by (normalized name, normalized publisher) with
 /// provenance union; ordering is canonical; limits apply with exact
-/// truncation counting.
-pub fn merge_inventory(
-    outputs: Vec<(Vec<ApplicationRecord>, SourceCoverage)>,
-    limits: &DiscoveryLimits,
-) -> Inventory {
-    let mut sources = Vec::new();
+/// truncation/rejection counting.
+pub fn merge_inventory(outputs: Vec<ProviderOutcome>, limits: &DiscoveryLimits) -> Inventory {
+    let mut sources: Vec<SourceCoverage> = Vec::new();
     // Merge by (name, publisher) — case-insensitive, whitespace-trimmed.
     let mut by_key: BTreeMap<(String, String), ApplicationRecord> = BTreeMap::new();
-    for (records, coverage) in outputs {
-        sources.push(coverage);
-        for rec in records {
+    let mut rejected = 0u64;
+    for outcome in outputs {
+        sources.push(outcome.coverage);
+        for rec in outcome.records {
+            // A name longer than the declared bound is REJECTED (never
+            // truncated: a truncated name would derive a different
+            // ApplicationId), and the rejection is counted exactly.
+            if rec.name.len() > limits.max_inventory_name_len {
+                rejected += 1;
+                continue;
+            }
             let key = (
                 rec.name.trim().to_lowercase(),
                 rec.publisher.as_deref().unwrap_or("").trim().to_lowercase(),
@@ -94,7 +145,7 @@ pub fn merge_inventory(
                 a.publisher
                     .as_deref()
                     .unwrap_or("")
-                    .cmp(&b.publisher.as_deref().unwrap_or("")),
+                    .cmp(b.publisher.as_deref().unwrap_or("")),
             )
             .then(a.id.0.cmp(&b.id.0))
     });
@@ -105,10 +156,18 @@ pub fn merge_inventory(
     } else {
         0
     };
+    // Canonical source order regardless of provider call order.
+    sources.sort_by(|a, b| {
+        a.source
+            .cmp(&b.source)
+            .then(a.status.cmp(&b.status))
+            .then(a.note.cmp(&b.note))
+    });
     Inventory {
         records,
         sources,
         records_truncated: truncated,
+        records_rejected: rejected,
     }
 }
 

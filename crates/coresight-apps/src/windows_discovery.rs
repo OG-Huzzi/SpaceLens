@@ -11,9 +11,11 @@
 
 use std::path::PathBuf;
 
-use crate::discovery::{ApplicationProvider, PackagedAppProvider, ProviderError};
+use crate::discovery::{ApplicationProvider, PackagedAppProvider, ProviderError, ProviderOutcome};
 use crate::domain::SourceCoverage;
-use crate::domain::{ApplicationId, ApplicationRecord, ApplicationSource, PackageKind};
+use crate::domain::{
+    ApplicationId, ApplicationRecord, ApplicationSource, PackageKind, SourceStatus,
+};
 
 /// A decoded registry value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,10 +27,84 @@ pub enum RegistryValue {
     Binary(Vec<u8>),
 }
 
+/// Registry hive a CoreSight key path refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryHive {
+    /// `HKLM\` — the local-machine hive.
+    Hklm,
+    /// `HKCU\` — the current-user hive.
+    Hkcu,
+}
+
+/// Split a CoreSight registry path into its hive and subkey.
+///
+/// Only the documented `HKLM\` and `HKCU\` roots are recognized, and the
+/// prefix match is case-sensitive (unchanged semantics). Anything else
+/// returns `None`.
+pub fn split_hive_path(key: &str) -> Option<(RegistryHive, &str)> {
+    if let Some(rest) = key.strip_prefix("HKLM\\") {
+        Some((RegistryHive::Hklm, rest))
+    } else {
+        key.strip_prefix("HKCU\\")
+            .map(|rest| (RegistryHive::Hkcu, rest))
+    }
+}
+
+/// Decode `REG_SZ`/`REG_EXPAND_SZ` bytes: little-endian UTF-16 with all
+/// trailing NUL units trimmed; unpaired surrogates become U+FFFD.
+///
+/// This is presentation-metadata decoding only — never filesystem
+/// identity. A trailing odd byte (malformed registry data) is ignored,
+/// preserving the previous `chunks_exact(2)` behavior.
+pub fn decode_registry_string(bytes: &[u8]) -> String {
+    let mut chars: Vec<u16> = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.as_chunks::<2>().0 {
+        chars.push(u16::from_le_bytes(*pair));
+    }
+    while chars.last() == Some(&0) {
+        chars.pop();
+    }
+    String::from_utf16_lossy(&chars)
+}
+
+/// Result of enumerating subkeys, honest about skips and incompleteness.
+/// A platform whose enumeration buffer cannot hold a key name must
+/// report the skip (counted exactly) rather than silently ending the
+/// enumeration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubkeyEnumeration {
+    pub keys: Vec<String>,
+    /// Subkeys skipped because their name exceeded the platform's
+    /// enumeration buffer. Counted exactly — never silently dropped.
+    pub skipped_oversized: u64,
+    /// True when enumeration stopped before the natural end (an OS
+    /// error). The returned keys are then a partial view and the
+    /// coverage must say so.
+    pub incomplete: bool,
+}
+
 /// Abstract registry: subkeys + values at one key path.
+///
+/// `subkeys` cannot distinguish "key absent" from "key empty" — both are
+/// an empty enumeration — so views are additionally probed with
+/// [`RegistryView::key_present`] where that distinction matters.
 pub trait RegistryView {
     fn subkeys(&self, key: &str) -> Vec<String>;
     fn get_value(&self, key: &str, name: &str) -> Option<RegistryValue>;
+    /// Whether the key exists at all. Absent roots are `Unavailable`,
+    /// which is NOT the same as an enumerated-empty root.
+    fn key_present(&self, key: &str) -> bool {
+        !self.subkeys(key).is_empty() || self.get_value(key, "").is_some()
+    }
+    /// Detailed subkey enumeration including skip/incompleteness facts.
+    /// The default wraps [`RegistryView::subkeys`] (no skips known).
+    fn subkeys_detailed(&self, key: &str) -> SubkeyEnumeration {
+        SubkeyEnumeration {
+            keys: self.subkeys(key),
+            skipped_oversized: 0,
+            incomplete: false,
+        }
+    }
 }
 
 /// The three documented uninstall views and how each is read.
@@ -75,18 +151,56 @@ impl UninstallView {
 /// Enumerates Win32 uninstall records through an abstract view.
 pub struct Win32UninstallEnumerator<V: RegistryView> {
     pub view: V,
+    /// Hard per-view bound on subkeys examined. Subkeys are canonically
+    /// ordered before the cap, so the examined subset is deterministic;
+    /// overflow is counted exactly and reported as `Partial` coverage.
+    pub max_subkeys_per_view: usize,
 }
 
 impl<V: RegistryView> Win32UninstallEnumerator<V> {
     pub fn new(view: V) -> Self {
-        Win32UninstallEnumerator { view }
+        Win32UninstallEnumerator {
+            view,
+            max_subkeys_per_view: DEFAULT_MAX_SUBKEYS_PER_VIEW,
+        }
+    }
+
+    pub fn with_max_subkeys_per_view(mut self, max: usize) -> Self {
+        self.max_subkeys_per_view = max;
+        self
     }
 
     /// Enumerate one view. Returns records tagged with the view.
     pub fn enumerate_view(&self, view: UninstallView) -> Vec<ApplicationRecord> {
+        self.enumerate_view_outcome(view).records
+    }
+
+    /// Enumerate one view, reporting whether the view root existed:
+    /// an absent root is `Unavailable` (no installer records live
+    /// there), which is NOT the same as an enumerated-empty root.
+    fn enumerate_view_outcome(&self, view: UninstallView) -> ProviderViewOutcome {
+        let root = view.root_key();
+        if !self.view.key_present(root) {
+            return ProviderViewOutcome {
+                records: Vec::new(),
+                unavailable: true,
+                truncated_subkeys: 0,
+                enumeration_incomplete: false,
+            };
+        }
+        // Canonical order first, then bound — the examined subset is
+        // deterministic and truncation is exact.
+        let enumeration = self.view.subkeys_detailed(root);
+        let mut subkeys = enumeration.keys;
+        subkeys.sort();
+        subkeys.dedup();
+        let total = subkeys.len();
+        let truncated_subkeys =
+            total.saturating_sub(self.max_subkeys_per_view) as u64 + enumeration.skipped_oversized;
+        subkeys.truncate(self.max_subkeys_per_view);
         let mut out = Vec::new();
-        for subkey in self.view.subkeys(view.root_key()) {
-            let key = format!("{}\\{}", view.root_key(), subkey);
+        for subkey in subkeys {
+            let key = format!("{}\\{}", root, subkey);
             let name = match self.view.get_value(&key, "DisplayName") {
                 Some(RegistryValue::Sz(s)) | Some(RegistryValue::ExpandSz(s)) => s,
                 _ => continue, // missing or non-string DisplayName: not a product record
@@ -98,7 +212,12 @@ impl<V: RegistryView> Win32UninstallEnumerator<V> {
             let rec = self.record_from(&key, &name, view);
             out.push(rec);
         }
-        out
+        ProviderViewOutcome {
+            records: out,
+            unavailable: false,
+            truncated_subkeys,
+            enumeration_incomplete: enumeration.incomplete,
+        }
     }
 
     fn record_from(&self, key: &str, name: &str, view: UninstallView) -> ApplicationRecord {
@@ -177,26 +296,100 @@ impl<V: RegistryView> Win32UninstallEnumerator<V> {
         }
     }
 
-    /// Coverage for all three views (driven by the actual view read).
+    /// Coverage for all three views (driven by the actual view reads).
+    /// A view whose root does not exist on this machine is reported in
+    /// the note — the honest "this machine has no 32-bit view" fact,
+    /// distinct from a read that found nothing.
     pub fn coverage(&self) -> SourceCoverage {
-        SourceCoverage {
-            source: "win32-uninstall".to_string(),
-            enumerated: true,
-            note: None,
-        }
+        self.enumerate_outcome().coverage
     }
 }
+
+/// One view's enumeration result, with the facts coverage is derived
+/// from (the view tag itself stays with the caller's loop).
+struct ProviderViewOutcome {
+    records: Vec<ApplicationRecord>,
+    unavailable: bool,
+    truncated_subkeys: u64,
+    enumeration_incomplete: bool,
+}
+
+/// Default per-view subkey bound: comfortably above any real machine's
+/// uninstall key count (thousands on heavily-provisioned systems), small
+/// enough that a hostile registry cannot make discovery unbounded.
+pub const DEFAULT_MAX_SUBKEYS_PER_VIEW: usize = 16_384;
 
 impl<V: RegistryView> ApplicationProvider for Win32UninstallEnumerator<V> {
     fn source_tag(&self) -> &'static str {
         "win32-uninstall"
     }
     fn enumerate(&self) -> Result<Vec<ApplicationRecord>, ProviderError> {
-        let mut out = Vec::new();
+        Ok(self.enumerate_outcome().records)
+    }
+
+    fn enumerate_outcome(&self) -> ProviderOutcome {
+        let mut records = Vec::new();
+        let mut missing_views: Vec<&'static str> = Vec::new();
+        let mut seen_views: Vec<&'static str> = Vec::new();
+        let mut truncated_total = 0u64;
+        let mut incomplete_views: Vec<&'static str> = Vec::new();
         for view in UninstallView::ALL {
-            out.extend(self.enumerate_view(view));
+            let outcome = self.enumerate_view_outcome(view);
+            if outcome.unavailable {
+                missing_views.push(view.tag());
+            } else {
+                seen_views.push(view.tag());
+            }
+            truncated_total += outcome.truncated_subkeys;
+            if outcome.enumeration_incomplete {
+                incomplete_views.push(view.tag());
+            }
+            records.extend(outcome.records);
         }
-        Ok(out)
+        // Every expected view absent (and no records): the whole source
+        // is unavailable on this machine — never a "successfully empty"
+        // inventory.
+        let coverage = if seen_views.is_empty() {
+            SourceCoverage::with_status(
+                "win32-uninstall",
+                SourceStatus::Unavailable,
+                Some(format!(
+                    "none of the three uninstall views exist on this machine (missing: {})",
+                    missing_views.join(", ")
+                )),
+            )
+        } else if missing_views.is_empty() && truncated_total == 0 && incomplete_views.is_empty() {
+            SourceCoverage::complete("win32-uninstall")
+        } else {
+            let mut notes = Vec::new();
+            if !missing_views.is_empty() {
+                notes.push(format!(
+                    "absent on this machine: {}",
+                    missing_views.join(", ")
+                ));
+            }
+            if truncated_total > 0 {
+                notes.push(format!(
+                    "{truncated_total} subkeys were skipped (bound or oversized name)"
+                ));
+            }
+            if !incomplete_views.is_empty() {
+                notes.push(format!(
+                    "enumeration stopped early in: {}",
+                    incomplete_views.join(", ")
+                ));
+            }
+            SourceCoverage::with_status(
+                "win32-uninstall",
+                SourceStatus::Partial,
+                Some(format!(
+                    "views read: {}; {}",
+                    seen_views.join(", "),
+                    notes.join("; ")
+                )),
+            )
+        };
+        ProviderOutcome { records, coverage }
     }
 }
 

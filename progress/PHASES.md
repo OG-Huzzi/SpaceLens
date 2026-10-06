@@ -1,10 +1,14 @@
-# SpaceLens — Phase Map & Roadmap
+# CoreSight — Phase Map & Roadmap
 
 ## Gate rule
 
 A phase is VERIFIED only when its status file checks every acceptance criterion
 with real observed evidence (commands + results). IMPLEMENTED ≠ VERIFIED.
 No phase starts without authorization recorded in `CURRENT_PHASE.md`.
+
+Historical note: documents of the SpaceLens era (Phase 0–5 status files) keep
+their original product name — they are records of what was done then, not
+current-state claims. Current-state documents use CoreSight.
 
 ## Phases
 
@@ -26,13 +30,30 @@ No phase starts without authorization recorded in `CURRENT_PHASE.md`.
     same-length mutation brackets, globally bounded staging with exact
     skip accounting. Success: adversarial suite green on all three OSes
     in CI; docs claim nothing the code does not provide.
+  - [x] **PHASE 3.2 — Windows scan-time object identity.** `FILE_ID_INFO`
+    via a query-only handle, ancestor-chain link guard, scan→open mtime
+    bracket. Status: `progress/PHASE_3_2_STATUS.md`.
 - [ ] **PHASE 4 — Cleanup + safety engine.** Planner, safety validator with veto
   tests, Trash/quarantine adapters, preview + verify. Success: adversarial
   safety suite green on all three OSes in CI.
 - [ ] **PHASE 5 — Indexing + storage history.** Snapshots, deltas, drive memory,
   retention. Success: "+80 GB why?" answered on fixtures with per-category deltas.
+  - [x] **PHASE 5.1 — historical identity & event semantics repair.**
+    Full 128-bit identity end-to-end (migration v3 + v4), `Modified`
+    requires same-object proof, path-level deletion independent of
+    object survival, 1:1-provable moves only, lossless tagged path
+    persistence, platform-aware scope comparison, strict corruption
+    rejection, newer-schema refusal. Audited again 2026-10-06
+    (lossless event ids, extreme-value roundtrips, typed decode errors);
+    41 regression tests. Status: `progress/PHASE_5_STATUS.md`.
 - [ ] **PHASE 6 — Platform-specific intelligence.** Steam/Xcode/Snap/Flatpak/
   cloud-placeholder tables per OS. Success: platform-matrix parity review signed.
+  - [ ] **PHASE 6.0 (foundation) — application intelligence `coresight-apps`.**
+    IMPLEMENTED + audited (domain, Win32 uninstall discovery, MSIX
+    abstracted, footprint evidence, ownership strength, explanations;
+    five-state source coverage; bounded/deterministic; 60 tests).
+    NOT VERIFIED as a phase: no CI run recorded since the audit, and
+    persistence is not built. See `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.

@@ -50,6 +50,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use coresight_identity::pipeline::DuplicateStatus;
 use coresight_identity::RelationshipReport;
 
 use crate::compare::RunSnapshot;
@@ -70,6 +71,22 @@ pub enum StoreError {
     AlreadyCommitted(RunId),
     /// The snapshot failed validation (duplicate paths — model invariant).
     Build(crate::model::BuildError),
+    /// The database records a schema version NEWER than this build
+    /// understands. Opening it would downgrade or misread historical
+    /// facts, so the store refuses instead. Forward-only means
+    /// forward-only: an older binary never interprets a newer store.
+    SchemaTooNew {
+        found: u32,
+        supported: u32,
+    },
+    /// A persisted value failed to decode and would otherwise have
+    /// become a fabricated fact. Corruption is surfaced, never masked.
+    Corrupt {
+        table: &'static str,
+        column: &'static str,
+        run_id: Option<String>,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -79,6 +96,23 @@ impl std::fmt::Display for StoreError {
             StoreError::UnknownRun(id) => write!(f, "unknown run: {id}"),
             StoreError::AlreadyCommitted(id) => write!(f, "run {id} was already committed"),
             StoreError::Build(e) => write!(f, "snapshot invalid: {e}"),
+            StoreError::SchemaTooNew { found, supported } => write!(
+                f,
+                "store schema version {found} is newer than this build supports ({supported}); \
+                 refusing to open (a newer CoreSight wrote this store)"
+            ),
+            StoreError::Corrupt {
+                table,
+                column,
+                run_id,
+                detail,
+            } => match run_id {
+                Some(id) => write!(
+                    f,
+                    "corrupt history data in {table}.{column} (run {id}): {detail}"
+                ),
+                None => write!(f, "corrupt history data in {table}.{column}: {detail}"),
+            },
         }
     }
 }
@@ -100,8 +134,10 @@ impl From<crate::model::BuildError> for StoreError {
 /// The latest history schema version this crate understands. v1 is the
 /// Phase 0 bootstrap (coresight-core); v2 adds the history tables; v3
 /// (Phase 5.1) widens object identity with `file_id_hi` and tags every
-/// persisted path with its storage encoding.
-pub const HISTORY_SCHEMA_VERSION: u32 = 3;
+/// persisted path with its storage encoding; v4 persists each run's
+/// relationship-report status/truncation so a reloaded run can never
+/// claim a relationship completeness it never had.
+pub const HISTORY_SCHEMA_VERSION: u32 = 4;
 
 /// Forward-only migration: v1 (core bootstrap) → v2 (history tables).
 const MIGRATION_V2: &str = "
@@ -190,6 +226,25 @@ UPDATE relationship_members
                    THEN 'l:' || path ELSE 'u:' || path END;
 ";
 
+/// Forward-only migration: v3 → v4. Persists the relationship report's
+/// status and truncation count on the run row:
+///
+/// - `rel_status` NULL means "no relationship report was recorded for
+///   this run" — honest for every pre-v4 row (the old schema could not
+///   distinguish "never ran the relationship layer" from "ran and found
+///   nothing", and inventing `COMPLETED` on load would fabricate
+///   relationship-completeness facts that drive change events).
+/// - `rel_truncated` NULL is likewise "not recorded".
+///
+/// Legacy rows keep NULL; nothing is fabricated. Runs committed from v4
+/// on always record the report's real status (including
+/// `CANCELLED`/`UNSUPPORTED`), so comparisons can never treat a partial
+/// relationship derivation as complete after a reload.
+const MIGRATION_V4: &str = "
+ALTER TABLE scan_runs ADD COLUMN rel_status TEXT;
+ALTER TABLE scan_runs ADD COLUMN rel_truncated INTEGER;
+";
+
 /// A live history store. Wraps the rusqlite connection; all mutating
 /// operations are transactional.
 pub struct HistoryStore {
@@ -201,9 +256,19 @@ impl HistoryStore {
     /// (core v1 → history v2 → history v3, each atomic with its version
     /// bump) and recovering stale `RUNNING` runs as `FAILED` (Objective
     /// 19 — deterministic crash recovery).
+    ///
+    /// A store written by a NEWER build is refused
+    /// ([`StoreError::SchemaTooNew`]) rather than partially interpreted:
+    /// forward-only migrations never run backwards.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let mut conn = coresight_core::db::open(path)?;
         let current = coresight_core::db::schema_version(&conn)?;
+        if current > HISTORY_SCHEMA_VERSION {
+            return Err(StoreError::SchemaTooNew {
+                found: current,
+                supported: HISTORY_SCHEMA_VERSION,
+            });
+        }
         if current < 2 {
             let tx = conn.transaction()?;
             tx.execute_batch(MIGRATION_V2)?;
@@ -215,6 +280,12 @@ impl HistoryStore {
             tx.execute_batch(MIGRATION_V3)?;
             retag_legacy_roots(&tx)?;
             tx.execute("UPDATE schema_version SET version = 3", params![])?;
+            tx.commit()?;
+        }
+        if current < 4 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATION_V4)?;
+            tx.execute("UPDATE schema_version SET version = 4", params![])?;
             tx.commit()?;
         }
         let store = HistoryStore { conn };
@@ -288,7 +359,8 @@ impl HistoryStore {
             "UPDATE scan_runs SET completed_at = ?2, status = ?3,
                 entries_examined = ?4, files = ?5, dirs = ?6, links = ?7,
                 other_entries = ?8, bytes = ?9, observation_errors = ?10,
-                candidates_untracked = ?11, hash_failures = ?12
+                candidates_untracked = ?11, hash_failures = ?12,
+                rel_status = ?13, rel_truncated = ?14
              WHERE run_id = ?1 AND status = 'RUNNING'",
             params![
                 record.run_id.0,
@@ -303,6 +375,8 @@ impl HistoryStore {
                 record.counts.observation_errors,
                 record.counts.candidates_untracked,
                 record.counts.hash_failures,
+                relationships.map(|r| serde_duplicate_status(r.status)),
+                relationships.map(|r| r.relationships_truncated as i64),
             ],
         )?;
         if updated == 0 {
@@ -461,6 +535,11 @@ impl HistoryStore {
                 .as_encoded_bytes()
                 .cmp(b.path.as_os_str().as_encoded_bytes())
         });
+        // The relationship report's own status was persisted with the
+        // run (v4). A run whose relationship derivation was partial must
+        // reload as partial — comparisons never see a completeness the
+        // run never had.
+        let rel_status = self.rel_status_for_run(run_id)?;
         let mut rel_stmt = self.conn.prepare(
             "SELECT rel_id, kind, size, member_count, recoverable, accounting
              FROM relationship_obs WHERE run_id = ?1 ORDER BY rel_id",
@@ -515,15 +594,66 @@ impl HistoryStore {
                     .push((path, device, inode, file_id_hi));
             }
         }
-        let relationships = reconstruct_relationship_report(relationships, members_by_rel);
+        let relationships = reconstruct_relationship_report(
+            relationships,
+            members_by_rel,
+            rel_status.status,
+            rel_status.truncated.unwrap_or(0).max(0) as u64,
+        )
+        .map_err(|detail| StoreError::Corrupt {
+            table: "relationship_obs",
+            column: "kind/accounting/path",
+            run_id: Some(run_id.0.clone()),
+            detail,
+        })?;
+        // A run with NO persisted relationship status either never ran
+        // the relationship layer, or was written before v4. Absence is
+        // not `Completed`: the report is only attached when the store
+        // actually recorded one, so comparisons cannot fabricate
+        // relationship completeness.
+        let relationships = rel_status.status.map(|_| relationships);
         Ok(Some(RunSnapshot {
             run,
             snapshot: Snapshot {
                 run_id: run_id.clone(),
                 entries,
             },
-            relationships: Some(relationships),
+            relationships,
         }))
+    }
+
+    /// The persisted relationship-report status/truncation for a run
+    /// (v4 columns). `None` status = no report was recorded; an
+    /// unrecognized persisted status is a typed corruption error.
+    fn rel_status_for_run(&self, run_id: &RunId) -> Result<RelStatusRow, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT rel_status, rel_truncated FROM scan_runs WHERE run_id = ?1",
+                params![run_id.0],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        let Some((status_raw, truncated)) = row else {
+            return Ok(RelStatusRow {
+                status: None,
+                truncated: None,
+            });
+        };
+        let status = match status_raw {
+            Some(raw) => {
+                Some(
+                    decode_duplicate_status(&raw).ok_or_else(|| StoreError::Corrupt {
+                        table: "scan_runs",
+                        column: "rel_status",
+                        run_id: Some(run_id.0.clone()),
+                        detail: format!("unknown relationship status {raw:?}"),
+                    })?,
+                )
+            }
+            None => None,
+        };
+        Ok(RelStatusRow { status, truncated })
     }
 
     /// History of one path across all runs, newest first (Objective 25:
@@ -797,6 +927,35 @@ struct RelRow {
     accounting: String,
 }
 
+/// The persisted relationship-report status/truncation of one run.
+struct RelStatusRow {
+    status: Option<DuplicateStatus>,
+    truncated: Option<i64>,
+}
+
+/// Serde label for the relationship report's own status (v4). Decoding
+/// is strict via [`decode_duplicate_status`]: an unknown persisted status
+/// is corruption, never silently "Completed".
+fn serde_duplicate_status(s: DuplicateStatus) -> &'static str {
+    match s {
+        DuplicateStatus::Completed => "COMPLETED",
+        DuplicateStatus::CompletedWithLimits => "COMPLETED_WITH_LIMITS",
+        DuplicateStatus::Cancelled => "CANCELLED",
+        DuplicateStatus::Unsupported => "UNSUPPORTED",
+    }
+}
+
+/// Strict decode for the persisted relationship status.
+fn decode_duplicate_status(s: &str) -> Option<DuplicateStatus> {
+    match s {
+        "COMPLETED" => Some(DuplicateStatus::Completed),
+        "COMPLETED_WITH_LIMITS" => Some(DuplicateStatus::CompletedWithLimits),
+        "CANCELLED" => Some(DuplicateStatus::Cancelled),
+        "UNSUPPORTED" => Some(DuplicateStatus::Unsupported),
+        _ => None,
+    }
+}
+
 /// Minimal ordered map used during relationship reconstruction (kept
 /// local to avoid pulling an extra dependency for one use).
 struct BTreeMap2<K: Ord, V> {
@@ -843,31 +1002,41 @@ fn member_file_id_hi(snapshot: &Snapshot, member_path: &Path) -> Option<i64> {
 fn reconstruct_relationship_report(
     rows: Vec<RelRow>,
     members: BTreeMap2<String, MemberRows>,
-) -> RelationshipReport {
+    status: Option<DuplicateStatus>,
+    relationships_truncated: u64,
+) -> Result<RelationshipReport, String> {
     use coresight_identity::{
         ContentRef, MemberRef, ObjectRef, Relationship, RelationshipKind, RelationshipStats,
         StorageAccounting, Undetermined,
     };
     let mut relationships = Vec::new();
     for row in &rows {
+        // Strict decode: an unrecognized persisted kind/accounting is
+        // corruption. The previous fallback silently relabeled unknown
+        // kinds as ContentDuplicate and unknown accounting as Estimated
+        // — fabricated facts about historical relationships.
         let kind = if row.kind == serde_relationship_kind(RelationshipKind::HardLinkAlias) {
             RelationshipKind::HardLinkAlias
-        } else {
+        } else if row.kind == serde_relationship_kind(RelationshipKind::ContentDuplicate) {
             RelationshipKind::ContentDuplicate
+        } else {
+            return Err(format!("unknown relationship kind {:?}", row.kind));
         };
         let accounting = if row.accounting == serde_accounting(StorageAccounting::Exact) {
             StorageAccounting::Exact
-        } else {
+        } else if row.accounting == serde_accounting(StorageAccounting::Estimated) {
             StorageAccounting::Estimated
+        } else {
+            return Err(format!("unknown storage accounting {:?}", row.accounting));
         };
         let mut rel_members = Vec::new();
         for (path, device, inode, _file_id_hi) in members.get(&row.id).into_iter().flatten() {
+            let decoded = crate::path_encoding::decode(path)
+                .map_err(|e| format!("malformed member path: {e}"))?
+                .ok_or_else(|| "undecodable member path".to_string())?;
             rel_members.push(MemberRef {
                 entry_id: 0,
-                path: crate::path_encoding::decode(path)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| PathBuf::from(path.as_str())),
+                path: decoded,
                 object: device.zip(*inode).map(|(d, i)| ObjectRef {
                     volume: d as u64,
                     file_id: i as u64,
@@ -934,10 +1103,13 @@ fn reconstruct_relationship_report(
             detail_truncated: false,
         });
     }
-    RelationshipReport {
-        status: coresight_identity::DuplicateStatus::Completed,
+    Ok(RelationshipReport {
+        // The stored status verbatim. The caller only attaches the
+        // report when one was actually recorded, so this fallback is
+        // never observable — it exists to satisfy the type.
+        status: status.unwrap_or(coresight_identity::DuplicateStatus::Unsupported),
         relationships,
-        relationships_truncated: 0,
+        relationships_truncated,
         undetermined: Undetermined {
             failed: 0,
             not_examined: 0,
@@ -948,20 +1120,49 @@ fn reconstruct_relationship_report(
         stats: RelationshipStats::default(),
         started_at: UNIX_EPOCH,
         finished_at: UNIX_EPOCH,
-    }
+    })
 }
 
 fn map_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
     let roots_json: String = r.get(3)?;
     let config_json: String = r.get(5)?;
+    let run_id: String = r.get(0)?;
+    let status_raw: String = r.get(6)?;
+    // Persisted-state decoders are strict (Phase 5.1 audit): a persisted
+    // fact that cannot be decoded is corruption, not an invitation to
+    // invent a default. Unknown status would fabricate "Running"
+    // (silently un-completing a run); an undecodable config or roots
+    // JSON would fabricate the CURRENT config/boundless scope. All three
+    // are typed errors instead.
+    let config = serde_json::from_str::<ConfigFingerprint>(&config_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(CorruptRow(format!("config fingerprint: {e}"))),
+        )
+    })?;
+    let roots = decode_roots_strict(&roots_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(CorruptRow(format!("run roots: {e}"))),
+        )
+    })?;
+    let status = decode_status_strict(&status_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            Box::new(CorruptRow(format!("unknown run status {status_raw:?}"))),
+        )
+    })?;
     Ok(RunRecord {
-        run_id: RunId(r.get(0)?),
+        run_id: RunId(run_id),
         started_at: time_from_nanos(r.get::<_, i64>(1)?),
         completed_at: r.get::<_, Option<i64>>(2)?.map(time_from_nanos),
-        roots: serde_roots_from(&roots_json),
+        roots,
         platform: r.get(4)?,
-        config: serde_json::from_str(&config_json).unwrap_or_else(|_| ConfigFingerprint::current()),
-        status: serde_status_from(&r.get::<_, String>(6)?),
+        config,
+        status,
         counts: RunCounts {
             entries_examined: r.get(7)?,
             files: r.get(8)?,
@@ -976,15 +1177,50 @@ fn map_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
     })
 }
 
+/// Marker error type for row-level corruption surfaced through
+/// `rusqlite::Error::FromSqlConversionFailure`.
+#[derive(Debug)]
+struct CorruptRow(String);
+
+impl std::fmt::Display for CorruptRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CorruptRow {}
+
 fn map_obs_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ObservedEntry> {
     let stored_path: String = r.get(0)?;
+    // Storage decoding is strict: a malformed tagged value (only
+    // reachable through direct tampering) is a typed error, never a
+    // silently mistyped path.
     let path = crate::path_encoding::decode(&stored_path)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| PathBuf::from(stored_path.as_str()));
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(CorruptRow(format!("malformed stored path: {e}"))),
+            )
+        })?
+        .ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(CorruptRow("undecodable stored path".to_string())),
+            )
+        })?;
+    let kind_raw: String = r.get(1)?;
+    let kind = decode_kind_strict(&kind_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(CorruptRow(format!("unknown entry kind {kind_raw:?}"))),
+        )
+    })?;
     Ok(ObservedEntry {
         path,
-        kind: serde_kind_from(r.get::<_, String>(1)?),
+        kind,
         size: r.get(2)?,
         object: object_from_columns(
             r.get::<_, Option<i64>>(3)?, // device
@@ -1024,10 +1260,18 @@ fn object_from_columns(
 }
 
 fn map_history_point(r: &rusqlite::Row<'_>) -> rusqlite::Result<PathHistoryPoint> {
+    let kind_raw: String = r.get(2)?;
+    let kind = decode_kind_strict(&kind_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            Box::new(CorruptRow(format!("unknown entry kind {kind_raw:?}"))),
+        )
+    })?;
     Ok(PathHistoryPoint {
         run_id: RunId(r.get(0)?),
         started_at: time_from_nanos_opt(r.get::<_, Option<i64>>(1)?),
-        kind: serde_kind_from(r.get::<_, String>(2)?),
+        kind,
         size: r.get(3)?,
         object: object_from_columns(
             r.get::<_, Option<i64>>(4)?, // device
@@ -1062,17 +1306,22 @@ fn serde_roots(roots: &[PathBuf]) -> String {
 
 /// Decode roots written by this store (tagged) or by the pre-repair
 /// store (untagged legacy strings — preserved as-represented).
-fn serde_roots_from(json: &str) -> Vec<PathBuf> {
-    serde_json::from_str::<Vec<String>>(json)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|stored| {
-            crate::path_encoding::decode(&stored)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| PathBuf::from(stored))
-        })
-        .collect()
+///
+/// Strict (Phase 5.1 audit): undecodable JSON or malformed tagged values
+/// are errors. The previous `unwrap_or_default()` silently converted a
+/// corrupt roots column into "no roots", which would make every scope
+/// comparison behave differently than the recorded run actually did.
+fn decode_roots_strict(json: &str) -> Result<Vec<PathBuf>, String> {
+    let stored: Vec<String> =
+        serde_json::from_str(json).map_err(|e| format!("not a string array: {e}"))?;
+    let mut roots = Vec::with_capacity(stored.len());
+    for value in stored {
+        let decoded = crate::path_encoding::decode(&value)
+            .map_err(|e| format!("malformed value: {e}"))?
+            .ok_or_else(|| format!("undecodable value {:?}", value))?;
+        roots.push(decoded);
+    }
+    Ok(roots)
 }
 
 /// v2→v3 roots retag: the run-row `roots` JSON of pre-v3 stores holds
@@ -1080,17 +1329,29 @@ fn serde_roots_from(json: &str) -> Vec<PathBuf> {
 /// as the observation paths so the v3 decoder reads them honestly:
 /// U+FFFD-bearing values are legacy-lossy, all others are the verbatim
 /// root. Applied within the v3 migration transaction only.
+///
+/// A roots column that cannot be parsed as a string array FAILS the
+/// migration (typed error, transaction rolls back): silently retagging
+/// it as "no roots" would permanently fabricate an empty scope for that
+/// run.
 fn retag_legacy_roots(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
     let mut stmt = tx.prepare("SELECT run_id, roots FROM scan_runs")?;
     let rows: Vec<(String, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     let mut update = tx.prepare("UPDATE scan_runs SET roots = ?2 WHERE run_id = ?1")?;
     for (run_id, roots_json) in rows {
-        let tagged: Vec<String> = serde_json::from_str::<Vec<String>>(&roots_json)
-            .unwrap_or_default()
+        let parsed: Vec<String> = serde_json::from_str(&roots_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(CorruptRow(format!(
+                    "legacy roots JSON for run {run_id}: {e}"
+                ))),
+            )
+        })?;
+        let tagged: Vec<String> = parsed
             .into_iter()
             .map(|root| {
                 if root.contains('\u{FFFD}') {
@@ -1121,13 +1382,16 @@ fn serde_status(s: RunStatus) -> &'static str {
     }
 }
 
-fn serde_status_from(s: &str) -> RunStatus {
+/// Strict status decode: an unrecognized persisted status is corruption,
+/// not "Running". The old default silently changed a run's meaning.
+fn decode_status_strict(s: &str) -> Option<RunStatus> {
     match s {
-        "COMPLETED" => RunStatus::Completed,
-        "COMPLETED_WITH_LIMITS" => RunStatus::CompletedWithLimits,
-        "CANCELLED" => RunStatus::Cancelled,
-        "FAILED" => RunStatus::Failed,
-        _ => RunStatus::Running,
+        "RUNNING" => Some(RunStatus::Running),
+        "COMPLETED" => Some(RunStatus::Completed),
+        "COMPLETED_WITH_LIMITS" => Some(RunStatus::CompletedWithLimits),
+        "CANCELLED" => Some(RunStatus::Cancelled),
+        "FAILED" => Some(RunStatus::Failed),
+        _ => None,
     }
 }
 
@@ -1140,12 +1404,16 @@ fn serde_kind(k: ObservedKind) -> &'static str {
     }
 }
 
-fn serde_kind_from(s: String) -> ObservedKind {
-    match s.as_str() {
-        "DIR" => ObservedKind::Dir,
-        "LINK" => ObservedKind::Link,
-        "OTHER" => ObservedKind::Other,
-        _ => ObservedKind::File,
+/// Strict entry-kind decode: an unrecognized persisted kind is
+/// corruption, not "File". The old default silently relabeled unknown
+/// historical entries as files.
+fn decode_kind_strict(s: &str) -> Option<ObservedKind> {
+    match s {
+        "FILE" => Some(ObservedKind::File),
+        "DIR" => Some(ObservedKind::Dir),
+        "LINK" => Some(ObservedKind::Link),
+        "OTHER" => Some(ObservedKind::Other),
+        _ => None,
     }
 }
 

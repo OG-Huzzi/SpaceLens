@@ -76,12 +76,24 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   hash time), and a scan→open mtime bracket.
 - `history` — the Phase 5 system-memory layer: persisted run records +
   normalized snapshots (SQLite via the existing core schema, forward-only
-  migrations), a PURE comparison engine deriving typed evidence-backed
-  change events (incomplete-scan safe: partial runs never fake deletions;
-  scope boundaries enforced; configuration fingerprints preserved), a
-  query API (path/object/content/relationship history), deterministic
-  bounded retention, and crash recovery
-  (`crates/coresight-history`, docs/HISTORY.md).
+  migrations v1–v4: history tables, full 128-bit object identity +
+  lossless tagged paths, persisted relationship-report status), a PURE
+  comparison engine deriving typed evidence-backed change events
+  (incomplete-scan safe: partial runs never fake deletions; scope
+  boundaries enforced; configuration fingerprints preserved; event ids
+  content-addressed over LOSSLESS path encodings), a query API
+  (path/object/content/relationship history) with strict corruption
+  rejection and newer-schema refusal, deterministic bounded retention,
+  and crash recovery (`crates/coresight-history`, docs/HISTORY.md).
+- `applications` — the Phase 6 application-intelligence foundation:
+  a platform-neutral application domain (stable content-derived
+  `ApplicationId`, record, source kind, five-state source coverage,
+  explicit bounds), provider-based discovery (Windows Win32 uninstall
+  registry across HKLM-64 / HKLM-32 / HKCU via `windows-sys`; MSIX/AppX
+  abstracted with an honest `Unsupported`), evidence-typed footprint
+  candidates with confidence levels, ownership strength that never
+  upgrades weak evidence, and human-readable explanations
+  (`crates/coresight-apps`; no network, no execution — foundation only).
 - `relationships` — the Phase 4 relationship-intelligence layer: typed
   relationship kinds (hard-link aliases vs content duplicates), categorical
   evidence, deterministic ordering, conservative recoverability, undetermined

@@ -1,11 +1,13 @@
-# CoreSight CI — Phase 3.
+# CoreSight CI.
 #
-# Verifies the Rust workspace (coresight-core + coresight-engine +
-# coresight-classifier + coresight-identity) on all three target platforms
-# and the frontend scaffold. Native Tauri compilation is intentionally NOT
-# attempted yet: the shell crate is still a config-level contract and its
-# bundle icons do not exist until the packaging work (see
-# progress/PHASE_1_STATUS.md).
+# Verifies the full Rust workspace (coresight-core, coresight-engine,
+# coresight-classifier, coresight-identity, coresight-history,
+# coresight-apps) on all three target platforms and the frontend scaffold.
+# `--workspace` is what keeps new crates in the gate automatically: adding a
+# workspace member adds it to every Rust job here with no CI edit.
+# Native Tauri compilation is intentionally NOT attempted yet: the shell
+# crate is still a config-level contract and its bundle icons do not exist
+# until the packaging work (see progress/PHASE_0_STATUS.md).
 #
 # Every Rust job runs the full quality gate: `cargo fmt --check`,
 # `cargo clippy -D warnings`, and `cargo test`. Clippy is part of the gate on

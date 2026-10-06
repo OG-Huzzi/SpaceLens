@@ -99,11 +99,16 @@ fn build_legacy_v2(db_path: &Path) {
     conn.execute("UPDATE schema_version SET version = 2", [])
         .unwrap();
 
+    // Faithful to what the v2 store actually wrote: the run's full
+    // ConfigFingerprint JSON (camelCase), not an empty object. The
+    // current store decodes persisted configs strictly, and a real v2
+    // database always carried this shape.
+    let v2_config = r#"{"observationModel":1,"classifierSchema":"spacelens.v1.classification","classifierRules":1,"hashAlgorithm":"sha256","relationshipSchema":1,"historySchema":1}"#;
     conn.execute(
         "INSERT INTO scan_runs
          (run_id, started_at, completed_at, roots, platform, config, status)
-         VALUES ('legacy-run', 1000, 2000, ?1, 'test', '{}', 'COMPLETED')",
-        [r#"["/scope-a"]"#],
+         VALUES ('legacy-run', 1000, 2000, ?1, 'test', ?2, 'COMPLETED')",
+        rusqlite::params![r#"["/scope-a"]"#, v2_config],
     )
     .unwrap();
     conn.execute(

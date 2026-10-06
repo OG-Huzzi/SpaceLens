@@ -95,10 +95,37 @@ pub struct ApplicationRecord {
 pub struct Inventory {
     /// Canonically ordered by (name, publisher, id) — deterministic.
     pub records: Vec<ApplicationRecord>,
-    /// Which sources were actually enumerated (honest coverage report).
+    /// Which sources were actually enumerated (honest coverage report),
+    /// canonically ordered.
     pub sources: Vec<SourceCoverage>,
     /// Records dropped because a limit was hit (exact count).
     pub records_truncated: u64,
+    /// Records rejected because a declared limit (name length) was
+    /// violated — rejected rather than truncated, because a truncated
+    /// name would derive a different [`ApplicationId`]. Exact count.
+    #[serde(default)]
+    pub records_rejected: u64,
+}
+
+/// How a discovery source fared. A source that could not be read is
+/// NEVER reported as an empty success: every provider states one of
+/// these five outcomes explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SourceStatus {
+    /// Every declared view/scope of the source was enumerated.
+    Complete,
+    /// Some views/scopes were enumerated; at least one failed, was
+    /// unavailable, or was truncated. The coverage note names them.
+    Partial,
+    /// The provider cannot run on this platform/build (e.g. MSIX on a
+    /// non-Windows host). Never an empty success.
+    Unsupported,
+    /// The provider ran and the source failed.
+    Failed,
+    /// The source is absent in this machine state (e.g. a registry root
+    /// that does not exist) — distinct from "enumerated and found none".
+    Unavailable,
 }
 
 /// Which subsystem was enumerated and how it fared.
@@ -106,18 +133,48 @@ pub struct Inventory {
 #[serde(rename_all = "camelCase")]
 pub struct SourceCoverage {
     pub source: String,
-    pub enumerated: bool,
-    /// Explicit note when enumeration failed or was not attempted —
-    /// an implementation gap is reported, never silently empty.
+    pub status: SourceStatus,
+    /// Explicit detail when the status is not `Complete` — an
+    /// implementation gap or a failed/unavailable view is reported,
+    /// never silently empty.
     pub note: Option<String>,
 }
 
-/// Bounded work knobs for discovery.
+impl SourceCoverage {
+    pub fn complete(source: &str) -> Self {
+        SourceCoverage {
+            source: source.to_string(),
+            status: SourceStatus::Complete,
+            note: None,
+        }
+    }
+
+    pub fn with_status(source: &str, status: SourceStatus, note: Option<String>) -> Self {
+        SourceCoverage {
+            source: source.to_string(),
+            status,
+            note,
+        }
+    }
+}
+
+/// Bounded work knobs for discovery. Every limit is explicit and
+/// deterministic; overflow is counted exactly, never silently dropped.
 #[derive(Debug, Clone)]
 pub struct DiscoveryLimits {
+    /// Maximum records/candidates a single merged result may publish.
     pub max_records: usize,
+    /// Maximum accepted inventory-record name length. Longer names are
+    /// rejected (not truncated — their id would change) and counted.
     pub max_inventory_name_len: usize,
+    /// Maximum evidence items retained per footprint candidate. Overflow
+    /// is counted exactly.
     pub max_evidence_per_candidate: usize,
+    /// Maximum directory children examined per probed root. Children are
+    /// canonically ordered before capping, so selection is deterministic.
+    pub max_children_per_root: usize,
+    /// Maximum applications probed for footprints per scan.
+    pub max_apps_probed: usize,
 }
 
 impl Default for DiscoveryLimits {
@@ -126,6 +183,8 @@ impl Default for DiscoveryLimits {
             max_records: 4096,
             max_inventory_name_len: 512,
             max_evidence_per_candidate: 16,
+            max_children_per_root: 4096,
+            max_apps_probed: 4096,
         }
     }
 }

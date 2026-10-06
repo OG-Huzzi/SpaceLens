@@ -819,13 +819,17 @@ fn event(
             )
         })
         .unwrap_or_default();
+    // The canonical tuple uses the LOSSLESS path encoding (Phase 5.1
+    // Finding 5 semantics): `Path::display()` would collapse distinct
+    // non-UTF-8 paths to the same U+FFFD spelling and produce colliding
+    // event ids for different filesystem facts.
     let canonical = format!(
         "{kind:?}|{from_run}|{to_run}|{}|{}|{object_str}",
-        path.display(),
+        crate::path_encoding::encode(path),
         previous_path
             .as_deref()
-            .map(Path::display)
-            .unwrap_or_else(|| Path::new("").display())
+            .map(crate::path_encoding::encode)
+            .unwrap_or_default()
     );
     let digest = sha2::Sha256::digest(canonical.as_bytes());
     let id = format!(

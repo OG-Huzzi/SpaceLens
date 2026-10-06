@@ -5,8 +5,14 @@ use std::path::{Path, PathBuf};
 
 use coresight_apps::{
     discover_footprints, explain, ApplicationId, ApplicationRecord, ApplicationSource, Confidence,
-    EvidenceKind, KnownRoots, OwnershipStrength, PackageKind, PathProber,
+    DiscoveryLimits, EvidenceKind, FootprintReport, KnownRoots, OwnershipStrength, PackageKind,
+    PathProber,
 };
+
+/// Bounded scan helper: default limits.
+fn scan(apps: &[ApplicationRecord], roots: &KnownRoots, fs: &FakeFs) -> FootprintReport {
+    discover_footprints(apps, roots, fs, &DiscoveryLimits::default())
+}
 
 #[derive(Default)]
 struct FakeFs {
@@ -60,7 +66,7 @@ fn every_candidate_carries_explicit_evidence() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    for cand in discover_footprints(&apps, &roots, &fs) {
+    for cand in scan(&apps, &roots, &fs).candidates {
         assert!(!cand.evidence.is_empty(), "candidate without evidence");
         // Every evidence item explains its source.
         for e in &cand.evidence {
@@ -78,7 +84,7 @@ fn no_candidate_is_confirmed_without_install_location_evidence() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    for cand in discover_footprints(&apps, &roots, &fs) {
+    for cand in scan(&apps, &roots, &fs).candidates {
         if cand.confidence == Confidence::Confirmed {
             assert!(
                 cand.evidence
@@ -114,7 +120,7 @@ fn weak_association_explanation_is_tentative() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    let cands = discover_footprints(&[a.clone()], &roots, &fs);
+    let cands = scan(std::slice::from_ref(&a), &roots, &fs).candidates;
     let weak = cands
         .iter()
         .find(|c| c.confidence == Confidence::Possible)
@@ -146,7 +152,7 @@ fn strong_association_explanation_cites_evidence() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    let cands = discover_footprints(&[a.clone()], &roots, &fs);
+    let cands = scan(std::slice::from_ref(&a), &roots, &fs).candidates;
     let strong = cands
         .iter()
         .find(|c| c.confidence == Confidence::Strong)

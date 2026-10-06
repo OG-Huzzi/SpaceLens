@@ -2,12 +2,21 @@
 //! installed application may own, each with typed evidence. No
 //! recursive claiming of same-named files; every association is an
 //! evidence-backed candidate.
+//!
+//! ## Boundedness (Objective 27)
+//!
+//! Every probe is explicitly bounded by [`DiscoveryLimits`]: apps
+//! probed, children examined per root, evidence items per candidate,
+//! and total candidates published. Children are canonically ordered
+//! BEFORE capping, so the examined subset is deterministic under any
+//! input order; every overflow is counted exactly in [`FootprintReport`]
+//! — nothing is silently dropped.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{ApplicationId, ApplicationRecord};
+use crate::domain::{ApplicationId, ApplicationRecord, DiscoveryLimits};
 use crate::evidence::{AssociationScope, Confidence, EvidenceKind, FootprintEvidence};
 
 /// What kind of footprint a candidate path represents.
@@ -34,6 +43,25 @@ pub struct FootprintCandidate {
     pub kind: FootprintKind,
     pub confidence: Confidence,
     pub evidence: Vec<FootprintEvidence>,
+}
+
+/// The bounded result of a footprint scan: candidates plus exact counts
+/// of everything a limit stopped — never a silently truncated list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FootprintReport {
+    /// Canonically ordered candidates (path bytes, app id, kind);
+    /// duplicates by (path, app, kind) collapsed.
+    pub candidates: Vec<FootprintCandidate>,
+    /// Candidates not published because `max_records` was reached.
+    pub candidates_truncated: u64,
+    /// Directory entries not examined because the per-root child bound
+    /// was reached (exact, counted across all roots/probes).
+    pub children_truncated: u64,
+    /// Apps not probed because the app bound was reached.
+    pub apps_truncated: u64,
+    /// Evidence items dropped from candidates because the per-candidate
+    /// evidence bound was reached.
+    pub evidence_truncated: u64,
 }
 
 /// Probes a filesystem (real or fake), non-recursively.
@@ -93,19 +121,84 @@ fn looks_like_logs(n: &str) -> bool {
     n.contains("log") || n.contains("crash")
 }
 
+fn looks_like_temp(n: &str) -> bool {
+    n.contains("tmp") || n.contains("temp")
+}
+
 fn file_stem_match(entry: &Path, norm: &str) -> bool {
     let name = entry.file_name().and_then(|n| n.to_str()).unwrap_or("");
     names_match(&normalize_name(name), norm)
 }
 
-/// Discover footprint candidates for `apps` using bounded probes.
+/// Canonically ordered, capped children; overflow is added to
+/// `truncated`. Sorting happens BEFORE the cap, so which children are
+/// examined never depends on the prober's enumeration order.
+fn bounded_children(
+    prober: &dyn PathProber,
+    dir: &Path,
+    cap: usize,
+    truncated: &mut u64,
+) -> Vec<PathBuf> {
+    let mut children = prober.children(dir);
+    children.sort_by(|a, b| {
+        a.as_os_str()
+            .as_encoded_bytes()
+            .cmp(b.as_os_str().as_encoded_bytes())
+    });
+    children.dedup();
+    if children.len() > cap {
+        *truncated += (children.len() - cap) as u64;
+        children.truncate(cap);
+    }
+    children
+}
+
+/// Same as [`bounded_children`] for arbitrary entries.
+fn bounded_entries(
+    prober: &dyn PathProber,
+    dir: &Path,
+    cap: usize,
+    truncated: &mut u64,
+) -> Vec<PathBuf> {
+    let mut entries = prober.entries(dir);
+    entries.sort_by(|a, b| {
+        a.as_os_str()
+            .as_encoded_bytes()
+            .cmp(b.as_os_str().as_encoded_bytes())
+    });
+    entries.dedup();
+    if entries.len() > cap {
+        *truncated += (entries.len() - cap) as u64;
+        entries.truncate(cap);
+    }
+    entries
+}
+
+/// Discover footprint candidates for `apps` using bounded probes. See
+/// [`FootprintReport`] for how each applied limit is reported.
 pub fn discover_footprints(
     apps: &[ApplicationRecord],
     roots: &KnownRoots,
     prober: &dyn PathProber,
-) -> Vec<FootprintCandidate> {
-    let mut out = Vec::new();
-    for app in apps {
+    limits: &DiscoveryLimits,
+) -> FootprintReport {
+    let mut out: Vec<FootprintCandidate> = Vec::new();
+    let mut children_truncated = 0u64;
+    let mut apps_truncated = 0u64;
+    // Apps are probed in canonical order, then capped — deterministic.
+    let mut ordered: Vec<&ApplicationRecord> = apps.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then(a.id.0.cmp(&b.id.0))
+    });
+    if ordered.len() > limits.max_apps_probed {
+        apps_truncated = (ordered.len() - limits.max_apps_probed) as u64;
+        ordered.truncate(limits.max_apps_probed);
+    }
+
+    for app in ordered {
         let norm = normalize_name(&app.name);
         let publisher_norm = app.publisher.as_deref().map(normalize_name);
 
@@ -131,7 +224,12 @@ pub fn discover_footprints(
             (&roots.roaming_app_data, AssociationScope::CurrentUser),
         ] {
             let Some(root) = root else { continue };
-            for child in prober.children(root) {
+            for child in bounded_children(
+                prober,
+                root,
+                limits.max_children_per_root,
+                &mut children_truncated,
+            ) {
                 let child_norm = normalize_name(&child_name(&child));
                 if child_norm.is_empty() {
                     continue;
@@ -144,7 +242,12 @@ pub fn discover_footprints(
                     .map(|p| child_norm == p)
                     .unwrap_or(false);
                 if is_publisher_dir {
-                    for grand in prober.children(&child) {
+                    for grand in bounded_children(
+                        prober,
+                        &child,
+                        limits.max_children_per_root,
+                        &mut children_truncated,
+                    ) {
                         let grand_norm = normalize_name(&child_name(&grand));
                         if names_match(&grand_norm, &norm) {
                             out.push(FootprintCandidate {
@@ -199,7 +302,12 @@ pub fn discover_footprints(
         }
 
         if let Some(sm) = &roots.start_menu_programs {
-            for entry in prober.entries(sm) {
+            for entry in bounded_entries(
+                prober,
+                sm,
+                limits.max_children_per_root,
+                &mut children_truncated,
+            ) {
                 if entry.extension().and_then(|e| e.to_str()) == Some("lnk")
                     && file_stem_match(&entry, &norm)
                 {
@@ -221,7 +329,12 @@ pub fn discover_footprints(
         }
 
         if let Some(st) = &roots.startup_folder {
-            for entry in prober.entries(st) {
+            for entry in bounded_entries(
+                prober,
+                st,
+                limits.max_children_per_root,
+                &mut children_truncated,
+            ) {
                 if file_stem_match(&entry, &norm) {
                     out.push(FootprintCandidate {
                         path: entry,
@@ -241,7 +354,12 @@ pub fn discover_footprints(
         }
 
         if let Some(dt) = &roots.desktop {
-            for entry in prober.entries(dt) {
+            for entry in bounded_entries(
+                prober,
+                dt,
+                limits.max_children_per_root,
+                &mut children_truncated,
+            ) {
                 if entry.extension().and_then(|e| e.to_str()) == Some("lnk")
                     && file_stem_match(&entry, &norm)
                 {
@@ -262,6 +380,7 @@ pub fn discover_footprints(
             }
         }
     }
+
     out.sort_by(|a, b| {
         a.path
             .as_os_str()
@@ -271,9 +390,31 @@ pub fn discover_footprints(
             .then(a.kind.cmp(&b.kind))
     });
     out.dedup_by(|a, b| a.path == b.path && a.app == b.app && a.kind == b.kind);
-    out
-}
 
-fn looks_like_temp(n: &str) -> bool {
-    n.contains("tmp") || n.contains("temp")
+    // Per-candidate evidence bound (declared policy; counted exactly).
+    let mut evidence_truncated = 0u64;
+    for cand in &mut out {
+        if cand.evidence.len() > limits.max_evidence_per_candidate {
+            evidence_truncated += (cand.evidence.len() - limits.max_evidence_per_candidate) as u64;
+            cand.evidence.truncate(limits.max_evidence_per_candidate);
+        }
+    }
+
+    // Total candidate bound — after canonical ordering, so which
+    // candidates are published is deterministic.
+    let candidates_truncated = if out.len() > limits.max_records {
+        let overflow = (out.len() - limits.max_records) as u64;
+        out.truncate(limits.max_records);
+        overflow
+    } else {
+        0
+    };
+
+    FootprintReport {
+        candidates: out,
+        candidates_truncated,
+        children_truncated,
+        apps_truncated,
+        evidence_truncated,
+    }
 }

@@ -7,8 +7,18 @@ use std::path::{Path, PathBuf};
 
 use coresight_apps::{
     discover_footprints, normalize_name, ApplicationId, ApplicationRecord, ApplicationSource,
-    Confidence, FootprintKind, KnownRoots, PackageKind, PathProber,
+    Confidence, DiscoveryLimits, FootprintCandidate, FootprintKind, KnownRoots, PackageKind,
+    PathProber,
 };
+
+/// Bounded scan helper: default limits, candidates only.
+fn discover(
+    apps: &[ApplicationRecord],
+    roots: &KnownRoots,
+    fs: &FakeFs,
+) -> Vec<FootprintCandidate> {
+    discover_footprints(apps, roots, fs, &DiscoveryLimits::default()).candidates
+}
 
 #[derive(Default)]
 struct FakeFs {
@@ -69,7 +79,7 @@ fn confirmed_install_location_candidate() {
         "VideoLAN",
         Some("C:\\Program Files\\VideoLAN\\VLC"),
     )];
-    let out = discover_footprints(&apps, &KnownRoots::default(), &FakeFs::default());
+    let out = discover(&apps, &KnownRoots::default(), &FakeFs::default());
     let inst = out
         .iter()
         .find(|c| c.kind == FootprintKind::InstallationDirectory)
@@ -89,7 +99,7 @@ fn user_data_under_standard_root_is_probable() {
         roaming_app_data: Some(PathBuf::from("C:\\Users\\U\\AppData\\Roaming")),
         ..Default::default()
     };
-    let out = discover_footprints(&apps, &roots, &fs);
+    let out = discover(&apps, &roots, &fs);
     let cand = out
         .iter()
         .find(|c| c.kind == FootprintKind::UserData)
@@ -113,10 +123,10 @@ fn publisher_directory_with_app_child_is_strong() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    let out = discover_footprints(&apps, &roots, &fs);
+    let out = discover(&apps, &roots, &fs);
     let cand = out
         .iter()
-        .find(|c| c.path == PathBuf::from("C:\\ProgramData\\Spotify AB\\Spotify"))
+        .find(|c| c.path.as_path() == Path::new("C:\\ProgramData\\Spotify AB\\Spotify"))
         .expect("strong candidate");
     assert_eq!(cand.confidence, Confidence::Strong);
 }
@@ -135,7 +145,7 @@ fn cache_and_logs_are_typed() {
         local_app_data: Some(PathBuf::from("C:\\Users\\U\\AppData\\Local")),
         ..Default::default()
     };
-    let out = discover_footprints(&apps, &roots, &fs);
+    let out = discover(&apps, &roots, &fs);
     assert!(out.iter().any(|c| c.kind == FootprintKind::Cache));
     assert!(out.iter().any(|c| c.kind == FootprintKind::Logs));
 }
@@ -151,7 +161,7 @@ fn unrelated_same_name_directory_is_possible_not_confirmed() {
         roaming_app_data: Some(PathBuf::from("C:\\Users\\U\\AppData\\Roaming")),
         ..Default::default()
     };
-    let out = discover_footprints(&apps, &roots, &fs);
+    let out = discover(&apps, &roots, &fs);
     let cand = out.iter().find(|c| c.path.ends_with("vlc")).unwrap();
     // A name-only match must never be Confirmed.
     assert!(cand.confidence <= Confidence::Probable);
@@ -169,7 +179,7 @@ fn shared_runtime_directory_does_not_claim_ownership() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    let out = discover_footprints(&apps, &roots, &fs);
+    let out = discover(&apps, &roots, &fs);
     // No candidate may claim Confirmed from name coincidence.
     assert!(out.iter().all(|c| c.confidence != Confidence::Confirmed));
 }
@@ -182,7 +192,7 @@ fn missing_install_location_still_scans_standard_roots() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    let out = discover_footprints(&apps, &roots, &fs);
+    let out = discover(&apps, &roots, &fs);
     assert!(out.iter().any(|c| c.kind == FootprintKind::UserData));
 }
 
@@ -199,7 +209,7 @@ fn shortcut_entries_are_detected() {
         )),
         ..Default::default()
     };
-    let out = discover_footprints(&apps, &roots, &fs);
+    let out = discover(&apps, &roots, &fs);
     assert!(out.iter().any(|c| c.kind == FootprintKind::ShortcutEntry));
 }
 
@@ -221,7 +231,7 @@ fn determinism_same_input_same_order() {
         program_data: Some(PathBuf::from("C:\\ProgramData")),
         ..Default::default()
     };
-    let a = discover_footprints(&apps, &roots, &fs);
-    let b = discover_footprints(&apps, &roots, &fs);
+    let a = discover(&apps, &roots, &fs);
+    let b = discover(&apps, &roots, &fs);
     assert_eq!(a, b);
 }

@@ -35,6 +35,12 @@ pub mod win32_registry {
         }
     }
 
+    impl Default for Win32RegistryView {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl RegistryView for Win32RegistryView {
         fn subkeys(&self, _key: &str) -> Vec<String> {
             Vec::new()
@@ -56,19 +62,24 @@ pub mod win32_registry {
     }
 }
 
-pub use discovery::{merge_inventory, ApplicationProvider, PackagedAppProvider, ProviderError};
+pub use discovery::{
+    merge_inventory, ApplicationProvider, PackagedAppProvider, ProviderError, ProviderOutcome,
+};
 pub use domain::{
     ApplicationId, ApplicationRecord, ApplicationSource, DiscoveryLimits, Inventory, PackageKind,
-    SourceCoverage,
+    SourceCoverage, SourceStatus,
 };
 pub use evidence::{AssociationScope, Confidence, EvidenceKind, FootprintEvidence};
 pub use explain::{explain, Explanation};
 pub use footprint::{
-    discover_footprints, normalize_name, FootprintCandidate, FootprintKind, KnownRoots, PathProber,
+    discover_footprints, normalize_name, FootprintCandidate, FootprintKind, FootprintReport,
+    KnownRoots, PathProber,
 };
 pub use relationships::{AppAssociation, AssociationKind, OwnershipStrength};
 pub use windows_discovery::{
-    RegistryValue, RegistryView, UninstallView, Win32UninstallEnumerator, WindowsAppxProvider,
+    decode_registry_string, split_hive_path, RegistryHive, RegistryValue, RegistryView,
+    SubkeyEnumeration, UninstallView, Win32UninstallEnumerator, WindowsAppxProvider,
+    DEFAULT_MAX_SUBKEYS_PER_VIEW,
 };
 
 pub use win32_registry::Win32RegistryView;

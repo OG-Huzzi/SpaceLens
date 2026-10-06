@@ -8,7 +8,9 @@ use windows_sys::Win32::System::Registry::{
 };
 
 #[cfg(windows)]
-use crate::windows_discovery::{RegistryValue, RegistryView};
+use crate::windows_discovery::{
+    decode_registry_string, split_hive_path, RegistryHive, RegistryValue, RegistryView,
+};
 
 #[cfg(windows)]
 pub struct Win32RegistryView;
@@ -20,13 +22,13 @@ impl Win32RegistryView {
     }
 
     fn split_hive(key: &str) -> Option<(HKEY, String)> {
-        if let Some(rest) = key.strip_prefix("HKLM\\") {
-            Some((HKEY_LOCAL_MACHINE, rest.to_string()))
-        } else if let Some(rest) = key.strip_prefix("HKCU\\") {
-            Some((HKEY_CURRENT_USER, rest.to_string()))
-        } else {
-            None
-        }
+        split_hive_path(key).map(|(hive, rest)| {
+            let hkey = match hive {
+                RegistryHive::Hklm => HKEY_LOCAL_MACHINE,
+                RegistryHive::Hkcu => HKEY_CURRENT_USER,
+            };
+            (hkey, rest.to_string())
+        })
     }
 
     fn open(key: &str) -> Option<HKEY> {
@@ -81,15 +83,7 @@ impl Win32RegistryView {
         buf.truncate(size as usize);
         match kind {
             REG_SZ | REG_EXPAND_SZ => {
-                let mut chars: Vec<u16> = Vec::with_capacity(buf.len() / 2);
-                for pair in buf.chunks_exact(2) {
-                    chars.push(u16::from_le_bytes([pair[0], pair[1]]));
-                }
-                while chars.last() == Some(&0) {
-                    chars.pop();
-                }
-                // Metadata only (never used as filesystem identity).
-                let s = String::from_utf16_lossy(&chars);
+                let s = decode_registry_string(&buf);
                 if kind == REG_SZ {
                     Some(RegistryValue::Sz(s))
                 } else {
@@ -120,12 +114,29 @@ impl Win32RegistryView {
 }
 
 #[cfg(windows)]
+impl Default for Win32RegistryView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(windows)]
 impl RegistryView for Win32RegistryView {
     fn subkeys(&self, key: &str) -> Vec<String> {
+        self.subkeys_detailed(key).keys
+    }
+
+    /// Honest subkey walk: a name too long for the fixed 260-unit buffer
+    /// (`ERROR_MORE_DATA`, 234) is skipped and COUNTED; any other error
+    /// short of `ERROR_NO_MORE_ITEMS` (259) marks the enumeration
+    /// incomplete. Neither is silently swallowed into a clean empty list.
+    fn subkeys_detailed(&self, key: &str) -> crate::windows_discovery::SubkeyEnumeration {
+        const ERROR_NO_MORE_ITEMS: u32 = 259;
+        const ERROR_MORE_DATA: u32 = 234;
         let Some(handle) = Self::open(key) else {
-            return Vec::new();
+            return crate::windows_discovery::SubkeyEnumeration::default();
         };
-        let mut out = Vec::new();
+        let mut out = crate::windows_discovery::SubkeyEnumeration::default();
         let mut index = 0u32;
         loop {
             let mut name = vec![0u16; 260];
@@ -144,13 +155,24 @@ impl RegistryView for Win32RegistryView {
                     std::ptr::null_mut(),
                 )
             };
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if status == ERROR_MORE_DATA {
+                // The key exists but its name exceeds the buffer: skip
+                // THIS key and continue with the next index.
+                out.skipped_oversized += 1;
+                index += 1;
+                continue;
+            }
             if status != 0 {
+                out.incomplete = true;
                 break;
             }
             // Key names located via lossy UTF-16; used only to open the
             // subkey, never as filesystem identity.
             let sub = String::from_utf16_lossy(&name[..len as usize]);
-            out.push(sub);
+            out.keys.push(sub);
             index += 1;
         }
         // SAFETY: handle is open and owned here.
@@ -164,5 +186,18 @@ impl RegistryView for Win32RegistryView {
         // SAFETY: handle is open and owned here.
         unsafe { RegCloseKey(handle) };
         value
+    }
+
+    /// Precise existence probe: the key opens or it does not (an empty
+    /// root is `true`; an absent root is `false`).
+    fn key_present(&self, key: &str) -> bool {
+        match Self::open(key) {
+            Some(handle) => {
+                // SAFETY: handle is open and owned here.
+                unsafe { RegCloseKey(handle) };
+                true
+            }
+            None => false,
+        }
     }
 }
