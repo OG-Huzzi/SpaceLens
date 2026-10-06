@@ -745,13 +745,25 @@ fn f6_unix_scope_comparison_stays_case_sensitive() {
 
 #[test]
 fn f6_component_wise_comparison_never_string_prefix_matches() {
-    // C:\A must NOT cover C:\AB (no string-prefix false match), everywhere
-    // (on Unix these parse as single relative components, which also
-    // differ).
-    assert!(!path_covers(Path::new(r"C:\A"), Path::new(r"C:\AB")));
-    assert!(path_covers(Path::new(r"C:\A"), Path::new(r"C:\A\child")));
-    // Direction matters.
-    assert!(!path_covers(Path::new(r"C:\A\child"), Path::new(r"C:\A")));
+    // On each platform's own pathname semantics: a root must NOT cover a
+    // string-prefix sibling (no `C:\A` covers `C:\AB`, no `/A` covers
+    // `/AB`), must cover its own children, and coverage must not be
+    // direction-symmetric. (Backslash fixtures on Unix would parse as
+    // single components, so each platform uses its native separator.)
+    #[cfg(windows)]
+    {
+        assert!(!path_covers(Path::new(r"C:\A"), Path::new(r"C:\AB")));
+        assert!(path_covers(Path::new(r"C:\A"), Path::new(r"C:\A\child")));
+        // Direction matters.
+        assert!(!path_covers(Path::new(r"C:\A\child"), Path::new(r"C:\A")));
+    }
+    #[cfg(unix)]
+    {
+        assert!(!path_covers(Path::new("/A"), Path::new("/AB")));
+        assert!(path_covers(Path::new("/A"), Path::new("/A/child")));
+        // Direction matters.
+        assert!(!path_covers(Path::new("/A/child"), Path::new("/A")));
+    }
 }
 
 // ---------------------------------------------------------------------------
