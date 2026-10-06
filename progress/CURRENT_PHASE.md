@@ -78,6 +78,9 @@ the frontend. `--workspace` includes `coresight-apps` and
 rust ubuntu SUCCESS, rust windows SUCCESS, rust macos SUCCESS,
 frontend SUCCESS.**
 https://github.com/OG-Huzzi/SpaceLens/actions/runs/37483779232
+The two follow-up commits after it (`3d2db26` docs, `5a4b5be` error-text
+privacy fix) each re-ran the full gate and are green as well — current
+HEAD `5a4b5be`: run 37487037197, conclusion SUCCESS.
 
 Repair sequence recorded: `20778a1` (gate + audit repairs) exposed two
 pre-existing platform-dependent test-fixture bugs on Linux/macOS that
