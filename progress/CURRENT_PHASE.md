@@ -121,9 +121,15 @@ following findings were repaired:
 
 ## CI
 
-CI VERIFIED entries appear here once the verification commit's run is
-green: rust ubuntu / rust windows / rust macos / frontend — all SUCCESS
-(workflow run id recorded below).
+**CI VERIFIED (2026-10-07): run 37589662213 for commit `94c3164` —
+rust ubuntu SUCCESS, rust windows SUCCESS, rust macos SUCCESS,
+frontend SUCCESS.**
+https://github.com/OG-Huzzi/SpaceLens/actions/runs/37589662213
+
+(The first verification push `d88b98b` failed CI clippy on
+ubuntu/macos — unix-only test fixtures missing a trait import, a class
+of failure invisible on the Windows dev host; repaired in `94c3164`,
+all gates re-run locally, cross-target clippy clean.)
 
 ## Next authorized work
 

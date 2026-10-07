@@ -101,7 +101,9 @@ current-state claims. Current-state documents use CoreSight.
     ties), true boundedness (streaming bounded PathProber + registry
     enumeration, bounded inventory/footprint admission), lossless
     classifier path handling, `PRAGMA integrity_check` on store open,
-    docs reconciled. Status: `progress/CURRENT_PHASE.md`.
+    docs reconciled. CI VERIFIED: run 37589662213 for `94c3164`
+    (ubuntu/windows/macos/frontend all SUCCESS). Status:
+    `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.
