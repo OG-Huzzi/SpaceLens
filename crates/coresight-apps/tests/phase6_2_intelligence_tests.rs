@@ -847,34 +847,71 @@ fn non_utf8_paths_are_preserved_byte_for_byte() {
     assert_eq!(coresight_apps::PathKey(path.clone()).bytes(), raw);
 }
 
-/// A non-UTF-8 directory name must not match an application name by
-/// accident: the comparison key stays a name (never an empty string), so an
-/// unmatchable name simply fails to match.
+/// A non-UTF-8 directory name must never match an application by accident.
+///
+/// The lossy decoding of such a name can normalize to the EMPTY string (e.g.
+/// U+FFFD replacement characters are not alphanumeric). The safety property
+/// is therefore not "the name is never empty" but "an empty name never
+/// matches anything": `names_match` refuses empty inputs, and the scanners
+/// skip empty names instead of treating them as a wildcard.
 #[cfg(unix)]
 #[test]
 fn non_utf8_names_never_match_by_accident() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    let a = app("Example", None, ApplicationSource::RegistryUninstall);
     let weird = OsStr::from_bytes(b"\xff\xfe");
+    assert!(weird.to_str().is_none(), "the fixture really is non-UTF-8");
+    // Lossy decoding is allowed to collapse to empty — that is a matching
+    // KEY, not an identifier. Either way it can never be confused with a
+    // real application name.
     let norm = coresight_apps::normalize_name(&weird.to_string_lossy());
     assert!(
-        !norm.is_empty(),
-        "a non-UTF-8 name stays a name, never an empty match-all string"
+        norm.is_empty() || (norm != "example" && !norm.contains("example")),
+        "a replacement-character name cannot resemble a real application name: {norm:?}"
     );
-    // The directory name derived from it cannot equal/contain the app name,
-    // so no candidate can be invented for it.
-    assert!(!norm.contains("example"));
 
+    // The real protection: a non-UTF-8 child name never produces a candidate
+    // for an unrelated application, even though the root IS readable.
+    let a = app("Example", None, ApplicationSource::RegistryUninstall);
+    let fs = FakeProber {
+        dirs: BTreeMap::from([(
+            PathBuf::from("C:/ProgramData"),
+            vec![PathBuf::from(OsStr::from_bytes(b"C:/ProgramData/\xff\xfe"))],
+        )]),
+        ..FakeProber::default()
+    };
     let roots = KnownRoots {
         program_data: Some(PathBuf::from("C:/ProgramData")),
         ..KnownRoots::default()
     };
-    let fs = FakeProber::default();
     let report = discover_footprints(&[a], &roots, &fs, &DiscoveryLimits::default());
     assert!(
         report.candidates.is_empty(),
-        "an unreadable/absent root invents no candidate"
+        "a non-UTF-8 name must not be matched to an application: {report:?}"
+    );
+}
+
+/// The empty-name guard that makes the test above safe: an empty application
+/// name is never a wildcard, and a name made only of replacement characters
+/// normalizes to empty and therefore cannot match either. Portable, because
+/// this is pure string logic — it runs on every CI platform.
+#[test]
+fn empty_names_never_match() {
+    // A non-UTF-8 name decoded lossily becomes U+FFFD sequences, which are
+    // not alphanumeric and therefore normalize to the empty key.
+    assert_eq!(coresight_apps::normalize_name("\u{FFFD}\u{FFFD}"), "");
+    assert_eq!(coresight_apps::normalize_name(""), "");
+
+    let a = app("", None, ApplicationSource::RegistryUninstall);
+    let fs = FakeProber::default().with_dirs("C:/ProgramData", &["C:/ProgramData/anything"]);
+    let roots = KnownRoots {
+        program_data: Some(PathBuf::from("C:/ProgramData")),
+        ..KnownRoots::default()
+    };
+    let report = discover_footprints(&[a], &roots, &fs, &DiscoveryLimits::default());
+    assert!(
+        report.candidates.is_empty(),
+        "an empty application name is not a wildcard: {report:?}"
     );
 }
