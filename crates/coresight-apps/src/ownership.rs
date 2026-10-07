@@ -107,6 +107,13 @@ pub enum EvidenceSource {
     FilesystemObservation,
     /// A path-name heuristic.
     FilesystemPathHeuristic,
+    // ---- Phase 6.3 additions (appended; existing order unchanged).
+    /// A content digest produced by the identity engine.
+    ContentHash,
+    /// A stored historical observation (history subsystem, read-only).
+    HistoryObservation,
+    /// A classification rule's verdict or parent-context corroboration.
+    ClassificationRule,
 }
 
 impl EvidenceSource {
@@ -137,6 +144,13 @@ pub enum CorrelationGroup {
     InstallRootStructure,
     /// Anything derived from the normalized application/publisher NAME.
     NameDerived,
+    // ---- Phase 6.3 additions (appended; existing order unchanged).
+    /// A proven content-digest equality (byte identity of objects).
+    ContentIdentity,
+    /// A classification rule's verdict / corroborating parent context.
+    ClassificationDerived,
+    /// A stored historical observation of the same object.
+    HistoricalObservation,
 }
 
 impl CorrelationGroup {
@@ -149,6 +163,18 @@ impl CorrelationGroup {
             CorrelationGroup::BundleIdentifier => EvidenceStrength::Strong,
             CorrelationGroup::InstallRootStructure => EvidenceStrength::Moderate,
             CorrelationGroup::NameDerived => EvidenceStrength::Weak,
+            // A content digest proves byte identity of two objects — a
+            // strong structural fact, but it never proves OWNERSHIP (two
+            // different applications' files can be byte-identical), so the
+            // group ceiling is Strong, not Direct.
+            CorrelationGroup::ContentIdentity => EvidenceStrength::Strong,
+            // A classification verdict is a descriptive label; it may
+            // corroborate but never assert ownership.
+            CorrelationGroup::ClassificationDerived => EvidenceStrength::Moderate,
+            // A historical observation proves the object existed and was
+            // seen; it is authoritative about the PAST, not about current
+            // ownership, so it corroborates at Strong.
+            CorrelationGroup::HistoricalObservation => EvidenceStrength::Strong,
         }
     }
 }
@@ -176,6 +202,19 @@ impl EvidenceKind {
             | EvidenceKind::FilenameSimilarity
             | EvidenceKind::DirectoryNameSimilarity
             | EvidenceKind::SiblingHeuristic => EvidenceStrength::Weak,
+            // ---- Phase 6.3 additions. Conservative ceilings, calibrated to
+            // what each kind can actually prove about OWNERSHIP.
+            //
+            // A content-digest equality proves two objects hold identical
+            // bytes. It is a strong fact, but it never proves ownership:
+            // unrelated applications can ship byte-identical files.
+            EvidenceKind::ContentDigestMatch => EvidenceStrength::Strong,
+            // A stored historical observation is authoritative about the
+            // past, and only corroborates the present.
+            EvidenceKind::HistoricalObservation => EvidenceStrength::Strong,
+            // Classification is descriptive: it labels what an artifact IS,
+            // never who owns it.
+            EvidenceKind::ClassificationReference => EvidenceStrength::Moderate,
         }
     }
 
@@ -220,6 +259,12 @@ pub struct OwnershipEvidence {
     /// The attribute value that matched, when it is metadata text (a name,
     /// an identifier). Presentation/diagnostic only — never an identity.
     pub matched_value: Option<String>,
+    /// The attribute value that matched, when it is a PATH. This is the
+    /// lossless counterpart to [`Self::matched_value`]: a path-valued match
+    /// is recorded as bytes, never as a display string, so it can be
+    /// compared and traced without lossy conversion.
+    #[serde(default)]
+    pub matched_path: Option<PathBuf>,
 }
 
 impl OwnershipEvidence {
@@ -248,7 +293,14 @@ impl OwnershipEvidence {
             observed_path,
             matched_attribute,
             matched_value,
+            matched_path: None,
         }
+    }
+
+    /// Attach the lossless path form of the matched attribute.
+    pub fn with_matched_path(mut self, path: PathBuf) -> Self {
+        self.matched_path = Some(path);
+        self
     }
 
     /// Presentation-only sentence rendered from the structured facts.
@@ -281,6 +333,15 @@ impl OwnershipEvidence {
             EvidenceKind::ShortcutReference => "a shortcut name matches the application",
             EvidenceKind::ExecutableReference => "an executable of the application lives here",
             EvidenceKind::ObservedWrite => "the application was observed writing here",
+            EvidenceKind::ContentDigestMatch => {
+                "the objects hold byte-identical content (digest equality)"
+            }
+            EvidenceKind::HistoricalObservation => {
+                "a stored historical observation names this artifact"
+            }
+            EvidenceKind::ClassificationReference => {
+                "an existing classification describes this artifact"
+            }
         };
         format!("Associated because {what} ({:?} strength).", self.strength)
     }

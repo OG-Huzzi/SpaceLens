@@ -49,6 +49,17 @@ pub enum EvidenceKind {
     /// Heuristic sibling relationship (shares a parent with an associated
     /// artifact).
     SiblingHeuristic,
+    // ---- Phase 6.3 additions (appended; existing canonical order is
+    // unchanged). These let the unified system model carry cross-domain
+    // evidence through the SAME vocabulary instead of inventing a parallel
+    // one, so the Phase 6.2 correlation ceilings apply uniformly.
+    /// A proven content-digest equality (the identity engine proved the
+    /// objects hold byte-identical content).
+    ContentDigestMatch,
+    /// A stored historical observation names this artifact.
+    HistoricalObservation,
+    /// An existing classifier verdict describes this artifact.
+    ClassificationReference,
 }
 
 /// How strong the association claim is.

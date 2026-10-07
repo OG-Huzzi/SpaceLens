@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/coresight-core", "crates/coresight-engine", "crates/coresight-classifier", "crates/coresight-identity", "crates/coresight-history", "crates/coresight-apps", "crates/coresight-capabilities", "crates/coresight-macos"]
+members = ["crates/coresight-core", "crates/coresight-engine", "crates/coresight-classifier", "crates/coresight-identity", "crates/coresight-history", "crates/coresight-apps", "crates/coresight-capabilities", "crates/coresight-macos", "crates/coresight-system-model"]
 
 # The Tauri shell crate (src-tauri) is a config-level contract and is NOT a
 # workspace member until MSVC-based CI exists, because linking Tauri on
@@ -11,3 +11,8 @@ members = ["crates/coresight-core", "crates/coresight-engine", "crates/coresight
 # capability contracts: pillars, honest observation states, safety
 # pipeline, permission model) and `coresight-macos` (the macOS discovery
 # boundary: source catalog + permission-aware observation).
+# Phase 6.3 adds `coresight-system-model`: the first unified, in-memory
+# system model correlating filesystem observations, identity,
+# classification, relationships, application intelligence, capability
+# state, and history context. It is pure (no I/O, no executor, no
+# network, no persistence).
