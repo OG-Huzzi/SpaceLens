@@ -63,6 +63,9 @@ fn app(name: &str) -> ApplicationRecord {
         kind: PackageKind::Installed,
         system_component: false,
         observed_in_views: vec!["HKLM-64".into()],
+        bundle_identifier: None,
+        executable_path: None,
+        provenance: vec![ApplicationSource::RegistryUninstall],
     }
 }
 
@@ -147,7 +150,7 @@ fn weak_association_explanation_is_tentative() {
 }
 
 #[test]
-fn strong_association_explanation_cites_evidence() {
+fn probable_association_explanation_cites_evidence() {
     let mut a = app("Spotify");
     a.publisher = Some("Spotify AB".into());
     let fs = FakeFs::default()
@@ -161,11 +164,14 @@ fn strong_association_explanation_cites_evidence() {
         ..Default::default()
     };
     let cands = scan(std::slice::from_ref(&a), &roots, &fs).candidates;
-    let strong = cands
+    // Phase 6.2 correlation ceiling: publisher-directory + app-name matches
+    // share one normalized-name root signal, so the candidate is Probable,
+    // and the explanation cites the publisher evidence without overclaiming.
+    let cand = cands
         .iter()
-        .find(|c| c.confidence == Confidence::Strong)
-        .expect("strong candidate");
-    let ex = explain(&a, strong);
+        .find(|c| c.confidence == Confidence::Probable)
+        .expect("publisher-directory candidate");
+    let ex = explain(&a, cand);
     assert!(ex.headline.contains("Spotify"));
     assert!(ex.bullets.iter().any(|b| b.contains("publisher")));
 }

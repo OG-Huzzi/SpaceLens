@@ -156,15 +156,19 @@ pub const CONTRACTS: [CapabilityContract; 10] = [
         id: CapabilityId::ApplicationInventory,
         pillar: Pillar::Applications,
         status: CapabilityStatus::Partial,
-        note: "Windows Win32-uninstall providers implemented (coresight-apps, Phase 6); macOS \
-               bundle-based providers planned.",
+        note: "Windows Win32-uninstall providers implemented and CI-tested; macOS bundle \
+               (Info.plist) and Linux .desktop filesystem-native providers implemented \
+               (Phase 6.2) but runtime-validated only on their own OS. MSIX/AppX and distro \
+               package databases are reported Unsupported, never as empty inventories.",
     },
     CapabilityContract {
         id: CapabilityId::ApplicationFootprint,
         pillar: Pillar::Applications,
         status: CapabilityStatus::Partial,
-        note: "Windows footprint evidence implemented; macOS evidence kinds (bundle presence, \
-               container/group-container membership) planned.",
+        note: "Cross-platform footprint discovery, install-root detection, evidence-grouped \
+               ownership with a documented correlation ceiling, shared/conflict detection and \
+               inert read-only candidates are implemented and CI-tested (Phase 6.2). Real-world \
+               platform runtime validation beyond synthetic fixtures is still pending.",
     },
     CapabilityContract {
         id: CapabilityId::StartupItems,
@@ -211,8 +215,9 @@ pub const CONTRACTS: [CapabilityContract; 10] = [
         id: CapabilityId::SoftwareManagement,
         pillar: Pillar::SoftwareManagement,
         status: CapabilityStatus::Planned,
-        note: "Relationship evidence exists on Windows (coresight-apps ownership model); no \
-               uninstall, cleanup, or startup-disabling execution exists anywhere in this build.",
+        note: "Inert ownership/relationship evidence and read-only recommendation candidates \
+               exist (coresight-apps, Phase 6.2); no uninstall, cleanup, or startup-disabling \
+               execution exists anywhere in this build, and no executor API is planned here.",
     },
 ];
 

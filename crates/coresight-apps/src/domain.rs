@@ -78,6 +78,11 @@ pub enum ApplicationSource {
     /// Detected only by filesystem presence (portable app) — recorded
     /// only when the caller supplies filesystem evidence.
     FilesystemPresence,
+    /// macOS application bundle (*.app/Contents/Info.plist). Local file
+    /// metadata only.
+    BundleInfoPlist,
+    /// Freedesktop .desktop entry (Linux/BSD). Local file metadata only.
+    DesktopEntry,
 }
 
 /// One inventory record: what the machine says about an application.
@@ -103,6 +108,22 @@ pub struct ApplicationRecord {
     pub system_component: bool,
     /// All raw registry views this record appeared in (provenance).
     pub observed_in_views: Vec<String>,
+    /// Bundle / package identifier declared by the application's own
+    /// metadata (macOS CFBundleIdentifier, MSIX package family name).
+    /// None = the source declares none.
+    #[serde(default)]
+    pub bundle_identifier: Option<String>,
+    /// Executable path EXACTLY as the source metadata recorded it
+    /// (e.g. Win32 DisplayIcon, .desktop absolute Exec, bundle
+    /// CFBundleExecutable resolved inside the bundle). Lossless; never
+    /// verified to exist by the record itself.
+    #[serde(default)]
+    pub executable_path: Option<PathBuf>,
+    /// Every source this logical application was observed through
+    /// (provenance, canonically ordered and deduplicated by
+    /// [crate::discovery::merge_inventory]). Never part of identity.
+    #[serde(default)]
+    pub provenance: Vec<ApplicationSource>,
 }
 
 /// Normalized, deduplicated inventory result.
@@ -191,6 +212,19 @@ pub struct DiscoveryLimits {
     pub max_children_per_root: usize,
     /// Maximum applications probed for footprints per scan.
     pub max_apps_probed: usize,
+    /// Maximum directories listed in one intelligence observation
+    /// (Phase 6.2). Exceeding it is counted, never silent.
+    pub max_directories: usize,
+    /// Maximum directory entries visited across one intelligence
+    /// observation (Phase 6.2).
+    pub max_entries: usize,
+    /// Maximum directory depth below a probed root (Phase 6.2).
+    pub max_depth: usize,
+    /// Maximum bytes of file metadata (plist, desktop entry, ...) read in
+    /// one observation (Phase 6.2).
+    pub max_metadata_bytes: u64,
+    /// Maximum candidate install roots retained per application.
+    pub max_roots_per_app: usize,
 }
 
 impl Default for DiscoveryLimits {
@@ -201,6 +235,11 @@ impl Default for DiscoveryLimits {
             max_evidence_per_candidate: 16,
             max_children_per_root: 4096,
             max_apps_probed: 4096,
+            max_directories: 4096,
+            max_entries: 262_144,
+            max_depth: 3,
+            max_metadata_bytes: 8 * 1024 * 1024,
+            max_roots_per_app: 8,
         }
     }
 }

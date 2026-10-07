@@ -9,12 +9,18 @@
 //! Privacy: all intelligence is local. No telemetry, no network,
 //! no AI substitution for evidence.
 
+pub mod analysis;
+pub mod bounded;
 pub mod discovery;
 pub mod domain;
 pub mod evidence;
 pub mod explain;
 pub mod footprint;
+pub mod observe;
+pub mod ownership;
 pub mod relationships;
+pub mod roots;
+pub mod sources;
 pub mod windows_discovery;
 
 #[cfg(windows)]
@@ -66,6 +72,13 @@ pub mod win32_registry {
     }
 }
 
+pub use analysis::{
+    analyze, assess, can_authorize_execution, executable_evidence, AnalysisTruncation,
+    ApplicationAnalysis, ApplicationRelationship, ArtifactClaimant, ArtifactOwnership,
+    CandidateBlocker, CandidateKind, ObservedArtifact, OwnershipCandidate, RelationKind,
+    SharedStatus,
+};
+pub use bounded::{Admission, BoundedTopK};
 pub use discovery::{
     merge_inventory, ApplicationProvider, PackagedAppProvider, ProviderError, ProviderOutcome,
 };
@@ -79,7 +92,24 @@ pub use footprint::{
     discover_footprints, normalize_name, offer_path, BoundedListing, FootprintCandidate,
     FootprintKind, FootprintReport, KnownRoots, PathProber,
 };
+pub use observe::{
+    DirectoryObservation, FileObservation, ListedEntry, PathKey, PathObservation,
+    PlatformPathProber, ProbedKind,
+};
+pub use ownership::{
+    assess_groups, CorrelationGroup, EvidenceAccumulator, EvidenceSource, EvidenceStrength,
+    MatchedAttribute, OwnershipAssessment, OwnershipEvidence,
+};
 pub use relationships::{AppAssociation, AssociationKind, OwnershipStrength};
+pub use roots::{
+    associate_executable, bundle_root_of, containing_root, detect_install_roots, path_within,
+    ExecutableAssociation, ExecutableStatus, InstallRoot, ProgramRoots, RootDetectionCounts,
+    RootSignal,
+};
+pub use sources::{
+    parse_desktop_entry, parse_info_plist, record_from_bundle, record_from_desktop_entry,
+    BundleMetadata, BundlePlistProvider, DesktopEntryMetadata, DesktopEntryProvider,
+};
 pub use windows_discovery::{
     decode_registry_string, offer_name, split_hive_path, RegistryHive, RegistryValue, RegistryView,
     SubkeyEnumeration, UninstallView, Win32UninstallEnumerator, WindowsAppxProvider,
@@ -87,3 +117,59 @@ pub use windows_discovery::{
 };
 
 pub use win32_registry::Win32RegistryView;
+
+#[cfg(test)]
+mod architecture_guard_tests {
+    use std::fs;
+    use std::path::Path;
+
+    /// The Phase 6.2 intelligence layer is SHARED code: it must contain no
+    /// platform conditionals (OS behavior belongs in the cfg-selected
+    /// modules), no subprocess/network capability, and no lossy
+    /// `to_str().unwrap_or_default()` path conversion in semantic logic.
+    ///
+    /// The needles are assembled at runtime so this test's own source does
+    /// not match them.
+    #[test]
+    fn intelligence_layer_is_platform_neutral_and_inert() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let shared = [
+            "analysis.rs",
+            "bounded.rs",
+            "observe.rs",
+            "ownership.rs",
+            "roots.rs",
+            "sources.rs",
+        ];
+        let mut forbidden: Vec<String> = Vec::new();
+        for word in ["target_os", "windows", "unix"] {
+            forbidden.push(format!("cfg!( {word}").replace(' ', ""));
+            forbidden.push(format!("#[cfg( {word}").replace(' ', ""));
+        }
+        for needle in [
+            "std::process",
+            "Command::new",
+            "TcpStream",
+            "UdpSocket",
+            "to_str().unwrap_or_default",
+            "to_str().unwrap()",
+        ] {
+            forbidden.push(needle.to_string());
+        }
+
+        for file in shared {
+            let path = src.join(file);
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+            // The guard test itself exempts lines inside `#[cfg(test)]`
+            // blocks by construction: the needles are runtime-assembled.
+            for needle in &forbidden {
+                assert!(
+                    !text.contains(needle.as_str()),
+                    "{needle:?} found in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+}

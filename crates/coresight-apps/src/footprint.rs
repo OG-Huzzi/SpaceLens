@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{ApplicationId, ApplicationRecord, DiscoveryLimits};
 use crate::evidence::{AssociationScope, Confidence, EvidenceKind, FootprintEvidence};
+use crate::observe::{DirectoryObservation, FileObservation, PathObservation};
 
 /// What kind of footprint a candidate path represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -32,6 +33,23 @@ pub enum FootprintKind {
     StartupIntegration,
     Configuration,
     Unknown,
+    // ---- Phase 6.2 additions (appended: existing canonical order is
+    // unchanged). Footprint roles are an OBSERVATION taxonomy — none of them
+    // implies removability.
+    /// An executable file belonging to (or recorded for) the application.
+    Executable,
+    /// A shared library / runtime component.
+    SharedLibrary,
+    /// Application-owned data that is not user content.
+    ApplicationData,
+    /// Crash dumps / diagnostic reports.
+    CrashData,
+    /// Uninstall metadata (registry-recorded uninstaller, receipts).
+    UninstallMetadata,
+    /// Any other associated artifact.
+    Other,
+    /// A regular file inside an install tree with no more specific role.
+    InstallFile,
 }
 
 /// One candidate footprint association.
@@ -123,6 +141,28 @@ pub trait PathProber {
     fn children_bounded(&self, dir: &Path, max: usize) -> BoundedListing;
     /// Immediate entries (any kind) of `dir`, bounded.
     fn entries_bounded(&self, dir: &Path, max: usize) -> BoundedListing;
+
+    /// Typed bounded listing with an explicit [`AccessState`] (Phase 6.2).
+    /// The default is honest: a prober that does not implement it reports
+    /// `Unsupported` — never an empty success.
+    ///
+    /// [`AccessState`]: coresight_capabilities::AccessState
+    fn list_dir(&self, dir: &Path, max: usize) -> DirectoryObservation {
+        let _ = (dir, max);
+        DirectoryObservation::unsupported("this prober does not expose typed directory listings")
+    }
+
+    /// Link-aware metadata including the canonical object identity.
+    fn stat(&self, path: &Path) -> PathObservation {
+        let _ = path;
+        PathObservation::unsupported("this prober does not expose typed metadata")
+    }
+
+    /// Bounded read of a metadata file (at most `max_bytes`).
+    fn read_file_bounded(&self, path: &Path, max_bytes: u64) -> FileObservation {
+        let _ = (path, max_bytes);
+        FileObservation::unsupported("this prober does not expose file content")
+    }
 }
 
 /// Known roots for footprint probing (platform-parameterized).
@@ -255,6 +295,9 @@ fn admit_candidate(
     evidence_truncated: &mut u64,
     mut candidate: FootprintCandidate,
 ) {
+    // Evidence is published in CANONICAL order, so the same facts always
+    // render identically regardless of the order the probes produced them.
+    candidate.evidence.sort();
     if candidate.evidence.len() > limits.max_evidence_per_candidate {
         *evidence_truncated +=
             (candidate.evidence.len() - limits.max_evidence_per_candidate) as u64;
@@ -378,18 +421,23 @@ pub fn discover_footprints(
                                 path: grand,
                                 app: app.id.clone(),
                                 kind: FootprintKind::UserData,
-                                confidence: Confidence::Strong,
+                                // Both evidence items below derive from the SAME
+                                // normalized-name signal (correlated), so they
+                                // cannot be summed into a stronger claim: the
+                                // candidate is capped at `Probable`
+                                // (docs/APPLICATIONS.md, correlation ceiling).
+                                confidence: Confidence::Probable,
                                 evidence: vec![
                                     FootprintEvidence::new(
                                         EvidenceKind::PublisherDirectory,
-                                        Confidence::Strong,
+                                        Confidence::Probable,
                                         "footprint-scan",
                                         scope,
                                         "parent directory matches the application's publisher",
                                     ),
                                     FootprintEvidence::new(
                                         EvidenceKind::KnownApplicationDirectory,
-                                        Confidence::Strong,
+                                        Confidence::Probable,
                                         "footprint-scan",
                                         scope,
                                         "directory name matches the installed application name under the publisher directory",

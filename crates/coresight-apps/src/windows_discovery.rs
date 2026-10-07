@@ -337,6 +337,9 @@ impl<V: RegistryView> Win32UninstallEnumerator<V> {
             kind,
             system_component,
             observed_in_views: vec![view.tag().to_string()],
+            bundle_identifier: None,
+            executable_path: None,
+            provenance: vec![ApplicationSource::RegistryUninstall],
         }
     }
 

@@ -12,6 +12,9 @@ crate-type = ["lib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+coresight-engine = { path = "../coresight-engine" }
+coresight-identity = { path = "../coresight-identity" }
+coresight-capabilities = { path = "../coresight-capabilities" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry"] }

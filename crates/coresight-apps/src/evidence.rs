@@ -24,6 +24,31 @@ pub enum EvidenceKind {
     PackageIdentity,
     /// Observed written by the application's process (future; reserved).
     ObservedWrite,
+    // ---- Phase 6.2 additions (appended; canonical order of the existing
+    // kinds is unchanged). Each kind documents WHY it supports ownership.
+    /// The path equals the executable path EXACTLY as application-owned /
+    /// installer metadata recorded it.
+    ExactExecutablePath,
+    /// The path lies inside a candidate install root (structural
+    /// containment only — never proof of ownership by itself).
+    InstallRootContainment,
+    /// Known bundle/package layout (e.g. `X.app/Contents/MacOS/exe`).
+    BundleStructure,
+    /// The artifact name equals the application's declared bundle/package
+    /// identifier (reverse-DNS), e.g. `~/Library/Caches/com.vendor.App`.
+    BundleIdentifierReference,
+    /// The artifact's canonical object identity equals that of an artifact
+    /// the application's metadata names (e.g. a hard link).
+    ObjectIdentityMatch,
+    /// A `.desktop` entry names the artifact (`Exec`/`TryExec`).
+    DesktopEntryReference,
+    /// A file name resembles the application name (name-derived).
+    FilenameSimilarity,
+    /// A directory name resembles the application name (name-derived).
+    DirectoryNameSimilarity,
+    /// Heuristic sibling relationship (shares a parent with an associated
+    /// artifact).
+    SiblingHeuristic,
 }
 
 /// How strong the association claim is.

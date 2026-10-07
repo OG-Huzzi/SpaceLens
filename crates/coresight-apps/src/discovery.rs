@@ -89,45 +89,62 @@ pub struct ProviderOutcome {
     pub coverage: SourceCoverage,
 }
 
-/// Canonical precedence between two records competing for one logical
-/// application: the more complete metadata wins; exact completeness ties
-/// break on a fixed field-by-field content order. Provider call order is
-/// NEVER a tie-breaker — both arguments produce the same winner under any
-/// arrival permutation.
 /// Canonical content rank of a record: completeness first, then a fixed
-/// field-by-field order (see [`prefer_record`]).
-type RecordRank<'a> = (
-    usize,
-    Option<&'a str>,
-    Option<&'a [u8]>,
-    Option<&'a str>,
-    Option<u64>,
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
-    ApplicationSource,
-    PackageKind,
-    bool,
-);
+/// field-by-field total order over EVERY field that survives the merge
+/// (everything except `observed_in_views`/`provenance`, which are unioned).
+/// Provider call order is NEVER a tie-breaker: the winner is the maximum of
+/// a total order over the record set, so it is identical under any arrival
+/// permutation (and `merge(a, b) == merge(b, a)`). Winner-takes-all is
+/// deliberate: mixing fields of different records could fabricate a hybrid
+/// installation that no source reported.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct RecordRank<'a> {
+    completeness: usize,
+    version: Option<&'a str>,
+    install_location: Option<&'a [u8]>,
+    install_date: Option<&'a str>,
+    estimated_size_bytes: Option<u64>,
+    uninstall_string: Option<&'a str>,
+    quiet_uninstall_string: Option<&'a str>,
+    modify_path: Option<&'a str>,
+    install_source: Option<&'a str>,
+    bundle_identifier: Option<&'a str>,
+    executable_path: Option<&'a [u8]>,
+    source: ApplicationSource,
+    kind: PackageKind,
+    system_component: bool,
+    // Display spelling: two records of one logical application may differ
+    // only in case/whitespace of name or publisher; the winner must not
+    // depend on which arrived first.
+    name: &'a str,
+    publisher: Option<&'a str>,
+}
 
 fn record_rank(r: &ApplicationRecord) -> RecordRank<'_> {
-    (
-        completeness(r),
-        r.version.as_deref(),
-        r.install_location
+    RecordRank {
+        completeness: completeness(r),
+        version: r.version.as_deref(),
+        install_location: r
+            .install_location
             .as_ref()
             .map(|p| p.as_os_str().as_encoded_bytes()),
-        r.install_date.as_deref(),
-        r.estimated_size_bytes,
-        r.uninstall_string.as_deref(),
-        r.quiet_uninstall_string.as_deref(),
-        r.modify_path.as_deref(),
-        r.install_source.as_deref(),
-        r.source.clone(),
-        r.kind,
-        r.system_component,
-    )
+        install_date: r.install_date.as_deref(),
+        estimated_size_bytes: r.estimated_size_bytes,
+        uninstall_string: r.uninstall_string.as_deref(),
+        quiet_uninstall_string: r.quiet_uninstall_string.as_deref(),
+        modify_path: r.modify_path.as_deref(),
+        install_source: r.install_source.as_deref(),
+        bundle_identifier: r.bundle_identifier.as_deref(),
+        executable_path: r
+            .executable_path
+            .as_ref()
+            .map(|p| p.as_os_str().as_encoded_bytes()),
+        source: r.source.clone(),
+        kind: r.kind,
+        system_component: r.system_component,
+        name: r.name.as_str(),
+        publisher: r.publisher.as_deref(),
+    }
 }
 
 /// `true` when `new` should replace `existing` as the winning record of a
@@ -189,21 +206,23 @@ pub fn merge_inventory(outputs: Vec<ProviderOutcome>, limits: &DiscoveryLimits) 
             match by_key.get_mut(&key) {
                 Some(slot) => {
                     slot.absorbed += 1;
+                    // Provenance is a UNION: it never depends on which
+                    // record wins the content rank.
+                    let mut views = std::mem::take(&mut slot.record.observed_in_views);
+                    views.extend(rec.observed_in_views.iter().cloned());
+                    views.sort();
+                    views.dedup();
+                    let mut provenance = std::mem::take(&mut slot.record.provenance);
+                    provenance.extend(rec.provenance.iter().cloned());
+                    provenance.push(slot.record.source.clone());
+                    provenance.push(rec.source.clone());
+                    provenance.sort();
+                    provenance.dedup();
                     if prefer_record(&rec, &slot.record) {
-                        let mut merged_views = slot.record.observed_in_views.clone();
-                        merged_views.extend(rec.observed_in_views.iter().cloned());
-                        merged_views.sort();
-                        merged_views.dedup();
-                        let mut replacement = rec;
-                        replacement.observed_in_views = merged_views;
-                        slot.record = replacement;
-                    } else {
-                        slot.record
-                            .observed_in_views
-                            .extend(rec.observed_in_views.iter().cloned());
-                        slot.record.observed_in_views.sort();
-                        slot.record.observed_in_views.dedup();
+                        slot.record = rec;
                     }
+                    slot.record.observed_in_views = views;
+                    slot.record.provenance = provenance;
                 }
                 None => {
                     if by_key.len() < limits.max_records {
@@ -241,8 +260,17 @@ pub fn merge_inventory(outputs: Vec<ProviderOutcome>, limits: &DiscoveryLimits) 
             }
         }
     }
-    let mut records: Vec<ApplicationRecord> =
-        by_key.into_values().map(|slot| slot.record).collect();
+    let mut records: Vec<ApplicationRecord> = by_key
+        .into_values()
+        .map(|mut slot| {
+            // Provenance always contains the winning record's own source,
+            // canonically ordered (source = provenance, never identity).
+            slot.record.provenance.push(slot.record.source.clone());
+            slot.record.provenance.sort();
+            slot.record.provenance.dedup();
+            slot.record
+        })
+        .collect();
     records.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -288,6 +316,12 @@ fn completeness(rec: &ApplicationRecord) -> usize {
         n += 1;
     }
     if rec.install_date.is_some() {
+        n += 1;
+    }
+    if rec.bundle_identifier.is_some() {
+        n += 1;
+    }
+    if rec.executable_path.is_some() {
         n += 1;
     }
     n

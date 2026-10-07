@@ -85,6 +85,9 @@ fn app(name: &str, publisher: &str, install_location: Option<&str>) -> Applicati
         kind: PackageKind::Installed,
         system_component: false,
         observed_in_views: vec!["HKLM-64".into()],
+        bundle_identifier: None,
+        executable_path: None,
+        provenance: vec![ApplicationSource::RegistryUninstall],
     }
 }
 
@@ -128,7 +131,7 @@ fn user_data_under_standard_root_is_probable() {
 }
 
 #[test]
-fn publisher_directory_with_app_child_is_strong() {
+fn publisher_directory_with_app_child_is_capped_at_probable() {
     let apps = [app("Spotify", "Spotify AB", None)];
     let fs = FakeFs::default().with_dirs("C:/ProgramData", &["C:/ProgramData/Spotify AB"]);
     let fs = fs.with_dirs(
@@ -143,8 +146,15 @@ fn publisher_directory_with_app_child_is_strong() {
     let cand = out
         .iter()
         .find(|c| c.path.as_path() == Path::new("C:/ProgramData/Spotify AB/Spotify"))
-        .expect("strong candidate");
-    assert_eq!(cand.confidence, Confidence::Strong);
+        .expect("publisher-directory candidate");
+    // Phase 6.2 correlation ceiling: publisher-directory + app-name matches
+    // both derive from the same normalized name, so they may not inflate to
+    // Strong — the candidate is capped at Probable.
+    assert_eq!(cand.confidence, Confidence::Probable);
+    assert!(cand
+        .evidence
+        .iter()
+        .any(|e| e.kind == coresight_apps::EvidenceKind::PublisherDirectory));
 }
 
 #[test]

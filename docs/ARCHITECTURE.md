@@ -87,15 +87,24 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   (path/object/content/relationship history) with strict corruption
   rejection and newer-schema refusal, deterministic bounded retention,
   and crash recovery (`crates/coresight-history`, docs/HISTORY.md).
-- `applications` — the Phase 6 application-intelligence foundation:
-  a platform-neutral application domain (stable content-derived
-  `ApplicationId`, record, source kind, five-state source coverage,
-  explicit bounds), provider-based discovery (Windows Win32 uninstall
-  registry across HKLM-64 / HKLM-32 / HKCU via `windows-sys`; MSIX/AppX
-  abstracted with an honest `Unsupported`), evidence-typed footprint
-  candidates with confidence levels, ownership strength that never
-  upgrades weak evidence, and human-readable explanations
-  (`crates/coresight-apps`; no network, no execution — foundation only).
+- `applications` — the Phase 6 application-intelligence layer, deepened in
+  Phase 6.2. A platform-neutral application domain (stable content-derived
+  `ApplicationId` over normalized `(name, publisher)` — source is provenance,
+  never identity; record; five-state source coverage; explicit bounds) plus:
+  provider-based discovery (Windows Win32 uninstall registry across
+  HKLM-64 / HKLM-32 / HKCU; MSIX/AppX honestly `Unsupported`; macOS
+  `*.app/Contents/Info.plist` bundles; Linux/BSD `.desktop` entries — all
+  local file metadata only); install-root detection from multiple independent
+  signals; executable association distinguishing observed/inferred/candidate;
+  a correlation-grouped ownership-evidence model with a documented
+  anti-inflation ceiling; artifact relationships that keep *contains*,
+  *owns*, *associated-with*, and *conflicting* distinct; shared/conflicting
+  ownership that never silently resolves; structured (machine-readable)
+  explanations; inert read-only recommendation candidates; and bounded,
+  deterministic analysis where every collection admits through a top-K
+  structure (**O(limit)** working memory, exact overflow accounting).
+  `crates/coresight-apps`; no network, no subprocess, no executor, no
+  persistence. See docs/APPLICATIONS.md.
 - `capabilities` — the Phase 6.1 Mac-first capability architecture:
   the seven product pillars, the typed capability contracts with pinned
   honest statuses, the observation honesty envelope (observed / inferred /

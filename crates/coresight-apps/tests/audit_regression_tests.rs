@@ -144,6 +144,9 @@ fn app(name: &str, publisher: Option<&str>) -> ApplicationRecord {
         kind: PackageKind::Installed,
         system_component: false,
         observed_in_views: Vec::new(),
+        bundle_identifier: None,
+        executable_path: None,
+        provenance: vec![ApplicationSource::RegistryUninstall],
     }
 }
 
@@ -293,6 +296,9 @@ fn a2_identity_is_the_logical_application_not_the_source() {
         kind: PackageKind::Installed,
         system_component: false,
         observed_in_views: vec!["HKLM-64".to_string()],
+        bundle_identifier: None,
+        executable_path: None,
+        provenance: vec![ApplicationSource::RegistryUninstall],
     };
     let msix_record = ApplicationRecord {
         id: msix.clone(),
@@ -310,6 +316,9 @@ fn a2_identity_is_the_logical_application_not_the_source() {
         kind: PackageKind::Installed,
         system_component: false,
         observed_in_views: vec![],
+        bundle_identifier: None,
+        executable_path: None,
+        provenance: vec![ApplicationSource::PackagedApp],
     };
     let outcomes = vec![
         ProviderOutcome {
@@ -725,6 +734,9 @@ fn det_inventory_merge_is_byte_identical_under_every_permutation() {
             kind: PackageKind::Installed,
             system_component: false,
             observed_in_views: views.iter().map(|v| v.to_string()).collect(),
+            bundle_identifier: None,
+            executable_path: None,
+            provenance: vec![ApplicationSource::RegistryUninstall],
         };
         let _ = tag;
         ProviderOutcome {
@@ -771,6 +783,9 @@ fn det_footprint_discovery_is_identical_under_permutation() {
             kind: PackageKind::Installed,
             system_component: false,
             observed_in_views: vec![],
+            bundle_identifier: None,
+            executable_path: None,
+            provenance: vec![ApplicationSource::RegistryUninstall],
         }
     }
     let app_a = app("Alpha");
@@ -911,6 +926,9 @@ fn bnd_footprint_admission_bounds_working_set_deterministically() {
             kind: PackageKind::Installed,
             system_component: false,
             observed_in_views: vec![],
+            bundle_identifier: None,
+            executable_path: None,
+            provenance: vec![ApplicationSource::RegistryUninstall],
         }
     }
     let apps: Vec<ApplicationRecord> = (0..50).map(|i| app(&format!("App{i:03}"))).collect();
