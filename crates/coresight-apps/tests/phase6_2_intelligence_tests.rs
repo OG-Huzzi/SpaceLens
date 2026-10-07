@@ -801,3 +801,80 @@ fn shared_artifacts_are_never_presented_as_exclusively_owned() {
         assert_ne!(c.confidence, Confidence::Confirmed);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Lossless paths (Objective 22)
+// ---------------------------------------------------------------------------
+
+/// A non-UTF-8 byte sequence must survive every semantic layer byte-for-byte.
+/// Paths are compared and published as platform-encoded bytes; a display
+/// string is never the canonical identifier. Unix-only because only Unix has
+/// byte-oriented paths.
+#[cfg(unix)]
+#[test]
+fn non_utf8_paths_are_preserved_byte_for_byte() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let a = app("Weird", None, ApplicationSource::RegistryUninstall);
+    // 0xFF is not valid UTF-8.
+    let raw = b"/data/weird/\xff\xfe-binary";
+    let path = PathBuf::from(OsStr::from_bytes(raw));
+    assert!(path.to_str().is_none(), "the fixture really is non-UTF-8");
+
+    let art = ObservedArtifact {
+        path: path.clone(),
+        kind: ProbedKind::File,
+        identity: Some(ObjectIdentity::narrow(1, 5)),
+        size: Some(1),
+        attributed_to: vec![(a.id.clone(), EvidenceKind::InstallLocation)],
+    };
+    let out = analyze(&[a], &[art], &DiscoveryLimits::default());
+
+    // The exact bytes survive into the relationship, the artifact view, the
+    // candidate, and the structured evidence.
+    assert_eq!(out.relationships[0].path.as_os_str().as_bytes(), raw);
+    assert_eq!(out.artifacts[0].path.as_os_str().as_bytes(), raw);
+    assert_eq!(out.candidates[0].target.as_os_str().as_bytes(), raw);
+    assert_eq!(
+        out.candidates[0].evidence[0]
+            .observed_path
+            .as_os_str()
+            .as_bytes(),
+        raw
+    );
+    // And the canonical ordering key is the lossless byte encoding.
+    assert_eq!(coresight_apps::PathKey(path.clone()).bytes(), raw);
+}
+
+/// A non-UTF-8 directory name must not match an application name by
+/// accident: the comparison key stays a name (never an empty string), so an
+/// unmatchable name simply fails to match.
+#[cfg(unix)]
+#[test]
+fn non_utf8_names_never_match_by_accident() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let a = app("Example", None, ApplicationSource::RegistryUninstall);
+    let weird = OsStr::from_bytes(b"\xff\xfe");
+    let norm = coresight_apps::normalize_name(&weird.to_string_lossy());
+    assert!(
+        !norm.is_empty(),
+        "a non-UTF-8 name stays a name, never an empty match-all string"
+    );
+    // The directory name derived from it cannot equal/contain the app name,
+    // so no candidate can be invented for it.
+    assert!(!norm.contains("example"));
+
+    let roots = KnownRoots {
+        program_data: Some(PathBuf::from("C:/ProgramData")),
+        ..KnownRoots::default()
+    };
+    let fs = FakeProber::default();
+    let report = discover_footprints(&[a], &roots, &fs, &DiscoveryLimits::default());
+    assert!(
+        report.candidates.is_empty(),
+        "an unreadable/absent root invents no candidate"
+    );
+}
