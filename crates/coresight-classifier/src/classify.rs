@@ -236,6 +236,12 @@ mod tests {
     use crate::evidence::Evidence;
     use std::path::PathBuf;
 
+    // Unix-only: building genuinely non-UTF-8 OsStrings for the lossless
+    // path fixtures below (Windows OsStrs are WTF-8 and these bytes do not
+    // exist there).
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+
     fn entry(id: u64, parent: Option<u64>, path: &str, kind: EntryKind) -> FsEntry {
         FsEntry {
             id,
@@ -476,21 +482,21 @@ mod tests {
     fn non_utf8_paths_keep_their_name_and_extension() {
         // A non-UTF-8 file name must NOT collapse to "no usable name": the
         // file is still a file with a usable (byte) name (Phase 6.1).
-        let path = std::os::unix::ffi::OsStringExt::from_vec(b"/data/report\xFF.bin".to_vec());
+        let path = std::ffi::OsString::from_vec(b"/data/report\xFF.bin".to_vec());
         let path = PathBuf::from(path);
-        let (name, stem, ext) = split_name(&path);
+        let (name, _stem, ext) = split_name(&path);
         assert!(!name.is_empty(), "the name survives");
         assert!(name.contains("report"), "the UTF-8 part survives: {name}");
         assert_eq!(ext.as_deref(), Some("bin"), "the extension is readable");
 
         // Same shape with the invalid bytes in a PARENT directory.
-        let path = std::os::unix::ffi::OsStringExt::from_vec(b"/data\xFF/reports.txt".to_vec());
+        let path = std::ffi::OsString::from_vec(b"/data\xFF/reports.txt".to_vec());
         let (name, _, ext) = split_name(&PathBuf::from(path));
         assert_eq!(name, "reports.txt");
         assert_eq!(ext.as_deref(), Some("txt"));
 
         // A fully non-UTF-8 name is still a name (not Unknown).
-        let path = std::os::unix::ffi::OsStringExt::from_vec(b"/data/\xFF\xFE".to_vec());
+        let path = std::ffi::OsString::from_vec(b"/data/\xFF\xFE".to_vec());
         let (name, stem, ext) = split_name(&PathBuf::from(path));
         assert!(!name.is_empty());
         assert_eq!(stem, name);
@@ -504,7 +510,7 @@ mod tests {
         // as a File (Other at minimum), never as the misleading Unknown.
         // The entry is built with the raw OsString path — no UTF-8
         // round-trip.
-        let raw = std::os::unix::ffi::OsStringExt::from_vec(b"/somewhere/data\xFF.txt".to_vec());
+        let raw = std::ffi::OsString::from_vec(b"/somewhere/data\xFF.txt".to_vec());
         let e = FsEntry {
             id: 1,
             parent_id: None,
