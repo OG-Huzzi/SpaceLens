@@ -215,3 +215,23 @@ conditionals, subprocess/network tokens, mutating-primitive tokens, lossy
 path tokens, and the history/SQLite dependency. Real filesystem reads happen
 in the observation layers, never in this crate. Synthetic fixtures run on
 all three CI platforms; a portable non-UTF-8 regression runs everywhere.
+
+## 18. Verification record (Phase 6.3)
+
+Verified commit `0676223` — CI run
+[37649180299](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37649180299),
+conclusion **success**:
+
+```text
+rust (ubuntu-latest)   success
+rust (windows-latest)  success
+rust (macos-latest)    success
+frontend               success
+```
+
+Local results on the same HEAD: `cargo fmt --all --check` clean,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean, `cargo test --workspace` and `--all-features` green, `npm ci` +
+`npm run build` success, `git diff --check` clean, Linux and macOS
+cross-target checks for the touched crates green, and all ignored
+performance smoke suites (engine, classifier, identity, history) passing.
