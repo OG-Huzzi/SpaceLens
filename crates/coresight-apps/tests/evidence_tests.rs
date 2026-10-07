@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use coresight_apps::{
-    discover_footprints, explain, ApplicationId, ApplicationRecord, ApplicationSource, Confidence,
-    DiscoveryLimits, EvidenceKind, FootprintReport, KnownRoots, OwnershipStrength, PackageKind,
-    PathProber,
+    discover_footprints, explain, offer_path, ApplicationId, ApplicationRecord, ApplicationSource,
+    BoundedListing, Confidence, DiscoveryLimits, EvidenceKind, FootprintReport, KnownRoots,
+    OwnershipStrength, PackageKind, PathProber,
 };
 
 /// Bounded scan helper: default limits.
@@ -30,17 +30,25 @@ impl FakeFs {
 }
 
 impl PathProber for FakeFs {
-    fn children(&self, dir: &Path) -> Vec<PathBuf> {
-        self.dirs.get(dir).cloned().unwrap_or_default()
+    fn children_bounded(&self, dir: &Path, max: usize) -> BoundedListing {
+        let mut set = std::collections::BTreeSet::new();
+        let mut overflow = 0u64;
+        for name in self.dirs.get(dir).cloned().unwrap_or_default() {
+            offer_path(&mut set, max, name, &mut overflow);
+        }
+        BoundedListing {
+            names: set.into_iter().collect(),
+            overflow,
+        }
     }
-    fn entries(&self, dir: &Path) -> Vec<PathBuf> {
-        self.dirs.get(dir).cloned().unwrap_or_default()
+    fn entries_bounded(&self, dir: &Path, max: usize) -> BoundedListing {
+        self.children_bounded(dir, max)
     }
 }
 
 fn app(name: &str) -> ApplicationRecord {
     ApplicationRecord {
-        id: ApplicationId::derive(name, None, "win32-uninstall"),
+        id: ApplicationId::derive(name, None),
         name: name.to_string(),
         version: None,
         publisher: None,

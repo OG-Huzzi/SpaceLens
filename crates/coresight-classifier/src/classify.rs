@@ -81,7 +81,14 @@ pub fn classify(entry: &FsEntry, context: &ParentContext, platform: Platform) ->
         return unknown(entry.id);
     }
 
-    let outcome: MatchOutcome = evaluate(is_dir, file_name, stem, ext, platform, location);
+    let outcome: MatchOutcome = evaluate(
+        is_dir,
+        &file_name,
+        &stem,
+        ext.as_deref(),
+        platform,
+        location,
+    );
 
     // A special entry (socket/FIFO/device) with no signal at all is genuinely
     // uninterpretable, not merely unclassified.
@@ -196,19 +203,30 @@ pub fn classify_streaming(
 
 /// Split a path into (file name, stem, extension).
 ///
-/// Splits on **both** `/` and `\` and ignores Windows drive prefixes, so a
-/// synthetic Windows path yields the same name on a Linux or macOS host. This
-/// is the property that keeps the cross-platform suite host-independent
-/// (docs/CROSS_PLATFORM.md).
-fn split_name(path: &Path) -> (&str, &str, Option<&str>) {
-    let full = path.to_str().unwrap_or_default();
-    let name = full
-        .rsplit(['/', '\\'])
+/// Splits on **both** `/` and `\` at the BYTE level and ignores Windows
+/// drive prefixes, so a synthetic Windows path yields the same name on a
+/// Linux or macOS host, and a path containing non-UTF-8 bytes still yields
+/// its real final component. Phase 6.1 losslessness repair: the previous
+/// `path.to_str().unwrap_or_default()` collapsed ANY non-UTF-8 path to an
+/// empty string, misleadingly classifying perfectly well-named files as
+/// `Unknown`. The returned strings are the lossy rendering of the raw
+/// bytes — matching keys only; the lossless path always stays in the
+/// caller's `FsEntry`.
+fn split_name(path: &Path) -> (String, String, Option<String>) {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let name_bytes = bytes
+        .rsplit(|b| *b == b'/' || *b == b'\\')
         .find(|s| !s.is_empty())
-        .unwrap_or_default();
-    match name.rsplit_once('.') {
-        Some((stem, e)) if !stem.is_empty() => (name, stem, Some(e)),
-        _ => (name, name, None),
+        .unwrap_or(&[]);
+    let lossy = String::from_utf8_lossy(name_bytes).into_owned();
+    // Stem/extension split on the lossy name: extension matching is a
+    // matching concern, so a non-UTF-8 name with a UTF-8 extension (the
+    // common shape) still classifies by that extension.
+    match lossy.rsplit_once('.') {
+        Some((stem, e)) if !stem.is_empty() => {
+            (lossy.clone(), stem.to_string(), Some(e.to_string()))
+        }
+        _ => (lossy.clone(), lossy, None),
     }
 }
 
@@ -418,20 +436,93 @@ mod tests {
         // Both separators work on every host, and drive prefixes are dropped.
         assert_eq!(
             split_name(Path::new("C:/Users/u/a.exe")),
-            ("a.exe", "a", Some("exe"))
+            (
+                "a.exe".to_string(),
+                "a".to_string(),
+                Some("exe".to_string())
+            )
         );
         assert_eq!(
             split_name(Path::new(r"C:\Users\u\a.exe")),
-            ("a.exe", "a", Some("exe"))
+            (
+                "a.exe".to_string(),
+                "a".to_string(),
+                Some("exe".to_string())
+            )
         );
         assert_eq!(
             split_name(Path::new("/a/b/c.tar.gz")),
-            ("c.tar.gz", "c.tar", Some("gz"))
+            (
+                "c.tar.gz".to_string(),
+                "c.tar".to_string(),
+                Some("gz".to_string())
+            )
         );
         assert_eq!(
             split_name(Path::new("/a/b/.hidden")),
-            (".hidden", ".hidden", None)
+            (".hidden".to_string(), ".hidden".to_string(), None)
         );
-        assert_eq!(split_name(Path::new("plain")), ("plain", "plain", None));
+        assert_eq!(
+            split_name(Path::new("plain")),
+            ("plain".to_string(), "plain".to_string(), None)
+        );
+    }
+
+    // Building a genuinely non-UTF-8 OsStr is a unix facility (Windows
+    // OsStrs are WTF-8); these tests run on Linux/macOS CI, and the
+    // byte-level split logic itself is host-independent (covered above).
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_keep_their_name_and_extension() {
+        // A non-UTF-8 file name must NOT collapse to "no usable name": the
+        // file is still a file with a usable (byte) name (Phase 6.1).
+        let path = std::os::unix::ffi::OsStringExt::from_vec(b"/data/report\xFF.bin".to_vec());
+        let path = PathBuf::from(path);
+        let (name, stem, ext) = split_name(&path);
+        assert!(!name.is_empty(), "the name survives");
+        assert!(name.contains("report"), "the UTF-8 part survives: {name}");
+        assert_eq!(ext.as_deref(), Some("bin"), "the extension is readable");
+
+        // Same shape with the invalid bytes in a PARENT directory.
+        let path = std::os::unix::ffi::OsStringExt::from_vec(b"/data\xFF/reports.txt".to_vec());
+        let (name, _, ext) = split_name(&PathBuf::from(path));
+        assert_eq!(name, "reports.txt");
+        assert_eq!(ext.as_deref(), Some("txt"));
+
+        // A fully non-UTF-8 name is still a name (not Unknown).
+        let path = std::os::unix::ffi::OsStringExt::from_vec(b"/data/\xFF\xFE".to_vec());
+        let (name, stem, ext) = split_name(&PathBuf::from(path));
+        assert!(!name.is_empty());
+        assert_eq!(stem, name);
+        assert_eq!(ext, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_named_files_are_not_unknown() {
+        // End-to-end: a file whose PATH carries non-UTF-8 bytes classifies
+        // as a File (Other at minimum), never as the misleading Unknown.
+        // The entry is built with the raw OsString path — no UTF-8
+        // round-trip.
+        let raw = std::os::unix::ffi::OsStringExt::from_vec(b"/somewhere/data\xFF.txt".to_vec());
+        let e = FsEntry {
+            id: 1,
+            parent_id: None,
+            path: PathBuf::from(raw),
+            kind: EntryKind::File,
+            size: 12,
+            allocated_size: None,
+            modified: None,
+            created: None,
+            accessed: None,
+            changed: None,
+            device: None,
+            inode: None,
+            file_id_hi: None,
+            hidden: false,
+            error: None,
+        };
+        let c = classify(&e, &ParentContext::default(), Platform::Linux);
+        assert_ne!(c.category, Category::Unknown);
     }
 }

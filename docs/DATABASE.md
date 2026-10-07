@@ -48,7 +48,15 @@ Status: Phase 0 conceptual schema. Implemented from Phase 1. Owner: Rust
 
 ## Corruption & recovery
 
-- `PRAGMA integrity_check` on open after unclean shutdown; on failure: quarantine
-  the file, start fresh, and offer rescan — never guess, never half-read.
+- `PRAGMA integrity_check` runs on EVERY open, before anything reads or
+  migrates the file (IMPLEMENTED, Phase 6.1 audit: `HistoryStore::open`
+  refuses a corrupt store with the typed `StoreError::Corrupt` — never
+  guess, never half-read).
+- PLANNED (not yet implemented — the check refuses instead of hiding):
+  quarantining the corrupt file aside, starting fresh, and offering a
+  rescan flow. Also PLANNED: an automatic pre-migration backup copy of
+  the store file (migrations themselves are already atomic per step,
+  version bump inside the same transaction — a failed migration rolls
+  back rather than leaving a half-migrated database).
 - Scans are idempotent and resumable-by-restart: a crashed scan leaves a
   `failed` record and zero partial visibility (snapshot publishes atomically).

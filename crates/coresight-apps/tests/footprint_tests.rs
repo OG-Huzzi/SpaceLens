@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use coresight_apps::{
-    discover_footprints, normalize_name, ApplicationId, ApplicationRecord, ApplicationSource,
-    Confidence, DiscoveryLimits, FootprintCandidate, FootprintKind, KnownRoots, PackageKind,
-    PathProber,
+    discover_footprints, normalize_name, offer_path, ApplicationId, ApplicationRecord,
+    ApplicationSource, BoundedListing, Confidence, DiscoveryLimits, FootprintCandidate,
+    FootprintKind, KnownRoots, PackageKind, PathProber,
 };
 
 /// Bounded scan helper: default limits, candidates only.
@@ -44,17 +44,33 @@ impl FakeFs {
 }
 
 impl PathProber for FakeFs {
-    fn children(&self, dir: &Path) -> Vec<PathBuf> {
-        self.dirs.get(dir).cloned().unwrap_or_default()
+    fn children_bounded(&self, dir: &Path, max: usize) -> BoundedListing {
+        let mut set = std::collections::BTreeSet::new();
+        let mut overflow = 0u64;
+        for name in self.dirs.get(dir).cloned().unwrap_or_default() {
+            offer_path(&mut set, max, name, &mut overflow);
+        }
+        BoundedListing {
+            names: set.into_iter().collect(),
+            overflow,
+        }
     }
-    fn entries(&self, dir: &Path) -> Vec<PathBuf> {
-        self.entries.get(dir).cloned().unwrap_or_default()
+    fn entries_bounded(&self, dir: &Path, max: usize) -> BoundedListing {
+        let mut set = std::collections::BTreeSet::new();
+        let mut overflow = 0u64;
+        for name in self.entries.get(dir).cloned().unwrap_or_default() {
+            offer_path(&mut set, max, name, &mut overflow);
+        }
+        BoundedListing {
+            names: set.into_iter().collect(),
+            overflow,
+        }
     }
 }
 
 fn app(name: &str, publisher: &str, install_location: Option<&str>) -> ApplicationRecord {
     ApplicationRecord {
-        id: ApplicationId::derive(name, Some(publisher), "win32-uninstall"),
+        id: ApplicationId::derive(name, Some(publisher)),
         name: name.to_string(),
         version: Some("1.0".into()),
         publisher: Some(publisher.to_string()),

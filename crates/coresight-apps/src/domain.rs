@@ -5,21 +5,37 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Stable application identifier: content-derived from
-/// (name, publisher, source) — deterministic for identical input.
+/// (name, publisher) — deterministic for identical input.
+///
+/// ## The identity rule (explicit, deterministic)
+///
+/// A **logical application is identified by its normalized
+/// (name, publisher) pair alone**. The discovery source is PROVENANCE,
+/// never identity: the same application observed through several sources
+/// (Win32 uninstall views, MSIX/AppX, filesystem presence) is ONE logical
+/// application with unioned provenance — this is exactly what
+/// [`crate::discovery::merge_inventory`] keys on, so the id, the merge
+/// key, provenance, source coverage, footprint associations, and any
+/// future persistence key all agree. Consequence: two records with the
+/// same normalized (name, publisher) from different sources share one
+/// [`ApplicationId`]; different names or publishers are different
+/// applications. Two simultaneous DISTINCT installations with identical
+/// name and publisher are represented as one logical application — the
+/// indistinguishability is documented, not hidden.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ApplicationId(pub String);
 
 impl ApplicationId {
-    /// Derive a stable id from normalized name + publisher + source tag,
-    /// so the same logical application yields the same id across runs.
-    pub fn derive(name: &str, publisher: Option<&str>, source: &str) -> Self {
+    /// Derive a stable id from normalized name + publisher, so the same
+    /// logical application yields the same id across runs AND across
+    /// sources.
+    pub fn derive(name: &str, publisher: Option<&str>) -> Self {
         use sha2::Digest;
         let key = format!(
-            "{}|{}|{}",
+            "{}|{}",
             name.trim().to_lowercase(),
             publisher.unwrap_or("").trim().to_lowercase(),
-            source
         );
         let digest = sha2::Sha256::digest(key.as_bytes());
         ApplicationId(format!("app-{}", hex8(&digest[..])))

@@ -486,3 +486,17 @@ mod tests {
         );
     }
 }
+
+#[test]
+fn tcc_protected_source_is_never_a_probeable_path() {
+    // The Full-Disk-Access-gated source must remain a MECHANISM entry:
+    // it has no filesystem path to probe, is never `ReadableNow`, and is
+    // never `Probed` — the observation layer cannot touch it even by
+    // accident (docs/SECURITY_AND_SAFETY.md; no implicit consent, no
+    // bypass, no privilege escalation).
+    let spec = source(MacSourceId::TccProtectedUserData);
+    assert!(matches!(spec.location, SourceLocation::Mechanism { .. }));
+    assert_eq!(spec.access, SourceAccess::RequiresFullDiskAccess);
+    assert_eq!(spec.availability, SourceAvailability::Deferred);
+    assert_eq!(spec.sensitivity, Sensitivity::PrivacySensitive);
+}

@@ -17,10 +17,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use coresight_apps::{
-    discover_footprints, merge_inventory, ApplicationId, ApplicationProvider, ApplicationRecord,
-    ApplicationSource, Confidence, DiscoveryLimits, FootprintKind, KnownRoots, OwnershipStrength,
-    PackageKind, PackagedAppProvider, PathProber, ProviderOutcome, RegistryValue, RegistryView,
-    SourceCoverage, SourceStatus, UninstallView, Win32UninstallEnumerator, WindowsAppxProvider,
+    discover_footprints, merge_inventory, offer_name, offer_path, ApplicationId,
+    ApplicationProvider, ApplicationRecord, ApplicationSource, BoundedListing, Confidence,
+    DiscoveryLimits, FootprintKind, FootprintReport, KnownRoots, OwnershipStrength, PackageKind,
+    PackagedAppProvider, PathProber, ProviderOutcome, RegistryValue, RegistryView, SourceCoverage,
+    SourceStatus, SubkeyEnumeration, UninstallView, Win32UninstallEnumerator, WindowsAppxProvider,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,8 +55,18 @@ impl FakeRegistry {
 }
 
 impl RegistryView for FakeRegistry {
-    fn subkeys(&self, key: &str) -> Vec<String> {
-        self.keys.get(key).cloned().unwrap_or_default()
+    fn subkeys_bounded(&self, key: &str, max: usize) -> SubkeyEnumeration {
+        let mut set = std::collections::BTreeSet::new();
+        let mut truncated = 0u64;
+        for name in self.keys.get(key).cloned().unwrap_or_default() {
+            offer_name(&mut set, max, name, &mut truncated);
+        }
+        SubkeyEnumeration {
+            keys: set.into_iter().collect(),
+            skipped_oversized: 0,
+            truncated,
+            incomplete: false,
+        }
     }
     fn get_value(&self, key: &str, name: &str) -> Option<RegistryValue> {
         self.values
@@ -100,17 +111,25 @@ impl FakeFs {
 }
 
 impl PathProber for FakeFs {
-    fn children(&self, dir: &Path) -> Vec<PathBuf> {
-        self.dirs.get(dir).cloned().unwrap_or_default()
+    fn children_bounded(&self, dir: &Path, max: usize) -> BoundedListing {
+        let mut set = std::collections::BTreeSet::new();
+        let mut overflow = 0u64;
+        for name in self.dirs.get(dir).cloned().unwrap_or_default() {
+            offer_path(&mut set, max, name, &mut overflow);
+        }
+        BoundedListing {
+            names: set.into_iter().collect(),
+            overflow,
+        }
     }
-    fn entries(&self, dir: &Path) -> Vec<PathBuf> {
-        self.dirs.get(dir).cloned().unwrap_or_default()
+    fn entries_bounded(&self, dir: &Path, max: usize) -> BoundedListing {
+        self.children_bounded(dir, max)
     }
 }
 
 fn app(name: &str, publisher: Option<&str>) -> ApplicationRecord {
     ApplicationRecord {
-        id: ApplicationId::derive(name, publisher, "win32-uninstall"),
+        id: ApplicationId::derive(name, publisher),
         name: name.to_string(),
         version: None,
         publisher: publisher.map(str::to_string),
@@ -216,11 +235,11 @@ fn a1_all_views_present_and_read_is_complete() {
 
 #[test]
 fn a2_identity_is_stable_for_identical_metadata() {
-    let a = ApplicationId::derive("Example App", Some("Vendor"), "win32-uninstall");
-    let b = ApplicationId::derive("Example App", Some("Vendor"), "win32-uninstall");
+    let a = ApplicationId::derive("Example App", Some("Vendor"));
+    let b = ApplicationId::derive("Example App", Some("Vendor"));
     assert_eq!(a, b);
     // Case/whitespace normalization is the documented normalization.
-    let c = ApplicationId::derive("  example app ", Some("VENDOR"), "win32-uninstall");
+    let c = ApplicationId::derive("  example app ", Some("VENDOR"));
     assert_eq!(a, c);
 }
 
@@ -236,23 +255,86 @@ fn a2_identity_does_not_depend_on_version() {
 
 #[test]
 fn a2_same_name_different_publisher_is_a_different_application() {
-    let a = ApplicationId::derive("Setup", Some("Vendor A"), "win32-uninstall");
-    let b = ApplicationId::derive("Setup", Some("Vendor B"), "win32-uninstall");
+    let a = ApplicationId::derive("Setup", Some("Vendor A"));
+    let b = ApplicationId::derive("Setup", Some("Vendor B"));
     assert_ne!(a, b);
     // Missing publisher must not collide with a named publisher.
-    let c = ApplicationId::derive("Setup", None, "win32-uninstall");
+    let c = ApplicationId::derive("Setup", None);
     assert_ne!(a, c);
     assert_ne!(b, c);
 }
 
 #[test]
-fn a2_same_name_different_source_is_a_different_identity() {
-    let a = ApplicationId::derive("Example", None, "win32-uninstall");
-    let b = ApplicationId::derive("Example", None, "msix-appx");
-    assert_ne!(
-        a, b,
-        "same name from different sources cannot share identity"
+fn a2_identity_is_the_logical_application_not_the_source() {
+    // The Phase 6.1 identity rule: a logical application is identified by
+    // its normalized (name, publisher); the discovery source is PROVENANCE.
+    // The same application observed through two sources shares one
+    // ApplicationId (and merge_inventory collapses it into one record with
+    // unioned provenance), so the id can never disagree with the merge key.
+    let win32 = ApplicationId::derive("Example", None);
+    let msix = ApplicationId::derive("Example", None);
+    assert_eq!(win32, msix, "source is provenance, not identity");
+
+    // Cross-source merge: one logical application, provenance unioned,
+    // coverage from both sources.
+    let win32_record = ApplicationRecord {
+        id: win32.clone(),
+        name: "Example".to_string(),
+        version: Some("1.0".to_string()),
+        publisher: None,
+        install_location: None,
+        install_date: None,
+        estimated_size_bytes: None,
+        uninstall_string: Some("MsiExec /x".to_string()),
+        quiet_uninstall_string: None,
+        modify_path: None,
+        install_source: None,
+        source: ApplicationSource::RegistryUninstall,
+        kind: PackageKind::Installed,
+        system_component: false,
+        observed_in_views: vec!["HKLM-64".to_string()],
+    };
+    let msix_record = ApplicationRecord {
+        id: msix.clone(),
+        name: "Example".to_string(),
+        version: None,
+        publisher: None,
+        install_location: None,
+        install_date: None,
+        estimated_size_bytes: None,
+        uninstall_string: None,
+        quiet_uninstall_string: None,
+        modify_path: None,
+        install_source: None,
+        source: ApplicationSource::PackagedApp,
+        kind: PackageKind::Installed,
+        system_component: false,
+        observed_in_views: vec![],
+    };
+    let outcomes = vec![
+        ProviderOutcome {
+            records: vec![win32_record],
+            coverage: SourceCoverage::complete("win32-uninstall"),
+        },
+        ProviderOutcome {
+            records: vec![msix_record],
+            coverage: SourceCoverage::complete("msix-appx"),
+        },
+    ];
+    let inv = merge_inventory(outcomes, &DiscoveryLimits::default());
+    assert_eq!(inv.records.len(), 1, "one logical application");
+    assert_eq!(inv.records[0].id, win32);
+    assert_eq!(
+        inv.records[0].source,
+        ApplicationSource::RegistryUninstall,
+        "the more complete record wins (canonical precedence)"
     );
+    assert_eq!(
+        inv.records[0].observed_in_views,
+        vec!["HKLM-64".to_string()],
+        "win32 provenance kept"
+    );
+    assert_eq!(inv.sources.len(), 2, "both sources report coverage");
 }
 
 #[test]
@@ -318,7 +400,7 @@ fn a3_inventory_truncation_is_exact_and_deterministic() {
 fn a3_overlong_names_are_rejected_not_truncated_and_counted() {
     let mut long = app("A", Some("Vendor"));
     long.name = "x".repeat(600);
-    long.id = ApplicationId::derive(&long.name, Some("Vendor"), "win32-uninstall");
+    long.id = ApplicationId::derive(&long.name, Some("Vendor"));
     let records = vec![app("Fine", Some("Vendor")), long];
     let inv = merge_inventory(
         vec![ProviderOutcome {
@@ -395,21 +477,17 @@ fn a3_oversized_skipped_subkeys_are_counted_into_partial_coverage() {
         inner: FakeRegistry,
     }
     impl RegistryView for SkipReportingRegistry {
-        fn subkeys(&self, key: &str) -> Vec<String> {
-            self.inner.subkeys(key)
+        fn subkeys_bounded(&self, key: &str, max: usize) -> coresight_apps::SubkeyEnumeration {
+            let mut inner = self.inner.subkeys_bounded(key, max);
+            // The simulated platform skipped two oversized key names.
+            inner.skipped_oversized = 2;
+            inner
         }
         fn get_value(&self, key: &str, name: &str) -> Option<RegistryValue> {
             self.inner.get_value(key, name)
         }
         fn key_present(&self, _key: &str) -> bool {
             true
-        }
-        fn subkeys_detailed(&self, key: &str) -> coresight_apps::SubkeyEnumeration {
-            coresight_apps::SubkeyEnumeration {
-                keys: self.inner.subkeys(key),
-                skipped_oversized: 2,
-                incomplete: false,
-            }
         }
     }
     let fake = FakeRegistry::default()
@@ -613,4 +691,249 @@ fn a5_install_location_evidence_is_the_only_confirmed_source() {
         .collect();
     assert_eq!(confirmed.len(), 1);
     assert_eq!(confirmed[0].kind, FootprintKind::InstallationDirectory);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6.1 independent-verification additions: determinism under
+// permutation, and TRUE boundedness (bounds exist where memory can grow).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn det_inventory_merge_is_byte_identical_under_every_permutation() {
+    // Same records, every relevant arrival order: the published inventory
+    // must be byte-identical (serde-rendered), including the winner of
+    // equal-completeness ties (canonical precedence — never arrival order).
+    fn outcome(
+        tag: &str,
+        version: Option<&str>,
+        uninstall: Option<&str>,
+        views: &[&str],
+    ) -> ProviderOutcome {
+        let record = ApplicationRecord {
+            id: ApplicationId::derive("Tied App", Some("Vendor")),
+            name: "Tied App".to_string(),
+            version: version.map(str::to_string),
+            publisher: Some("Vendor".to_string()),
+            install_location: None,
+            install_date: None,
+            estimated_size_bytes: None,
+            uninstall_string: uninstall.map(str::to_string),
+            quiet_uninstall_string: None,
+            modify_path: None,
+            install_source: None,
+            source: ApplicationSource::RegistryUninstall,
+            kind: PackageKind::Installed,
+            system_component: false,
+            observed_in_views: views.iter().map(|v| v.to_string()).collect(),
+        };
+        let _ = tag;
+        ProviderOutcome {
+            records: vec![record],
+            coverage: SourceCoverage::complete(tag),
+        }
+    }
+
+    // Two records with EQUAL completeness but different content: the
+    // winner must be the same record under any arrival order.
+    let a = outcome("view-a", Some("1.0"), Some("UninstallA"), &["HKLM-64"]);
+    let b = outcome("view-b", Some("2.0"), Some("UninstallB"), &["HKLM-32"]);
+    let orders: Vec<Vec<ProviderOutcome>> = vec![vec![a.clone(), b.clone()], vec![b, a]];
+
+    let rendered: Vec<String> = orders
+        .into_iter()
+        .map(|o| {
+            let inv = merge_inventory(o, &DiscoveryLimits::default());
+            serde_json::to_string(&inv).unwrap()
+        })
+        .collect();
+    assert_eq!(rendered[0], rendered[1], "arrival order must not matter");
+}
+
+#[test]
+fn det_footprint_discovery_is_identical_under_permutation() {
+    // The same app/root facts probed in different app orders (and with the
+    // prober yielding children in different orders) publish identical
+    // reports.
+    fn app(id_tag: &str) -> ApplicationRecord {
+        ApplicationRecord {
+            id: ApplicationId::derive(id_tag, Some("Vendor")),
+            name: id_tag.to_string(),
+            version: None,
+            publisher: Some("Vendor".to_string()),
+            install_location: None,
+            install_date: None,
+            estimated_size_bytes: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            modify_path: None,
+            install_source: None,
+            source: ApplicationSource::RegistryUninstall,
+            kind: PackageKind::Installed,
+            system_component: false,
+            observed_in_views: vec![],
+        }
+    }
+    let app_a = app("Alpha");
+    let app_b = app("Beta");
+    let roots = KnownRoots {
+        local_app_data: Some(PathBuf::from("C:/Users/u/AppData/Local")),
+        ..KnownRoots::default()
+    };
+    // The fake prober enumerates in insertion order; the two instances
+    // enumerate the same set in DIFFERENT orders.
+    let fs_a =
+        FakeFs::default().with_dirs("C:/Users/u/AppData/Local", &["Beta", "AlphaTool", "zebra"]);
+    let fs_b =
+        FakeFs::default().with_dirs("C:/Users/u/AppData/Local", &["zebra", "AlphaTool", "Beta"]);
+
+    let mut report_a = discover_footprints(
+        &[app_a.clone(), app_b.clone()],
+        &roots,
+        &fs_a,
+        &DiscoveryLimits::default(),
+    );
+    let mut report_b =
+        discover_footprints(&[app_b, app_a], &roots, &fs_b, &DiscoveryLimits::default());
+    let by_path = |r: &mut FootprintReport| {
+        r.candidates.sort_by(|x, y| {
+            x.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(y.path.as_os_str().as_encoded_bytes())
+        });
+        r.clone()
+    };
+    assert_eq!(by_path(&mut report_a), by_path(&mut report_b));
+}
+
+#[test]
+fn bnd_registry_topk_keeps_canonical_smallest_and_counts_exactly() {
+    // 10_000 subkeys against a 100-name bound: exactly 100 canonically-
+    // smallest names are kept and the overflow is exact — and the real
+    // contract is that the enumeration NEVER materialized all 10_000
+    // (the bound is enforced where memory would grow).
+    let names: Vec<String> = (0..10_000).map(|i| format!("key-{i:05}")).collect();
+    let view = FakeRegistry::default()
+        .with_subkeys(
+            root(UninstallView::Hklm64),
+            &names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        )
+        .with_value(
+            &key(UninstallView::Hklm64, "key-00000"),
+            "DisplayName",
+            RegistryValue::Sz("Kept App".into()),
+        );
+    let enumerator = Win32UninstallEnumerator::new(view).with_max_subkeys_per_view(100);
+    let outcome = enumerator.enumerate_outcome();
+    assert_eq!(
+        outcome.records.len(),
+        1,
+        "the canonically-first key is examined"
+    );
+    assert_eq!(outcome.records[0].name, "Kept App");
+    let coverage = outcome.coverage;
+    assert_eq!(coverage.status, SourceStatus::Partial);
+    let note = coverage.note.unwrap_or_default();
+    assert!(note.contains("9900"), "exact overflow counted: {note}");
+}
+
+#[test]
+fn bnd_registry_topk_shuffles_keep_the_same_subset() {
+    // The KEPT subset must be the canonically-smallest names regardless of
+    // enumeration order (the audit concern: sort-after-materialize let
+    // enumeration order reach which keys survive).
+    let all: Vec<String> = (0..500).map(|i| format!("k{i:04}")).collect();
+    let mut reversed = all.clone();
+    reversed.reverse();
+
+    let v1 = FakeRegistry::default().with_subkeys(
+        root(UninstallView::Hklm64),
+        &all.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    );
+    let v2 = FakeRegistry::default().with_subkeys(
+        root(UninstallView::Hklm64),
+        &reversed.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    );
+
+    let kept1 = v1.subkeys_bounded(root(UninstallView::Hklm64), 50);
+    let kept2 = v2.subkeys_bounded(root(UninstallView::Hklm64), 50);
+    assert_eq!(kept1.keys, kept2.keys);
+    assert_eq!(kept1.keys.len(), 50);
+    assert_eq!(kept1.truncated, 450);
+    assert_eq!(kept1.keys[0], "k0000");
+    assert_eq!(kept1.keys[49], "k0049");
+}
+
+#[test]
+fn bnd_prober_topk_keeps_canonical_smallest_and_counts_exactly() {
+    // Same contract for the footprint prober: bounded memory, exact
+    // overflow, canonically-smallest kept set under any enumeration order.
+    let mut names: Vec<String> = (0..5_000).map(|i| format!("dir-{i:05}")).collect();
+    names.reverse();
+    let fs = FakeFs::default().with_dirs(
+        "C:/root",
+        &names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    );
+    let listing = fs.children_bounded(Path::new("C:/root"), 25);
+    assert_eq!(listing.names.len(), 25);
+    assert_eq!(listing.overflow, 4_975);
+    assert_eq!(listing.names[0], PathBuf::from("dir-00000"));
+    assert_eq!(listing.names[24], PathBuf::from("dir-00024"));
+
+    let forward: Vec<String> = (0..5_000).map(|i| format!("dir-{i:05}")).collect();
+    let fs2 = FakeFs::default().with_dirs(
+        "C:/root",
+        &forward.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    );
+    let listing2 = fs2.children_bounded(Path::new("C:/root"), 25);
+    assert_eq!(listing, listing2, "enumeration order must not matter");
+}
+
+#[test]
+fn bnd_footprint_admission_bounds_working_set_deterministically() {
+    // Far more candidates than max_records: the published set is the
+    // canonically-first max_records distinct keys, overflow is exact, and
+    // admission (not a final truncate) is what bounds the working set.
+    fn app(name: &str) -> ApplicationRecord {
+        ApplicationRecord {
+            id: ApplicationId::derive(name, Some("Vendor")),
+            name: name.to_string(),
+            version: None,
+            publisher: Some("Vendor".to_string()),
+            install_location: None,
+            install_date: None,
+            estimated_size_bytes: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            modify_path: None,
+            install_source: None,
+            source: ApplicationSource::RegistryUninstall,
+            kind: PackageKind::Installed,
+            system_component: false,
+            observed_in_views: vec![],
+        }
+    }
+    let apps: Vec<ApplicationRecord> = (0..50).map(|i| app(&format!("App{i:03}"))).collect();
+    let dirs: Vec<String> = (0..50).map(|i| format!("App{i:03}")).collect();
+    let fs = FakeFs::default().with_dirs(
+        "C:/Users/u/AppData/Local",
+        &dirs.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    );
+    let roots = KnownRoots {
+        local_app_data: Some(PathBuf::from("C:/Users/u/AppData/Local")),
+        ..KnownRoots::default()
+    };
+    let limits = DiscoveryLimits {
+        max_records: 10,
+        ..DiscoveryLimits::default()
+    };
+    let report = discover_footprints(&apps, &roots, &fs, &limits);
+    assert_eq!(report.candidates.len(), 10);
+    assert_eq!(report.candidates_truncated, 40);
+    let first_path = report.candidates[0].path.as_os_str().as_encoded_bytes();
+    let last_path = report.candidates[9].path.as_os_str().as_encoded_bytes();
+    assert!(
+        first_path <= last_path,
+        "published set is canonically ordered"
+    );
 }

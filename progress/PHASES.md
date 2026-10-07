@@ -93,6 +93,15 @@ current-state claims. Current-state documents use CoreSight.
     get child-link semantics, link-target/metadata read errors typed.
     Linux mount paths decoded byte-exactly (lossless). Status: see
     `progress/CURRENT_PHASE.md` (macOS runtime observation awaits CI).
+  - [x] **PHASE 6.1 (verification) — independent audit & hardening.**
+    P0 identity unification (`ObjectIdentity`: full wide identity through
+    pipeline → relationships → history, narrow/legacy never fabricated),
+    application-identity rule made explicit (id = merge key; source is
+    provenance), canonical merge/footprint precedence (no arrival-order
+    ties), true boundedness (streaming bounded PathProber + registry
+    enumeration, bounded inventory/footprint admission), lossless
+    classifier path handling, `PRAGMA integrity_check` on store open,
+    docs reconciled. Status: `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.

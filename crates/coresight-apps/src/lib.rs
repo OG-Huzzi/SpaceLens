@@ -42,8 +42,12 @@ pub mod win32_registry {
     }
 
     impl RegistryView for Win32RegistryView {
-        fn subkeys(&self, _key: &str) -> Vec<String> {
-            Vec::new()
+        fn subkeys_bounded(
+            &self,
+            _key: &str,
+            _max: usize,
+        ) -> crate::windows_discovery::SubkeyEnumeration {
+            crate::windows_discovery::SubkeyEnumeration::default()
         }
         fn get_value(&self, _key: &str, _name: &str) -> Option<RegistryValue> {
             None
@@ -72,12 +76,12 @@ pub use domain::{
 pub use evidence::{AssociationScope, Confidence, EvidenceKind, FootprintEvidence};
 pub use explain::{explain, Explanation};
 pub use footprint::{
-    discover_footprints, normalize_name, FootprintCandidate, FootprintKind, FootprintReport,
-    KnownRoots, PathProber,
+    discover_footprints, normalize_name, offer_path, BoundedListing, FootprintCandidate,
+    FootprintKind, FootprintReport, KnownRoots, PathProber,
 };
 pub use relationships::{AppAssociation, AssociationKind, OwnershipStrength};
 pub use windows_discovery::{
-    decode_registry_string, split_hive_path, RegistryHive, RegistryValue, RegistryView,
+    decode_registry_string, offer_name, split_hive_path, RegistryHive, RegistryValue, RegistryView,
     SubkeyEnumeration, UninstallView, Win32UninstallEnumerator, WindowsAppxProvider,
     DEFAULT_MAX_SUBKEYS_PER_VIEW,
 };

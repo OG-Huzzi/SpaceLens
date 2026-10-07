@@ -253,15 +253,39 @@ pub struct HistoryStore {
 
 impl HistoryStore {
     /// Open (or create) the store at `path`, applying pending migrations
-    /// (core v1 → history v2 → history v3, each atomic with its version
-    /// bump) and recovering stale `RUNNING` runs as `FAILED` (Objective
-    /// 19 — deterministic crash recovery).
+    /// (core v1 → history v2 → …, each atomic with its version bump) and
+    /// recovering stale `RUNNING` runs as `FAILED` (Objective 19 —
+    /// deterministic crash recovery).
+    ///
+    /// `PRAGMA integrity_check` runs FIRST: a corrupt store is refused
+    /// ([`StoreError::Corrupt`]) before anything reads or migrates it.
     ///
     /// A store written by a NEWER build is refused
     /// ([`StoreError::SchemaTooNew`]) rather than partially interpreted:
     /// forward-only migrations never run backwards.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let mut conn = coresight_core::db::open(path)?;
+        // docs/DATABASE.md: integrity is checked on open BEFORE anything
+        // reads or migrates the file. A corrupt store is refused as a
+        // typed error — never partially interpreted, never "recovered" by
+        // guessing. (The pre-migration file backup and the explicit
+        // quarantine flow remain PLANNED — documented in docs/DATABASE.md.)
+        let problems: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        if problems.iter().any(|p| p != "ok") {
+            return Err(StoreError::Corrupt {
+                table: "store",
+                column: "integrity_check",
+                run_id: None,
+                detail: format!(
+                    "database integrity check failed on open: {}",
+                    problems.join("; ")
+                ),
+            });
+        }
         let current = coresight_core::db::schema_version(&conn)?;
         if current > HISTORY_SCHEMA_VERSION {
             return Err(StoreError::SchemaTooNew {
@@ -983,11 +1007,11 @@ impl<K: Ord, V> std::ops::Deref for BTreeMap2<K, V> {
 type MemberRows = Vec<(String, Option<i64>, Option<i64>, Option<i64>)>;
 
 /// The proven wide-identity high bits for a relationship member path,
-/// taken from the run's snapshot (the Phase 4 `ObjectRef` publishes the
-/// pair only — the full identity lives in the observation rows). The
-/// snapshot is path-ordered (a `Snapshot` invariant), so this is a
-/// bounded binary search per member, and `None` is returned whenever the
-/// member was not observed in the snapshot — never fabricated.
+/// taken from the run's snapshot (the relationship member row persists the
+/// full identity, including the wide high bits where the observation
+/// proved them). The snapshot is path-ordered (a `Snapshot` invariant), so
+/// this is a bounded binary search per member, and `None` is returned
+/// whenever the member was not observed in the snapshot — never fabricated.
 fn member_file_id_hi(snapshot: &Snapshot, member_path: &Path) -> Option<i64> {
     let bytes = member_path.as_os_str().as_encoded_bytes();
     snapshot
@@ -1006,9 +1030,42 @@ fn reconstruct_relationship_report(
     relationships_truncated: u64,
 ) -> Result<RelationshipReport, String> {
     use coresight_identity::{
-        ContentRef, MemberRef, ObjectRef, Relationship, RelationshipKind, RelationshipStats,
+        ContentRef, MemberRef, ObjectIdentity, Relationship, RelationshipKind, RelationshipStats,
         StorageAccounting, Undetermined,
     };
+    // Parse one persisted alias id's object fragment back into the full
+    // identity. The fragment is engine-generated ("{volume:016x}-
+    // {file_id:016x}" or, for wide identities, "…-hi:{hi:016x}"); anything
+    // else is corruption and a typed error — never a silently lost object.
+    fn parse_alias_object(id: &str) -> Result<ObjectIdentity, String> {
+        let fragment = id
+            .strip_prefix("alias-")
+            .ok_or_else(|| format!("unknown alias id shape {id:?}"))?;
+        let (volume_hex, rest) = fragment
+            .split_once('-')
+            .ok_or_else(|| format!("unknown alias id shape {id:?}"))?;
+        let (file_hex, hi_hex) = match rest.split_once("-hi:") {
+            Some((f, hi)) => (f, Some(hi)),
+            None => (rest, None),
+        };
+        let volume = u64::from_str_radix(volume_hex, 16)
+            .map_err(|_| format!("malformed alias id volume in {id:?}"))?;
+        let file_id = u64::from_str_radix(file_hex, 16)
+            .map_err(|_| format!("malformed alias id file id in {id:?}"))?;
+        let file_id_hi = match hi_hex {
+            Some(h) => Some(
+                u64::from_str_radix(h, 16)
+                    .map_err(|_| format!("malformed alias id high bits in {id:?}"))?,
+            ),
+            None => None,
+        };
+        Ok(ObjectIdentity {
+            volume,
+            file_id,
+            file_id_hi,
+        })
+    }
+
     let mut relationships = Vec::new();
     for row in &rows {
         // Strict decode: an unrecognized persisted kind/accounting is
@@ -1030,17 +1087,23 @@ fn reconstruct_relationship_report(
             return Err(format!("unknown storage accounting {:?}", row.accounting));
         };
         let mut rel_members = Vec::new();
-        for (path, device, inode, _file_id_hi) in members.get(&row.id).into_iter().flatten() {
+        for (path, device, inode, file_id_hi) in members.get(&row.id).into_iter().flatten() {
             let decoded = crate::path_encoding::decode(path)
                 .map_err(|e| format!("malformed member path: {e}"))?
                 .ok_or_else(|| "undecodable member path".to_string())?;
+            // Restore EXACTLY the identity that was persisted: the wide
+            // high bits are part of the member row (migration v4) and are
+            // never dropped on reconstruction. A row without high bits
+            // stays explicitly narrow (`None`) — no fabricated widening.
+            let object = device.zip(*inode).map(|(d, i)| ObjectIdentity {
+                volume: d as u64,
+                file_id: i as u64,
+                file_id_hi: file_id_hi.map(|h| h as u64),
+            });
             rel_members.push(MemberRef {
                 entry_id: 0,
                 path: decoded,
-                object: device.zip(*inode).map(|(d, i)| ObjectRef {
-                    volume: d as u64,
-                    file_id: i as u64,
-                }),
+                object,
             });
         }
         rel_members.sort_by(|a, b| {
@@ -1050,10 +1113,31 @@ fn reconstruct_relationship_report(
                 .cmp(b.path.as_os_str().as_encoded_bytes())
         });
         let distinct = if rel_members.iter().all(|m| m.object.is_some()) {
-            let mut ids: Vec<ObjectRef> = rel_members.iter().filter_map(|m| m.object).collect();
-            ids.sort();
-            ids.dedup();
-            Some(ids.len() as u64)
+            // Exact only when every member identity is proven AND no low
+            // (volume, file id) pair appears under mixed high-bit
+            // provability — the same honesty rule the derivation applies.
+            let ids: Vec<ObjectIdentity> = rel_members.iter().filter_map(|m| m.object).collect();
+            let mut unique: std::collections::BTreeSet<ObjectIdentity> =
+                std::collections::BTreeSet::new();
+            let mut low_pairs: std::collections::BTreeMap<
+                (u64, u64),
+                std::collections::BTreeSet<Option<u64>>,
+            > = std::collections::BTreeMap::new();
+            for id in &ids {
+                unique.insert(*id);
+                low_pairs
+                    .entry((id.volume, id.file_id))
+                    .or_default()
+                    .insert(id.file_id_hi);
+            }
+            if low_pairs
+                .values()
+                .any(|prov| prov.len() > 1 && prov.contains(&None))
+            {
+                None
+            } else {
+                Some(unique.len() as u64)
+            }
         } else {
             None
         };
@@ -1084,16 +1168,7 @@ fn reconstruct_relationship_report(
                 RelationshipKind::HardLinkAlias => None,
             },
             object: match kind {
-                RelationshipKind::HardLinkAlias => row
-                    .id
-                    .trim_start_matches("alias-")
-                    .split_once('-')
-                    .and_then(|(v, f)| {
-                        Some(ObjectRef {
-                            volume: u64::from_str_radix(v, 16).ok()?,
-                            file_id: u64::from_str_radix(f, 16).ok()?,
-                        })
-                    }),
+                RelationshipKind::HardLinkAlias => Some(parse_alias_object(&row.id)?),
                 RelationshipKind::ContentDuplicate => None,
             },
             alias_sets: Vec::new(),

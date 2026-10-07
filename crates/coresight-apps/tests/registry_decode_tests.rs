@@ -134,7 +134,11 @@ fn registry_view_has_default_on_every_platform() {
     }
     let view: Win32RegistryView = via_default();
     assert!(view
-        .subkeys("HKLM\\SOFTWARE\\Definitely\\Not\\A\\Real\\Key\\CoreSightTest")
+        .subkeys_bounded(
+            "HKLM\\SOFTWARE\\Definitely\\Not\\A\\Real\\Key\\CoreSightTest",
+            4096
+        )
+        .keys
         .is_empty());
     assert!(view
         .get_value(
@@ -148,7 +152,7 @@ fn registry_view_has_default_on_every_platform() {
 #[test]
 fn non_windows_view_never_fabricates_values() {
     let view = Win32RegistryView::new();
-    assert!(view.subkeys("HKLM\\SOFTWARE").is_empty());
+    assert!(view.subkeys_bounded("HKLM\\SOFTWARE", 4096).keys.is_empty());
     assert!(view.get_value("HKCU\\SOFTWARE", "Anything").is_none());
 }
 

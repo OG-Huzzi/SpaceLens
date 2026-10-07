@@ -52,7 +52,8 @@ pub mod policy;
 pub mod relationships;
 
 pub use duplicate::{
-    DuplicateGroup, DuplicateMember, MemberOrder, StorageAccounting, DUPLICATE_GROUP_DETAIL_CAP,
+    DuplicateGroup, DuplicateMember, MemberOrder, ObjectIdentity, StorageAccounting,
+    DUPLICATE_GROUP_DETAIL_CAP,
 };
 pub use eligibility::{Eligibility, EligibilityStats};
 pub use error::{HashError, HashFailure, HashFailureKind};
@@ -67,7 +68,7 @@ pub use policy::{
     DEFAULT_MAX_TRACKED_SIZE_GROUPS,
 };
 pub use relationships::{
-    derive_relationships, AliasSet, ContentRef, Evidence, MemberRef, ObjectRef, Relationship,
+    derive_relationships, AliasSet, ContentRef, Evidence, MemberRef, Relationship,
     RelationshipIndex, RelationshipKind, RelationshipOptions, RelationshipReport,
     RelationshipStats, RelationshipStatus, Undetermined, UndeterminedDetail,
 };

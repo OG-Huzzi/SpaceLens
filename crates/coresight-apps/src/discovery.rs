@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    ApplicationRecord, DiscoveryLimits, Inventory, PackageKind, SourceCoverage, SourceStatus,
+    ApplicationRecord, ApplicationSource, DiscoveryLimits, Inventory, PackageKind, SourceCoverage,
+    SourceStatus,
 };
 
 /// A source of application records.
@@ -88,55 +89,160 @@ pub struct ProviderOutcome {
     pub coverage: SourceCoverage,
 }
 
-/// Merge provider outcomes into a deterministic [`Inventory`]:
-/// duplicates collapse by (normalized name, normalized publisher) with
-/// provenance union; ordering is canonical; limits apply with exact
-/// truncation/rejection counting.
+/// Canonical precedence between two records competing for one logical
+/// application: the more complete metadata wins; exact completeness ties
+/// break on a fixed field-by-field content order. Provider call order is
+/// NEVER a tie-breaker — both arguments produce the same winner under any
+/// arrival permutation.
+/// Canonical content rank of a record: completeness first, then a fixed
+/// field-by-field order (see [`prefer_record`]).
+type RecordRank<'a> = (
+    usize,
+    Option<&'a str>,
+    Option<&'a [u8]>,
+    Option<&'a str>,
+    Option<u64>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    ApplicationSource,
+    PackageKind,
+    bool,
+);
+
+fn record_rank(r: &ApplicationRecord) -> RecordRank<'_> {
+    (
+        completeness(r),
+        r.version.as_deref(),
+        r.install_location
+            .as_ref()
+            .map(|p| p.as_os_str().as_encoded_bytes()),
+        r.install_date.as_deref(),
+        r.estimated_size_bytes,
+        r.uninstall_string.as_deref(),
+        r.quiet_uninstall_string.as_deref(),
+        r.modify_path.as_deref(),
+        r.install_source.as_deref(),
+        r.source.clone(),
+        r.kind,
+        r.system_component,
+    )
+}
+
+/// `true` when `new` should replace `existing` as the winning record of a
+/// merged logical application (canonical precedence; see [`record_rank`]).
+fn prefer_record(new: &ApplicationRecord, existing: &ApplicationRecord) -> bool {
+    record_rank(new) > record_rank(existing)
+}
+
+/// The logical-application merge key: normalized (name, publisher) — the
+/// same rule [`crate::domain::ApplicationId`] derives the id from, so the
+/// id and the merge key cannot disagree.
+type MergeKey = (String, String);
+
+fn merge_key(rec: &ApplicationRecord) -> MergeKey {
+    (
+        rec.name.trim().to_lowercase(),
+        rec.publisher.as_deref().unwrap_or("").trim().to_lowercase(),
+    )
+}
+
+/// One admitted merge slot: the winning record plus the exact number of
+/// input records absorbed under the key (for exact truncation accounting
+/// when the slot is evicted).
+struct Admitted {
+    record: ApplicationRecord,
+    absorbed: u64,
+}
+
+/// Merge provider outcomes into a deterministic, bounded [`Inventory`].
+///
+/// Semantics (explicit): records whose normalized (name, publisher) agree
+/// are ONE logical application — the winning record is chosen by
+/// [`record_rank`] and provenance (`observed_in_views`) is unioned.
+///
+/// Boundedness: working memory is bounded by ADMISSION, not by a final
+/// truncate — at most `max_records` logical applications are held. When a
+/// new key arrives at capacity, the canonically-LARGEST held key is
+/// evicted (its absorbed records are counted into
+/// [`Inventory::records_truncated`]); a key larger than everything held is
+/// refused. Keys never change, so admission is call-order independent: the
+/// published set is always the canonically-first `max_records` logical
+/// applications. Ordering within the published set is canonical.
 pub fn merge_inventory(outputs: Vec<ProviderOutcome>, limits: &DiscoveryLimits) -> Inventory {
     let mut sources: Vec<SourceCoverage> = Vec::new();
-    // Merge by (name, publisher) — case-insensitive, whitespace-trimmed.
-    let mut by_key: BTreeMap<(String, String), ApplicationRecord> = BTreeMap::new();
+    let mut by_key: BTreeMap<MergeKey, Admitted> = BTreeMap::new();
     let mut rejected = 0u64;
+    let mut truncated = 0u64;
     for outcome in outputs {
         sources.push(outcome.coverage);
         for rec in outcome.records {
             // A name longer than the declared bound is REJECTED (never
-            // truncated: a truncated name would derive a different
-            // ApplicationId), and the rejection is counted exactly.
+            // truncated: its id would change), and the rejection is counted
+            // exactly.
             if rec.name.len() > limits.max_inventory_name_len {
                 rejected += 1;
                 continue;
             }
-            let key = (
-                rec.name.trim().to_lowercase(),
-                rec.publisher.as_deref().unwrap_or("").trim().to_lowercase(),
-            );
+            let key = merge_key(&rec);
             match by_key.get_mut(&key) {
-                Some(existing) => {
-                    // Prefer the record with the most complete metadata.
-                    if completeness(&rec) > completeness(existing) {
-                        let mut merged_views = existing.observed_in_views.clone();
+                Some(slot) => {
+                    slot.absorbed += 1;
+                    if prefer_record(&rec, &slot.record) {
+                        let mut merged_views = slot.record.observed_in_views.clone();
                         merged_views.extend(rec.observed_in_views.iter().cloned());
-                        let mut replacement = rec.clone();
+                        merged_views.sort();
+                        merged_views.dedup();
+                        let mut replacement = rec;
                         replacement.observed_in_views = merged_views;
-                        replacement.observed_in_views.sort();
-                        replacement.observed_in_views.dedup();
-                        *existing = replacement;
+                        slot.record = replacement;
                     } else {
-                        existing
+                        slot.record
                             .observed_in_views
                             .extend(rec.observed_in_views.iter().cloned());
-                        existing.observed_in_views.sort();
-                        existing.observed_in_views.dedup();
+                        slot.record.observed_in_views.sort();
+                        slot.record.observed_in_views.dedup();
                     }
                 }
                 None => {
-                    by_key.insert(key, rec);
+                    if by_key.len() < limits.max_records {
+                        by_key.insert(
+                            key,
+                            Admitted {
+                                record: rec,
+                                absorbed: 1,
+                            },
+                        );
+                    } else {
+                        // At capacity: admit only when the new key is
+                        // canonically smaller than the largest held key
+                        // (the published set stays the canonically-first
+                        // `max_records` logical applications). Otherwise
+                        // the record is counted as truncated.
+                        let largest = by_key.keys().next_back().cloned();
+                        match largest {
+                            Some(largest) if key < largest => {
+                                if let Some(evicted) = by_key.remove(&largest) {
+                                    truncated += evicted.absorbed;
+                                }
+                                by_key.insert(
+                                    key,
+                                    Admitted {
+                                        record: rec,
+                                        absorbed: 1,
+                                    },
+                                );
+                            }
+                            _ => truncated += 1,
+                        }
+                    }
                 }
             }
         }
     }
-    let mut records: Vec<ApplicationRecord> = by_key.into_values().collect();
+    let mut records: Vec<ApplicationRecord> =
+        by_key.into_values().map(|slot| slot.record).collect();
     records.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -149,13 +255,6 @@ pub fn merge_inventory(outputs: Vec<ProviderOutcome>, limits: &DiscoveryLimits) 
             )
             .then(a.id.0.cmp(&b.id.0))
     });
-    let truncated = if records.len() > limits.max_records {
-        let overflow = (records.len() - limits.max_records) as u64;
-        records.truncate(limits.max_records);
-        overflow
-    } else {
-        0
-    };
     // Canonical source order regardless of provider call order.
     sources.sort_by(|a, b| {
         a.source

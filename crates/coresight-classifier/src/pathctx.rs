@@ -485,8 +485,25 @@ impl PathContext {
 
 /// Analyse a path in a host-independent way. Never touches the filesystem.
 pub fn analyze(path: &Path, platform: Platform) -> PathContext {
-    let Some(raw) = path.to_str() else {
-        return PathContext { location: None };
+    // Matching text for the path. Valid-UTF-8 paths borrow directly (the
+    // hot path, no allocation). Non-UTF-8 paths are rendered lossily as a
+    // WHOLE string: U+FFFD replaces only the invalid bytes, and since a
+    // UTF-8 continuation byte can never be `/` or `\`, component structure
+    // is preserved exactly — the valid components still match their
+    // location rules instead of the whole path degrading to
+    // `location: None` (Phase 6.1 losslessness repair). The lossless path
+    // always stays in the caller's `FsEntry`.
+    let borrowed;
+    let owned;
+    let raw: &str = match path.to_str() {
+        Some(s) => {
+            borrowed = s;
+            borrowed
+        }
+        None => {
+            owned = String::from_utf8_lossy(path.as_os_str().as_encoded_bytes()).into_owned();
+            &owned
+        }
     };
 
     // Fixed-size buffer: no allocation, no dependence on path depth.

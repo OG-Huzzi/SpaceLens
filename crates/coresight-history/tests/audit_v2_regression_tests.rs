@@ -585,7 +585,7 @@ CREATE INDEX IF NOT EXISTS idx_rel_members_path ON relationship_members(path);
 #[test]
 fn a4_persisted_relationship_status_survives_reload() {
     use coresight_identity::{
-        MemberRef, ObjectRef, Relationship, RelationshipKind, RelationshipReport,
+        MemberRef, ObjectIdentity, Relationship, RelationshipKind, RelationshipReport,
         RelationshipStats, StorageAccounting, Undetermined,
     };
     // A report whose status is CompletedWithLimits must reload as
@@ -602,17 +602,19 @@ fn a4_persisted_relationship_status_survives_reload() {
                 MemberRef {
                     entry_id: 0,
                     path: PathBuf::from("/scope-a/a.bin"),
-                    object: Some(ObjectRef {
+                    object: Some(ObjectIdentity {
                         volume: 1,
                         file_id: 1,
+                        file_id_hi: None,
                     }),
                 },
                 MemberRef {
                     entry_id: 0,
                     path: PathBuf::from("/scope-a/b.bin"),
-                    object: Some(ObjectRef {
+                    object: Some(ObjectIdentity {
                         volume: 1,
                         file_id: 2,
+                        file_id_hi: None,
                     }),
                 },
             ],

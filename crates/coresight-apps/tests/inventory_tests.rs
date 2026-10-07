@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use coresight_apps::{
-    merge_inventory, ApplicationProvider, DiscoveryLimits, PackageKind, ProviderError,
-    ProviderOutcome, RegistryValue, RegistryView, SourceCoverage, UninstallView,
+    merge_inventory, offer_name, ApplicationProvider, DiscoveryLimits, PackageKind, ProviderError,
+    ProviderOutcome, RegistryValue, RegistryView, SourceCoverage, SubkeyEnumeration, UninstallView,
     Win32UninstallEnumerator, WindowsAppxProvider,
 };
 
@@ -32,8 +32,18 @@ impl FakeRegistry {
 }
 
 impl RegistryView for FakeRegistry {
-    fn subkeys(&self, key: &str) -> Vec<String> {
-        self.keys.get(key).cloned().unwrap_or_default()
+    fn subkeys_bounded(&self, key: &str, max: usize) -> SubkeyEnumeration {
+        let mut set = std::collections::BTreeSet::new();
+        let mut truncated = 0u64;
+        for name in self.keys.get(key).cloned().unwrap_or_default() {
+            offer_name(&mut set, max, name, &mut truncated);
+        }
+        SubkeyEnumeration {
+            keys: set.into_iter().collect(),
+            skipped_oversized: 0,
+            truncated,
+            incomplete: false,
+        }
     }
     fn get_value(&self, key: &str, name: &str) -> Option<RegistryValue> {
         self.values

@@ -909,8 +909,22 @@ fn hash_file(
         // describes the object the digest was actually computed from
         // (hard-link aliases share it — the storage accounting relies on
         // that), falling back to the observation identity when the handle
-        // could not prove one.
-        let object_id = handle_object_id.or(member.observed_object_id);
+        // could not prove one. The wide identifier's high bits are
+        // published WITH their own provenance — never mixed: a handle-proven
+        // low pair publishes the handle's high bits; the observation
+        // fallback publishes the observation's high bits. Nothing is
+        // narrowed, and an unproven high side stays `None` (never
+        // fabricated).
+        let (low_pair, high_bits) = if handle_object_id.is_some() {
+            (handle_object_id, identity.file_id_hi)
+        } else {
+            (member.observed_object_id, member.observed_file_id_hi)
+        };
+        let object_id = low_pair.map(|(volume, file_id)| crate::duplicate::ObjectIdentity {
+            volume,
+            file_id,
+            file_id_hi: high_bits,
+        });
         outcome = Ok((
             DuplicateMember {
                 entry_id: member.entry_id,

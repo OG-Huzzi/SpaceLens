@@ -128,27 +128,25 @@ pub enum Evidence {
     ObjectIdentityEqual,
 }
 
-/// A filesystem object reference as published by the pipeline
-/// (handle-proven `(volume, file id)`; the wide-id high bits participate
-/// in identity *comparison* upstream but members publish the pair).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ObjectRef {
-    pub volume: u64,
-    pub file_id: u64,
-}
+/// A filesystem object reference as published by the pipeline. This is the
+/// pipeline's canonical [`ObjectIdentity`] — the FULL proven identity
+/// `(volume, file id, wide high bits)`; it is never narrowed to 64 bits,
+/// and identities that differ only in high-bit provability stay distinct
+/// (a group mixing them degrades its accounting honestly instead of
+/// fabricating distinctness).
+pub use crate::duplicate::ObjectIdentity;
 
-impl ObjectRef {
-    fn from_member_id(id: (u64, u64)) -> Self {
-        ObjectRef {
-            volume: id.0,
-            file_id: id.1,
+impl ObjectIdentity {
+    /// Deterministic relationship-id fragment for this object. The wide
+    /// high bits participate — `(1,2)` and `(1,2,hi=3)` and `(1,2,hi=4)`
+    /// produce three distinct fragments, so relationship ids can never
+    /// collide because high bits were discarded. Narrow identities keep
+    /// the historical two-part fragment (stable ids for the common case).
+    pub(crate) fn id_fragment(self) -> String {
+        match self.file_id_hi {
+            Some(hi) => format!("{:016x}-{:016x}-hi:{:016x}", self.volume, self.file_id, hi),
+            None => format!("{:016x}-{:016x}", self.volume, self.file_id),
         }
-    }
-
-    /// Deterministic relationship-id fragment for this object.
-    fn id_fragment(&self) -> String {
-        format!("{:016x}-{:016x}", self.volume, self.file_id)
     }
 }
 
@@ -162,7 +160,7 @@ pub struct MemberRef {
     pub path: PathBuf,
     /// Handle-proven object identity where available; `None` = unprovable
     /// on this platform/volume (accounting degrades, never fabricated).
-    pub object: Option<ObjectRef>,
+    pub object: Option<ObjectIdentity>,
 }
 
 /// An alias set inside a content-duplicate relationship: one filesystem
@@ -170,7 +168,7 @@ pub struct MemberRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AliasSet {
-    pub object: ObjectRef,
+    pub object: ObjectIdentity,
     /// Paths referring to this object, path-byte ordered. Derived from the
     /// group's *reported* member detail (see [`Relationship::detail_truncated`]).
     pub paths: Vec<PathBuf>,
@@ -205,7 +203,7 @@ pub struct Relationship {
     pub content: Option<ContentRef>,
     /// Object identity — present exactly for
     /// [`RelationshipKind::HardLinkAlias`].
-    pub object: Option<ObjectRef>,
+    pub object: Option<ObjectIdentity>,
     /// Alias sets within a content duplicate: proven objects reached
     /// through ≥2 member paths. Empty for pure-alias relationships (the
     /// whole relationship is one alias set).
@@ -312,32 +310,46 @@ pub struct RelationshipReport {
 }
 
 /// Partition one group's members by proven object identity.
-/// Proven members group under their `ObjectRef`; unproven members are
-/// counted (their distinctness is unknowable, never assumed).
+/// Proven members group under their [`ObjectIdentity`]; unproven members
+/// are counted (their distinctness is unknowable, never assumed). The
+/// third element reports whether any low `(volume, file id)` pair appears
+/// under more than one full identity (mixed high-bit provability) — such
+/// a group's distinct-object count is NOT provable.
 fn partition_by_object(
     group: &DuplicateGroup,
-) -> (BTreeMap<ObjectRef, Vec<&DuplicateMember>>, u64) {
-    let mut by_object: BTreeMap<ObjectRef, Vec<&DuplicateMember>> = BTreeMap::new();
+) -> (BTreeMap<ObjectIdentity, Vec<&DuplicateMember>>, u64, bool) {
+    let mut by_object: BTreeMap<ObjectIdentity, Vec<&DuplicateMember>> = BTreeMap::new();
     let mut unproven = 0u64;
     for member in &group.members {
         match member.object_id {
             Some(id) => {
-                by_object
-                    .entry(ObjectRef::from_member_id(id))
-                    .or_default()
-                    .push(member);
+                by_object.entry(id).or_default().push(member);
             }
             None => unproven += 1,
         }
     }
-    (by_object, unproven)
+    let mut low_pairs: BTreeMap<(u64, u64), std::collections::BTreeSet<Option<u64>>> =
+        BTreeMap::new();
+    for object in by_object.keys() {
+        low_pairs
+            .entry((object.volume, object.file_id))
+            .or_default()
+            .insert(object.file_id_hi);
+    }
+    // Mixed high-bit provability on one low pair (one member narrow, one
+    // wide) makes distinctness unknowable; two members that both proved
+    // different high bits are provably distinct.
+    let ambiguous = low_pairs
+        .values()
+        .any(|prov| prov.len() > 1 && prov.contains(&None));
+    (by_object, unproven, ambiguous)
 }
 
 fn member_ref(member: &DuplicateMember) -> MemberRef {
     MemberRef {
         entry_id: member.entry_id,
         path: member.path.clone(),
-        object: member.object_id.map(ObjectRef::from_member_id),
+        object: member.object_id,
     }
 }
 
@@ -385,10 +397,13 @@ pub fn derive_relationships(
         if !run_completed {
             break;
         }
-        let (by_object, unproven) = partition_by_object(group);
+        let (by_object, unproven, ambiguous) = partition_by_object(group);
         let proven_objects = by_object.len() as u64;
-        let distinct_objects = if unproven > 0 {
-            None // distinctness unknowable while any identity is unproven
+        let distinct_objects = if unproven > 0 || ambiguous {
+            // Distinctness unknowable while any identity is unproven, or
+            // when the same low (volume, file id) pair appears under mixed
+            // high-bit provability — never a fabricated count.
+            None
         } else {
             Some(proven_objects)
         };
@@ -591,9 +606,10 @@ pub struct RelationshipIndex {
     relationships: Vec<Relationship>,
     /// path → relationship positions (BTreeMap: deterministic iteration).
     by_path: BTreeMap<PathBuf, Vec<usize>>,
-    /// (volume, file id) → positions of relationships whose members or
-    /// alias sets include that object.
-    by_object: BTreeMap<(u64, u64), Vec<usize>>,
+    /// Object identity → positions of relationships whose members or
+    /// alias sets include that object (full wide identity — never
+    /// narrowed to the low pair).
+    by_object: BTreeMap<ObjectIdentity, Vec<usize>>,
     /// content digest → positions of content-duplicate relationships.
     by_content: BTreeMap<ContentHash, Vec<usize>>,
 }
@@ -602,7 +618,7 @@ impl RelationshipIndex {
     /// Build the index. Positions refer to the report's canonical order.
     pub fn build(report: &RelationshipReport) -> Self {
         let mut by_path: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
-        let mut by_object: BTreeMap<(u64, u64), Vec<usize>> = BTreeMap::new();
+        let mut by_object: BTreeMap<ObjectIdentity, Vec<usize>> = BTreeMap::new();
         let mut by_content: BTreeMap<ContentHash, Vec<usize>> = BTreeMap::new();
         for (position, relationship) in report.relationships.iter().enumerate() {
             for member in &relationship.members {
@@ -611,17 +627,11 @@ impl RelationshipIndex {
                     .or_default()
                     .push(position);
                 if let Some(object) = member.object {
-                    by_object
-                        .entry((object.volume, object.file_id))
-                        .or_default()
-                        .push(position);
+                    by_object.entry(object).or_default().push(position);
                 }
             }
             for set in &relationship.alias_sets {
-                by_object
-                    .entry((set.object.volume, set.object.file_id))
-                    .or_default()
-                    .push(position);
+                by_object.entry(set.object).or_default().push(position);
             }
             if let Some(content) = &relationship.content {
                 if let Ok(bytes) = hex_to_32(&content.sha256_hex) {
@@ -653,10 +663,12 @@ impl RelationshipIndex {
         }
     }
 
-    /// Relationships involving this filesystem object (as a member or via
-    /// an alias set) — each relationship at most once, canonical order.
-    pub fn relationships_for_object(&self, volume: u64, file_id: u64) -> Vec<&Relationship> {
-        match self.by_object.get(&(volume, file_id)) {
+    /// Relationships involving this exact filesystem object (as a member
+    /// or via an alias set) — each relationship at most once, canonical
+    /// order. The FULL identity participates: a narrow identity never
+    /// matches a wide one (different provability, different object claim).
+    pub fn relationships_for_object(&self, object: ObjectIdentity) -> Vec<&Relationship> {
+        match self.by_object.get(&object) {
             // A relationship can reference the object through several
             // members and its alias set; positions are already in
             // ascending order, so dedup keeps the first occurrence of each.
@@ -722,7 +734,7 @@ mod tests {
             entry_id: id,
             path: PathBuf::from(path),
             size: 100,
-            object_id: object,
+            object_id: object.map(|(d, i)| ObjectIdentity::narrow(d, i)),
         }
     }
 
@@ -850,9 +862,10 @@ mod tests {
         assert_eq!(alias.kind, RelationshipKind::HardLinkAlias);
         assert_eq!(
             alias.object,
-            Some(ObjectRef {
+            Some(ObjectIdentity {
                 volume: 1,
-                file_id: 7
+                file_id: 7,
+                file_id_hi: None
             })
         );
         assert_eq!(alias.member_count, 2);
@@ -967,6 +980,183 @@ mod tests {
         assert_eq!(
             rel.stats.relationships + rel.relationships_truncated,
             full.stats.relationships
+        );
+    }
+
+    #[test]
+    fn wide_high_bits_participate_in_relationship_identity() {
+        // A = (1, 2, hi=3) and B = (1, 2, hi=4) share the low pair but are
+        // DISTINCT objects on a wide-identity volume: they must never
+        // collapse into one alias relationship or one distinct-object
+        // count (the historical 64-bit narrowing would have merged them).
+        let r = report(
+            DuplicateStatus::Completed,
+            vec![DuplicateGroup::from_members(
+                ContentHash::from_bytes(b"wide"),
+                100,
+                vec![
+                    DuplicateMember {
+                        entry_id: 1,
+                        path: PathBuf::from("/a"),
+                        size: 100,
+                        object_id: Some(ObjectIdentity {
+                            volume: 1,
+                            file_id: 2,
+                            file_id_hi: Some(3),
+                        }),
+                    },
+                    DuplicateMember {
+                        entry_id: 2,
+                        path: PathBuf::from("/b"),
+                        size: 100,
+                        object_id: Some(ObjectIdentity {
+                            volume: 1,
+                            file_id: 2,
+                            file_id_hi: Some(4),
+                        }),
+                    },
+                ],
+                64,
+            )],
+        );
+        let rel = derive_relationships(&r, &RelationshipOptions::default());
+        assert_eq!(rel.relationships.len(), 1);
+        let c = &rel.relationships[0];
+        assert_eq!(c.kind, RelationshipKind::ContentDuplicate);
+        assert_eq!(c.distinct_objects, Some(2), "hi=3 and hi=4 are distinct");
+        assert_eq!(c.accounting, StorageAccounting::Exact);
+        assert_eq!(c.recoverable_bytes, Some(100));
+        assert!(c.alias_sets.is_empty(), "different objects, no aliases");
+    }
+
+    #[test]
+    fn narrow_and_wide_identity_never_silently_compare_equal() {
+        // A = (1, 2, None) and B = (1, 2, Some(3)): different provability
+        // is a different identity CLAIM. They must not merge into one
+        // object count, and the group must degrade to Estimated instead of
+        // fabricating exactness.
+        let mut members = vec![
+            DuplicateMember {
+                entry_id: 1,
+                path: PathBuf::from("/a"),
+                size: 100,
+                object_id: Some(ObjectIdentity {
+                    volume: 1,
+                    file_id: 2,
+                    file_id_hi: None,
+                }),
+            },
+            DuplicateMember {
+                entry_id: 2,
+                path: PathBuf::from("/b"),
+                size: 100,
+                object_id: Some(ObjectIdentity {
+                    volume: 1,
+                    file_id: 2,
+                    file_id_hi: Some(3),
+                }),
+            },
+        ];
+        members.sort_by_key(|a| a.entry_id);
+        let r = report(
+            DuplicateStatus::Completed,
+            vec![DuplicateGroup::from_members(
+                ContentHash::from_bytes(b"mixed-prov"),
+                100,
+                members,
+                64,
+            )],
+        );
+        let rel = derive_relationships(&r, &RelationshipOptions::default());
+        assert_eq!(rel.relationships.len(), 1);
+        let c = &rel.relationships[0];
+        assert_eq!(
+            c.distinct_objects, None,
+            "provability mismatch is unknowable"
+        );
+        assert_eq!(c.accounting, StorageAccounting::Estimated);
+        assert!(
+            c.alias_sets.is_empty(),
+            "two different identity claims cannot prove an alias set"
+        );
+    }
+
+    #[test]
+    fn wide_alias_ids_differ_from_narrow_ones() {
+        // The id fragments of (1,2), (1,2,hi=3) and (1,2,hi=4) are pairwise
+        // distinct: relationship ids cannot collide because high bits were
+        // discarded.
+        let narrow = ObjectIdentity::narrow(1, 2).id_fragment();
+        let hi3 = ObjectIdentity {
+            volume: 1,
+            file_id: 2,
+            file_id_hi: Some(3),
+        }
+        .id_fragment();
+        let hi4 = ObjectIdentity {
+            volume: 1,
+            file_id: 2,
+            file_id_hi: Some(4),
+        }
+        .id_fragment();
+        assert_ne!(narrow, hi3);
+        assert_ne!(narrow, hi4);
+        assert_ne!(hi3, hi4);
+        // Narrow keeps the historical fragment shape (id stability for the
+        // common Unix/macOS case).
+        assert_eq!(narrow, format!("{:016x}-{:016x}", 1u64, 2u64));
+    }
+
+    #[test]
+    fn proven_alias_set_publishes_with_wide_identity() {
+        // Two paths proven to be the SAME wide object (1,2,hi=3): one alias
+        // relationship carrying the full identity.
+        let r = report(
+            DuplicateStatus::Completed,
+            vec![DuplicateGroup::from_members(
+                ContentHash::from_bytes(b"widen alias"),
+                100,
+                vec![
+                    DuplicateMember {
+                        entry_id: 1,
+                        path: PathBuf::from("/a"),
+                        size: 100,
+                        object_id: Some(ObjectIdentity {
+                            volume: 1,
+                            file_id: 2,
+                            file_id_hi: Some(3),
+                        }),
+                    },
+                    DuplicateMember {
+                        entry_id: 2,
+                        path: PathBuf::from("/b"),
+                        size: 100,
+                        object_id: Some(ObjectIdentity {
+                            volume: 1,
+                            file_id: 2,
+                            file_id_hi: Some(3),
+                        }),
+                    },
+                ],
+                64,
+            )],
+        );
+        let rel = derive_relationships(&r, &RelationshipOptions::default());
+        assert_eq!(rel.relationships.len(), 1);
+        let a = &rel.relationships[0];
+        assert_eq!(a.kind, RelationshipKind::HardLinkAlias);
+        assert_eq!(
+            a.object,
+            Some(ObjectIdentity {
+                volume: 1,
+                file_id: 2,
+                file_id_hi: Some(3)
+            })
+        );
+        assert!(
+            a.id.contains("hi:0000000000000003"),
+            "wide alias id carries the high bits: {}",
+            a.id
         );
     }
 
@@ -1134,10 +1324,26 @@ mod tests {
         assert_eq!(index.relationships_for_path(Path::new("/c")).len(), 1);
         assert_eq!(index.relationships_for_path(Path::new("/missing")).len(), 0);
 
-        // Object lookups.
-        assert_eq!(index.relationships_for_object(1, 7).len(), 2);
-        assert_eq!(index.relationships_for_object(1, 9).len(), 1);
-        assert_eq!(index.relationships_for_object(9, 9).len(), 0);
+        // Object lookups (full identity; a narrow identity never matches
+        // a wide one).
+        assert_eq!(
+            index
+                .relationships_for_object(ObjectIdentity::narrow(1, 7))
+                .len(),
+            2
+        );
+        assert_eq!(
+            index
+                .relationships_for_object(ObjectIdentity::narrow(1, 9))
+                .len(),
+            1
+        );
+        assert_eq!(
+            index
+                .relationships_for_object(ObjectIdentity::narrow(9, 9))
+                .len(),
+            0
+        );
 
         // Content lookups (decode the published hex back to the digest).
         assert_eq!(index.duplicate_groups().len(), 2);

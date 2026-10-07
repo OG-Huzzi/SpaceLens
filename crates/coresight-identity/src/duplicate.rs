@@ -20,6 +20,52 @@ use crate::hash::{ContentHash, HashAlgorithm};
 /// a `const` so the contract is visible in the type surface.
 pub const DUPLICATE_GROUP_DETAIL_CAP: usize = 64;
 
+/// The canonical filesystem object identity, proven from handles at hash
+/// time: `(volume, file id)` plus the wide identifier's high bits where the
+/// platform proved them (Windows `FILE_ID_INFO` on ReFS-class filesystems;
+/// Unix `(st_dev, st_ino)` is always narrow).
+///
+/// This is the ONE definition of object identity for the duplicate and
+/// relationship layers (history's [`persisted twin`](crate) carries the
+/// same three components). Equality is exact and includes provability:
+/// `(1, 2, None)` (narrow/legacy) and `(1, 2, Some(3))` (wide) are DISTINCT
+/// identities — they must never silently compare equal, and a group whose
+/// members mix provability for the same low pair degrades its accounting
+/// to [`StorageAccounting::Estimated`] instead of fabricating a
+/// distinct-object count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectIdentity {
+    /// Volume/filesystem identity (Unix `st_dev`, Windows volume serial).
+    pub volume: u64,
+    /// File identity within the volume (low 64 bits of a wide identifier
+    /// where one exists; on NTFS the MFT record reference including its
+    /// sequence number).
+    pub file_id: u64,
+    /// High 64 bits of a >64-bit file identifier. `None` = the SAME
+    /// provenance that proved the low pair proved no wider identifier
+    /// (legacy/narrow) — never fabricated, never widened.
+    #[serde(default)]
+    pub file_id_hi: Option<u64>,
+}
+
+impl ObjectIdentity {
+    /// The narrow (legacy-shaped) identity: no high bits proven.
+    pub fn narrow(volume: u64, file_id: u64) -> Self {
+        ObjectIdentity {
+            volume,
+            file_id,
+            file_id_hi: None,
+        }
+    }
+
+    /// The provenance tag of the identity's width, for honest reporting:
+    /// `wide` when high bits were proven, `narrow` otherwise.
+    pub fn is_wide(self) -> bool {
+        self.file_id_hi.is_some()
+    }
+}
+
 /// How [`DuplicateGroup::recoverable_bytes`] was derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,10 +97,11 @@ pub struct DuplicateMember {
     pub entry_id: u64,
     pub path: PathBuf,
     pub size: u64,
-    /// File object identity `(device, inode)` where the platform proved it
-    /// (handle-proven at hash time). `None` = not provable on this
-    /// platform/volume — accounting degrades to [`StorageAccounting::Estimated`].
-    pub object_id: Option<(u64, u64)>,
+    /// File object identity where the platform proved it (handle-proven at
+    /// hash time; the full [`ObjectIdentity`] including wide high bits —
+    /// never narrowed). `None` = not provable on this platform/volume —
+    /// accounting degrades to [`StorageAccounting::Estimated`].
+    pub object_id: Option<ObjectIdentity>,
 }
 
 /// A group of ≥2 distinct filesystem entries whose content hashes are
@@ -93,13 +140,28 @@ enum ObjectCount {
 
 fn distinct_object_count(members: &[DuplicateMember]) -> ObjectCount {
     let mut set = std::collections::BTreeSet::new();
+    // A low-identity pair observed with MIXED high-bit provability (one
+    // member narrow, one wide) might be one object: distinctness is then
+    // not provable and exact accounting would fabricate a count. Two
+    // members that both proved high bits but differ in them are provably
+    // DISTINCT objects — that stays exact.
+    let mut low_pairs = std::collections::BTreeMap::new();
     for m in members {
         match m.object_id {
-            Some((d, i)) => {
-                set.insert((d, i));
+            Some(id) => {
+                set.insert(id);
+                low_pairs
+                    .entry((id.volume, id.file_id))
+                    .or_insert_with(std::collections::BTreeSet::new)
+                    .insert(id.file_id_hi);
             }
             None => return ObjectCount::Unknown,
         }
+    }
+    let mixed_provability =
+        |prov: &std::collections::BTreeSet<Option<u64>>| prov.len() > 1 && prov.contains(&None);
+    if low_pairs.values().any(mixed_provability) {
+        return ObjectCount::Unknown;
     }
     ObjectCount::Exact(set.len() as u64)
 }
@@ -173,7 +235,7 @@ mod tests {
             entry_id: id,
             path: PathBuf::from(path),
             size: 100,
-            object_id,
+            object_id: object_id.map(|(d, i)| ObjectIdentity::narrow(d, i)),
         }
     }
 

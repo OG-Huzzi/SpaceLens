@@ -414,7 +414,10 @@ fn partial_identity_degrades_gracefully_never_treated_as_replacement() {
         .iter()
         .find(|m| m.path == Path::new("/k/aaa.bin"))
         .unwrap();
-    assert_eq!(a.object_id, Some((7, 7)));
+    assert_eq!(
+        a.object_id,
+        Some(coresight_identity::ObjectIdentity::narrow(7, 7))
+    );
 }
 
 #[test]
@@ -438,8 +441,14 @@ fn hard_link_aliases_share_opened_identity_and_group_exact() {
     assert_eq!(g.recoverable_bytes, None, "one object: nothing recoverable");
     assert_eq!(g.accounting, coresight_identity::StorageAccounting::Exact);
     // Handle-proven identity is published even when observation agreed.
-    assert_eq!(g.members[0].object_id, Some((3, 42)));
-    assert_eq!(g.members[1].object_id, Some((3, 42)));
+    assert_eq!(
+        g.members[0].object_id,
+        Some(coresight_identity::ObjectIdentity::narrow(3, 42))
+    );
+    assert_eq!(
+        g.members[1].object_id,
+        Some(coresight_identity::ObjectIdentity::narrow(3, 42))
+    );
 }
 
 // ---------------------------------------------------------------------------

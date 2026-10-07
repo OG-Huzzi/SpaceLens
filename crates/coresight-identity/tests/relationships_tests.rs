@@ -301,9 +301,10 @@ fn aliases_plus_independent_duplicate_span_both_kinds() {
     assert_eq!(alias.kind, RelationshipKind::HardLinkAlias);
     assert_eq!(
         alias.object,
-        Some(coresight_identity::ObjectRef {
+        Some(coresight_identity::ObjectIdentity {
             volume: 1,
-            file_id: 101
+            file_id: 101,
+            file_id_hi: None
         })
     );
     assert_eq!(content.kind, RelationshipKind::ContentDuplicate);

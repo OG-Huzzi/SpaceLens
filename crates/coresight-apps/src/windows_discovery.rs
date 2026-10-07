@@ -67,43 +67,91 @@ pub fn decode_registry_string(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&chars)
 }
 
-/// Result of enumerating subkeys, honest about skips and incompleteness.
-/// A platform whose enumeration buffer cannot hold a key name must
-/// report the skip (counted exactly) rather than silently ending the
-/// enumeration.
+/// Result of enumerating subkeys, honest about skips, truncation, and
+/// incompleteness.
+///
+/// - `keys` holds at most the requested `max` names, canonically ascending
+///   and deduplicated — the canonically-FIRST names, so the examined
+///   subset never depends on the platform's enumeration order.
+/// - `truncated` is the EXACT count of subkeys visited beyond the kept
+///   set. `skipped_oversized` counts keys whose name exceeded the
+///   platform's enumeration buffer.
+/// - `incomplete` is true when enumeration stopped before the natural end
+///   (an OS error): the kept keys are then a partial view and the
+///   coverage must say so.
+///
+/// BOUNDEDNESS: the enumeration itself is bounded — an implementation
+/// must NOT materialize the full subkey list before capping. Working
+/// memory is O(max) names regardless of how many subkeys the key holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubkeyEnumeration {
     pub keys: Vec<String>,
     /// Subkeys skipped because their name exceeded the platform's
     /// enumeration buffer. Counted exactly — never silently dropped.
     pub skipped_oversized: u64,
+    /// Subkeys visited beyond the kept set (exact; the output bound is
+    /// real memory, not a post-hoc truncate).
+    pub truncated: u64,
     /// True when enumeration stopped before the natural end (an OS
     /// error). The returned keys are then a partial view and the
     /// coverage must say so.
     pub incomplete: bool,
 }
 
-/// Abstract registry: subkeys + values at one key path.
+/// Streaming bounded-name insertion: keeps the `max` canonically-smallest
+/// names in `set`; everything else increments `overflow`. O(max) memory,
+/// call-order independent (the kept set is always the canonically-smallest
+/// names seen). Implementors of [`RegistryView`] use this to enumerate
+/// without materializing the full key list.
+pub fn offer_name(
+    set: &mut std::collections::BTreeSet<String>,
+    max: usize,
+    name: String,
+    overflow: &mut u64,
+) {
+    if max == 0 {
+        *overflow += 1;
+        return;
+    }
+    if set.contains(&name) {
+        return; // duplicates cannot occur from a live registry; be exact anyway
+    }
+    if set.len() < max {
+        set.insert(name);
+        return;
+    }
+    let largest = match set.iter().next_back() {
+        Some(l) => l.clone(),
+        None => {
+            set.insert(name);
+            return;
+        }
+    };
+    if name < largest {
+        set.remove(&largest);
+        *overflow += 1;
+        set.insert(name);
+    } else {
+        *overflow += 1;
+    }
+}
+
+/// Abstract registry: values at one key path plus BOUNDED subkey
+/// enumeration.
 ///
-/// `subkeys` cannot distinguish "key absent" from "key empty" — both are
-/// an empty enumeration — so views are additionally probed with
-/// [`RegistryView::key_present`] where that distinction matters.
+/// Implementations must stream: `subkeys_bounded` keeps at most `max`
+/// canonically-smallest subkey names with exact truncation accounting, so
+/// a hostile registry cannot balloon working memory
+/// (`max_subkeys_per_view` bounds MEMORY, not merely the published list).
 pub trait RegistryView {
-    fn subkeys(&self, key: &str) -> Vec<String>;
+    /// Bounded, canonically-ordered subkey enumeration of `key`.
+    fn subkeys_bounded(&self, key: &str, max: usize) -> SubkeyEnumeration;
     fn get_value(&self, key: &str, name: &str) -> Option<RegistryValue>;
     /// Whether the key exists at all. Absent roots are `Unavailable`,
-    /// which is NOT the same as an enumerated-empty root.
+    /// which is NOT the same as an enumerated-empty root. Bounded by
+    /// definition (asks for one subkey).
     fn key_present(&self, key: &str) -> bool {
-        !self.subkeys(key).is_empty() || self.get_value(key, "").is_some()
-    }
-    /// Detailed subkey enumeration including skip/incompleteness facts.
-    /// The default wraps [`RegistryView::subkeys`] (no skips known).
-    fn subkeys_detailed(&self, key: &str) -> SubkeyEnumeration {
-        SubkeyEnumeration {
-            keys: self.subkeys(key),
-            skipped_oversized: 0,
-            incomplete: false,
-        }
+        !self.subkeys_bounded(key, 1).keys.is_empty() || self.get_value(key, "").is_some()
     }
 }
 
@@ -188,18 +236,14 @@ impl<V: RegistryView> Win32UninstallEnumerator<V> {
                 enumeration_incomplete: false,
             };
         }
-        // Canonical order first, then bound — the examined subset is
-        // deterministic and truncation is exact.
-        let enumeration = self.view.subkeys_detailed(root);
-        let mut subkeys = enumeration.keys;
-        subkeys.sort();
-        subkeys.dedup();
-        let total = subkeys.len();
-        let truncated_subkeys =
-            total.saturating_sub(self.max_subkeys_per_view) as u64 + enumeration.skipped_oversized;
-        subkeys.truncate(self.max_subkeys_per_view);
+        // The enumeration is bounded AT THE SOURCE: at most
+        // `max_subkeys_per_view` canonically-first names are materialized,
+        // so a registry with millions of keys cannot balloon working
+        // memory. Truncation/skips are exact and reported as `Partial`.
+        let enumeration = self.view.subkeys_bounded(root, self.max_subkeys_per_view);
+        let truncated_subkeys = enumeration.truncated + enumeration.skipped_oversized;
         let mut out = Vec::new();
-        for subkey in subkeys {
+        for subkey in &enumeration.keys {
             let key = format!("{}\\{}", root, subkey);
             let name = match self.view.get_value(&key, "DisplayName") {
                 Some(RegistryValue::Sz(s)) | Some(RegistryValue::ExpandSz(s)) => s,
@@ -273,7 +317,7 @@ impl<V: RegistryView> Win32UninstallEnumerator<V> {
         } else {
             PackageKind::Installed
         };
-        let id = ApplicationId::derive(name, publisher.as_deref(), "win32-uninstall");
+        let id = ApplicationId::derive(name, publisher.as_deref());
         ApplicationRecord {
             id,
             name: name.to_string(),

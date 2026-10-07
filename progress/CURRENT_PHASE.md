@@ -1,112 +1,132 @@
 # CoreSight — Current State
 
-- **Current phase:** PHASE 6.1 — Mac-first power-tools foundation &
-  product architecture.
-- **Status:** Phase 6.1 COMPLETE on this machine (all local gates green,
-  macOS/Linux cross-checks green). NOT yet VERIFIED as a phase: the
-  macOS runtime observation path awaits macOS-CI execution, and this
-  phase awaits independent verification before any further work.
-- **Product direction (binding from this phase):** CoreSight is a
-  **macOS system intelligence + power-tools application** — NOT a "Mac
-  cleaner". macOS is the primary implementation and launch platform;
-  Windows/Linux remain architectural targets with their abstractions
-  intact. Storage is one pillar of seven
-  (docs/MACOS_ARCHITECTURE.md).
-- **Last updated:** 2026-10-06.
+- **Current phase:** PHASE 6.1 — independent verification & architectural
+  hardening (audit pass over commit `54f0e7f`).
+- **Status:** Phase 6.1 code AUDITED independently; the audit findings were
+  REPAIRED in this phase. VERIFIED status requires the CI run of the
+  verification commit to be recorded green here (see CI section).
+- **Product direction (binding):** CoreSight is a **macOS system
+  intelligence + power-tools application** — NOT a "Mac cleaner". macOS is
+  the primary implementation and launch platform; Windows/Linux remain
+  architectural targets with their abstractions intact. Storage is one
+  pillar of seven (docs/MACOS_ARCHITECTURE.md).
+- **Last updated:** 2026-10-07.
 
-## What happened in this phase (2026-10-06 → 2026-10-07)
+## What happened in this phase (2026-10-07)
 
-1. **Architecture audit.** Read every doc, all six crates and the
-   progress files; verified each Phase 6.1 assumption in code rather
-   than trusting prior reports.
-2. **New shared contracts crate `coresight-capabilities`** (platform-
-   neutral; a source-scan test bans OS conditionals in it):
-   - Seven-pillar capability taxonomy (`Pillar`).
-   - Typed capability contracts A–H plus privacy/software-management,
-     each with a stable kebab id, pillar, and a PINNED honest status
-     (`Implemented`/`Partial`/`Planned`/`Deferred`) in `CONTRACTS` —
-     overclaiming is now a failing test.
-   - `Observation<T>` honesty envelope: observed / inferred /
-     unsupported / unavailable / failed as a tagged enum — a
-     non-observed state structurally cannot carry a payload, and
-     deserialization cannot smuggle one in (`deny_unknown_fields`).
-   - `AccessState` path-access truth model (7 states): exists-but-
-     inaccessible ≠ empty ≠ does-not-exist ≠ unsupported ≠ failed.
-   - Safety action pipeline: explicit classification (exactly one
-     effect + optional privileged/permission-sensitive qualifiers),
-     OBSERVE→…→ROLLBACK with an unskippable stage machine, gate-only
-     VALIDATE, and `ExecutionPolicy::CURRENT_BUILD` (read-only only) at
-     the veto point. A blocked verdict permanently bars EXECUTE. No
-     executor exists anywhere in this build.
-3. **New macOS boundary crate `coresight-macos`** (compiles everywhere;
-   observes only on macOS; `Unsupported` on other hosts — never empty):
-   - 15-source catalog (`SOURCES`): read access / sensitivity /
-     modification risk / phase availability for /Applications, ~/Library
-     areas (Application Support, Caches, Logs, Containers, Group
-     Containers, Preferences), LaunchAgents/LaunchDaemons (user +
-     system), login items (deferred — needs OS API), TCC-protected user
-     data (RequiresFullDiskAccess, deferred, never probed without an
-     explicit user grant), mounted volumes, APFS volume info (deferred).
-   - Bounded read-only listing observation with honest access-state
-     mapping (metadata-denied ⇒ Failed, listing-denied-after-stat ⇒
-     ExistsButInaccessible, empty listing ⇒ Empty). No content reads,
-     no recursion, no writes, no subprocesses, no privilege escalation.
-   - Capability↔source relation table; non-macOS hosts report every
-     source `Unsupported` with a reason.
-4. **Scanner honesty repairs (Task 8):**
-   - `SymlinkPolicy::FollowWithCycleGuard` was declared but ignored by
-     the scanner (a silent downgrade to record-only). It is now
-     explicitly REJECTED: the scan fails with a typed `Unsupported`
-     error before the filesystem is touched (`is_implemented()` added;
-     docs + 3 tests).
-   - Scan-root links now get child-link semantics (honest target +
-     broken flags) via a shared `build_link_entry`; a root link is
-     recorded, never followed (2 tests).
-   - `read_link_target` errors are typed, never silent `.ok()` "no
-     target": the entry carries the real category and the error is
-     tallied (2 tests). A link whose own metadata fails keeps its real
-     category and makes no broken claims (1 test).
-   - `cfg!(windows)` removed from the shared `SysDirs` impl; platform
-     selection now lives in cfg-selected modules (the `drive_info()`
-     pattern).
-   - Linux mount-path decoding is now byte-exact (lossless): /proc/mounts
-     is read as bytes and paths are built from raw bytes via
-     `OsString::from_vec`; a non-UTF-8 fs-type keeps the entry with
-     `fs_type: None` instead of mangling or dropping it. This repairs a
-     real path-losslessness violation (U+FFFD could collapse two mounts
-     onto one fabricated path). 4 unit tests, plus parse extraction.
+Independent audit of the Phase 6.1 commit (no prior report trusted). Code,
+tests, dependency graph, docs, and git state were re-inspected; the
+following findings were repaired:
 
-## Verification (local, 2026-10-07, Windows 11 GNU toolchain, Rust 1.99.0)
+1. **P0 — object identity was narrowed to 64 bits at the duplicate/-
+   relationship boundary.** The hash pipeline published
+   `object_id: Option<(u64, u64)>` (discarding `FILE_ID_INFO` high bits),
+   and `relationships::ObjectRef` carried only the pair, while history's
+   `ObjectId` carried the full `(device, inode, file_id_hi)` — two
+   competing definitions. REPAIRED with one canonical type,
+   `coresight_identity::ObjectIdentity { volume, file_id,
+   file_id_hi: Option<u64> }`, now flowing pipeline → duplicate members →
+   relationships → ids → index. Guarantees, all regression-tested:
+   - `(1,2,hi=3)` and `(1,2,hi=4)` are distinct objects; their alias-id
+     fragments and relationship ids cannot collide (`…-hi:…` fragment).
+   - `(1,2,None)` (narrow/legacy) and `(1,2,Some(3))` (wide) NEVER
+     compare equal; a group mixing provability on one low pair degrades
+     to `Estimated` + `distinct_objects: None` instead of fabricating a
+     count. Two members that both PROVED different high bits stay exact.
+   - Narrow identities keep the historical id fragment shape (id
+     stability for Unix/macOS).
+   - History reconstruction now restores EXACTLY the persisted identity:
+     `relationship_members.file_id_hi` (persisted since migration v4) had
+     been silently ignored on read; malformed persisted alias ids are now
+     typed errors instead of silent `None`.
+2. **Application identity vs inventory merge (semantic conflict).**
+   `ApplicationId` hashed (name, publisher, source) while `merge_inventory`
+   keyed on (name, publisher) — the merged record's id depended on which
+   record won. DECIDED and DOCUMENTED (no guessing): **a logical
+   application is identified by its normalized (name, publisher); the
+   discovery source is provenance, never identity.** `ApplicationId::derive`
+   now hashes exactly the merge key; cross-source same-(name, publisher)
+   records merge into one logical application with unioned provenance
+   (regression-tested, replacing the old source-sensitive pin test).
+3. **Determinism — arrival-order winner selection.** Equal-completeness
+   inventory ties kept the first-arrived record. REPAIRED with a canonical
+   precedence function (`record_rank`: completeness, then a fixed
+   field-by-field content order); footprint same-key duplicates resolve
+   canonically too. Permutation tests now require byte-identical output.
+4. **True boundedness (bounds moved to where memory grows).**
+   - `PathProber` materialized whole directories before capping → the
+     trait is now `children_bounded`/`entries_bounded` (streaming top-K,
+     O(max) memory, canonically-smallest subset, exact overflow).
+   - Win32 registry enumeration materialized every subkey → the trait is
+     now `subkeys_bounded` (streaming top-K over `RegEnumKeyExW`, exact
+     truncation + oversized-name accounting; `key_present` asks for one
+     key, not the world).
+   - `discover_footprints` accumulated the full candidate fan-out before
+     truncating → bounded admission (canonically-first `max_records`
+     candidates, exact `candidates_truncated`).
+   - `merge_inventory` accumulated every record before truncating →
+     bounded admission with exact per-record accounting.
+5. **Lossless path audit (sweep of every lossy conversion).** Semantic
+   repairs: `classifier::classify::split_name` (a non-UTF-8 path previously
+   collapsed to an empty name → misleading `Unknown`; now byte-level
+   splitting, regression tests); `classifier::pathctx::analyze` (non-UTF-8
+   paths previously lost ALL location context; now whole-path lossy
+   rendering preserves every valid component). Presentation-only and
+   documented-boundary uses (registry UTF-16 decode, volume labels,
+   history's lossless tagged encoder) classified and left as-is.
+6. **History/SQLite second-order audit.** Migrations are per-step
+   transactional with the version bump inside the transaction; newer
+   schemas are refused; extreme-value identity round-trips and
+   display-collapse event-id tests exist and pass. docs/DATABASE.md
+   promised `PRAGMA integrity_check` + pre-migration backup + quarantine
+   that did not exist — `PRAGMA integrity_check` is NOW run on every open
+   before anything reads/migrates (typed `StoreError::Corrupt` refusal);
+   backup + quarantine are marked PLANNED in the doc (no more conceptual
+   promises).
+7. **Safety / honesty / boundary audits.** Observation envelope (tagged
+   enum + `deny_unknown_fields`) cannot represent payloads on
+   unsupported/unavailable/failed states, in memory or on the wire;
+   `AccessState` keeps denied ≠ empty ≠ absent ≠ unsupported; the macOS
+   TCC source is pinned as a `Mechanism` that is `RequiresFullDiskAccess` +
+   `Deferred` (no path to probe even by accident); the capability status
+   table is pinned by tests; the no-executor and no-network sweeps over
+   the new crates are clean (only serde `rename_all` attribute matches);
+   shared-crate source-scan tests ban OS conditionals.
+
+## Verification (local, 2026-10-07, Windows 11 GNU, Rust 1.99.0)
 
 - `cargo fmt --check` — clean.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   — clean.
-- `cargo test --workspace` — **577 passed, 0 failed** (2 ignored perf
-  suites run separately; was 515 before this phase → +62 new tests).
-- Cross-target compile checks (all targets incl. tests):
-  `cargo check -p coresight-capabilities -p coresight-macos -p
-  coresight-engine --all-targets --target x86_64-apple-darwin` — green;
-  same for `x86_64-unknown-linux-gnu` — green.
+- `cargo test --workspace` and `cargo test --workspace --all-features` —
+  **588 passed, 0 failed** (2 ignored perf suites run separately).
+- `cargo check -p coresight-capabilities -p coresight-macos
+  -p coresight-engine --all-targets --target x86_64-apple-darwin` — green;
+  same for `x86_64-unknown-linux-gnu` — green (compile-level only; macOS
+  runtime paths await macOS CI — never claimed verified from compilation).
+- `npm ci` + `npm run build` — green.
+- `git diff --check` — clean.
 
-## Honest limitations
+## Known limitations
 
-- The macOS runtime observation path (`observe_host_sources` + the
-  macOS-gated host tests) is compile-checked for
-  `x86_64-apple-darwin` here but NOT runtime-verified on a Mac in this
-  phase: it requires the macOS CI job (`.github/workflows/ci.yml` picks
-  up the new crates automatically via `--workspace`). Per the phase
-  rules, no macOS capability is claimed verified beyond compilation.
-- The unix-gated Linux unit tests (mount parsing, lossless decoding)
-  compile-checked for the Linux target; runtime execution likewise
-  awaits Linux/macOS CI.
-- No capability produces real data yet beyond the existing Windows
-  application-intelligence providers; every new contract is honestly
-  `Planned`/`Partial`/`Deferred` in the pinned `CONTRACTS` table.
-- The safety pipeline is a boundary, not an executor: nothing in this
-  build executes any state-changing action.
+- macOS runtime observation is compile-checked locally; runtime evidence
+  can only come from the macOS CI job (never from Windows/Linux builds).
+- Unix-gated unit tests (mount decoding, non-UTF-8 classifier fixtures)
+  run on Linux/macOS CI only.
+- Pre-migration file backup and corrupt-store quarantine flow: PLANNED
+  (docs/DATABASE.md) — the integrity check refuses corrupt stores today.
+- Pre-Phase-6.1 capability machinery is unbounded only where the phase
+  contracts say so (e.g. relationship reports are transitively bounded by
+  pipeline caps; the boundedness sweep covered apps/macOS/capabilities).
+
+## CI
+
+CI VERIFIED entries appear here once the verification commit's run is
+green: rust ubuntu / rust windows / rust macos / frontend — all SUCCESS
+(workflow run id recorded below).
 
 ## Next authorized work
 
-- NOTHING is authorized until this phase passes independent
-  verification and its CI run is recorded green here. Stop after this
-  phase (per the phase contract).
+- NOTHING starts until this verification phase passes independent review
+  and its CI run is recorded green above. Phase 6.2 and application-
+  intelligence persistence remain NOT STARTED.

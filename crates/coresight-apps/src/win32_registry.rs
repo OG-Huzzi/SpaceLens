@@ -122,21 +122,25 @@ impl Default for Win32RegistryView {
 
 #[cfg(windows)]
 impl RegistryView for Win32RegistryView {
-    fn subkeys(&self, key: &str) -> Vec<String> {
-        self.subkeys_detailed(key).keys
-    }
-
-    /// Honest subkey walk: a name too long for the fixed 260-unit buffer
-    /// (`ERROR_MORE_DATA`, 234) is skipped and COUNTED; any other error
-    /// short of `ERROR_NO_MORE_ITEMS` (259) marks the enumeration
-    /// incomplete. Neither is silently swallowed into a clean empty list.
-    fn subkeys_detailed(&self, key: &str) -> crate::windows_discovery::SubkeyEnumeration {
+    /// Honest, BOUNDED subkey walk: names stream through a bounded top-K
+    /// set (at most `max` canonically-smallest names are retained — O(max)
+    /// memory regardless of key count). A name too long for the fixed
+    /// 260-unit buffer (`ERROR_MORE_DATA`, 234) is skipped and COUNTED;
+    /// any other error short of `ERROR_NO_MORE_ITEMS` (259) marks the
+    /// enumeration incomplete. Neither is silently swallowed into a clean
+    /// empty list, and nothing beyond the bound is materialized.
+    fn subkeys_bounded(
+        &self,
+        key: &str,
+        max: usize,
+    ) -> crate::windows_discovery::SubkeyEnumeration {
         const ERROR_NO_MORE_ITEMS: u32 = 259;
         const ERROR_MORE_DATA: u32 = 234;
         let Some(handle) = Self::open(key) else {
             return crate::windows_discovery::SubkeyEnumeration::default();
         };
         let mut out = crate::windows_discovery::SubkeyEnumeration::default();
+        let mut kept = std::collections::BTreeSet::new();
         let mut index = 0u32;
         loop {
             let mut name = vec![0u16; 260];
@@ -172,9 +176,10 @@ impl RegistryView for Win32RegistryView {
             // Key names located via lossy UTF-16; used only to open the
             // subkey, never as filesystem identity.
             let sub = String::from_utf16_lossy(&name[..len as usize]);
-            out.keys.push(sub);
+            crate::windows_discovery::offer_name(&mut kept, max, sub, &mut out.truncated);
             index += 1;
         }
+        out.keys = kept.into_iter().collect();
         // SAFETY: handle is open and owned here.
         unsafe { RegCloseKey(handle) };
         out

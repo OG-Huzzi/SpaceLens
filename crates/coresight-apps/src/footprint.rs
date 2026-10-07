@@ -64,12 +64,65 @@ pub struct FootprintReport {
     pub evidence_truncated: u64,
 }
 
-/// Probes a filesystem (real or fake), non-recursively.
+/// One bounded directory listing: at most `max` canonically-smallest
+/// names plus the EXACT count of entries visited beyond them. Memory is
+/// O(max) regardless of directory size — the bound is real, not a
+/// post-hoc truncate of a fully materialized listing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoundedListing {
+    /// Canonically ascending, deduplicated names (≤ the requested max).
+    pub names: Vec<PathBuf>,
+    /// Entries visited beyond the kept set (exact).
+    pub overflow: u64,
+}
+
+/// Streaming bounded-name insertion over encoded path bytes: keeps the
+/// `max` canonically-smallest names; everything else increments
+/// `overflow`. O(max) memory, call-order independent (the kept set is
+/// always the canonically-smallest names visited). Implementors of
+/// [`PathProber`] use this to enumerate without materializing whole
+/// directories.
+pub fn offer_path(
+    set: &mut std::collections::BTreeSet<PathBuf>,
+    max: usize,
+    name: PathBuf,
+    overflow: &mut u64,
+) {
+    if max == 0 {
+        *overflow += 1;
+        return;
+    }
+    if set.contains(&name) {
+        return;
+    }
+    if set.len() < max {
+        set.insert(name);
+        return;
+    }
+    let largest = match set.iter().next_back() {
+        Some(l) => l.clone(),
+        None => {
+            set.insert(name);
+            return;
+        }
+    };
+    if name < largest {
+        set.remove(&largest);
+        *overflow += 1;
+        set.insert(name);
+    } else {
+        *overflow += 1;
+    }
+}
+
+/// Probes a filesystem (real or fake), non-recursively and BOUNDED:
+/// implementations must not materialize a directory beyond the requested
+/// `max` names (memory stays O(max) however large the directory is).
 pub trait PathProber {
-    /// Immediate child directories of `dir`.
-    fn children(&self, dir: &Path) -> Vec<PathBuf>;
-    /// Immediate entries (any kind) of `dir`.
-    fn entries(&self, dir: &Path) -> Vec<PathBuf>;
+    /// Immediate child directories of `dir`, bounded.
+    fn children_bounded(&self, dir: &Path, max: usize) -> BoundedListing;
+    /// Immediate entries (any kind) of `dir`, bounded.
+    fn entries_bounded(&self, dir: &Path, max: usize) -> BoundedListing;
 }
 
 /// Known roots for footprint probing (platform-parameterized).
@@ -100,10 +153,12 @@ pub fn normalize_name(name: &str) -> String {
 }
 
 fn child_name(p: &Path) -> String {
+    // Matching key only: a non-UTF-8 name stays a NAME (lossy), it never
+    // vanishes into an empty string — it simply will not match an app's
+    // name unless it really does.
     p.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_string()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn names_match(a: &str, b: &str) -> bool {
@@ -126,31 +181,25 @@ fn looks_like_temp(n: &str) -> bool {
 }
 
 fn file_stem_match(entry: &Path, norm: &str) -> bool {
-    let name = entry.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    names_match(&normalize_name(name), norm)
+    let name = entry
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    names_match(&normalize_name(&name), norm)
 }
 
-/// Canonically ordered, capped children; overflow is added to
-/// `truncated`. Sorting happens BEFORE the cap, so which children are
-/// examined never depends on the prober's enumeration order.
+/// Bounded listing straight from the prober: the examined subset is the
+/// canonically-smallest `cap` names (deterministic under any enumeration
+/// order), and the prober never materialized more than `cap` names.
 fn bounded_children(
     prober: &dyn PathProber,
     dir: &Path,
     cap: usize,
     truncated: &mut u64,
 ) -> Vec<PathBuf> {
-    let mut children = prober.children(dir);
-    children.sort_by(|a, b| {
-        a.as_os_str()
-            .as_encoded_bytes()
-            .cmp(b.as_os_str().as_encoded_bytes())
-    });
-    children.dedup();
-    if children.len() > cap {
-        *truncated += (children.len() - cap) as u64;
-        children.truncate(cap);
-    }
-    children
+    let listing = prober.children_bounded(dir, cap);
+    *truncated += listing.overflow;
+    listing.names
 }
 
 /// Same as [`bounded_children`] for arbitrary entries.
@@ -160,18 +209,79 @@ fn bounded_entries(
     cap: usize,
     truncated: &mut u64,
 ) -> Vec<PathBuf> {
-    let mut entries = prober.entries(dir);
-    entries.sort_by(|a, b| {
-        a.as_os_str()
-            .as_encoded_bytes()
-            .cmp(b.as_os_str().as_encoded_bytes())
-    });
-    entries.dedup();
-    if entries.len() > cap {
-        *truncated += (entries.len() - cap) as u64;
-        entries.truncate(cap);
+    let listing = prober.entries_bounded(dir, cap);
+    *truncated += listing.overflow;
+    listing.names
+}
+
+/// The admission key of a footprint candidate: (path bytes, app id, kind).
+/// Byte-ordered so canonical order is platform-stable.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CandidateKey {
+    path_bytes: Vec<u8>,
+    app: String,
+    kind: FootprintKind,
+}
+
+impl CandidateKey {
+    fn of(candidate: &FootprintCandidate) -> Self {
+        CandidateKey {
+            path_bytes: candidate.path.as_os_str().as_encoded_bytes().to_vec(),
+            app: candidate.app.0.clone(),
+            kind: candidate.kind,
+        }
     }
-    entries
+}
+
+/// Canonical precedence between two same-key candidates: stronger
+/// confidence wins, then the fuller evidence list. Arrival order is never
+/// a tie-breaker.
+fn candidate_rank(c: &FootprintCandidate) -> (Confidence, &[FootprintEvidence]) {
+    (c.confidence, c.evidence.as_slice())
+}
+
+/// Bounded candidate admission. Working memory is O(max_records)
+/// candidates — never the whole probe fan-out: a candidate joins only
+/// when capacity exists (evicting the canonically-largest key, counted)
+/// or its key is canonically smaller than the largest held key. Keys are
+/// immutable, so the published set is always the canonically-first
+/// `max_records` candidates regardless of probe order. Same-key
+/// duplicates resolve by [`candidate_rank`]. The per-candidate evidence
+/// bound applies at admission (bounded payloads).
+fn admit_candidate(
+    admitted: &mut std::collections::BTreeMap<CandidateKey, FootprintCandidate>,
+    limits: &DiscoveryLimits,
+    truncated: &mut u64,
+    evidence_truncated: &mut u64,
+    mut candidate: FootprintCandidate,
+) {
+    if candidate.evidence.len() > limits.max_evidence_per_candidate {
+        *evidence_truncated +=
+            (candidate.evidence.len() - limits.max_evidence_per_candidate) as u64;
+        candidate
+            .evidence
+            .truncate(limits.max_evidence_per_candidate);
+    }
+    let key = CandidateKey::of(&candidate);
+    if let Some(existing) = admitted.get(&key) {
+        if candidate_rank(&candidate) > candidate_rank(existing) {
+            admitted.insert(key, candidate);
+        }
+        return;
+    }
+    if admitted.len() < limits.max_records {
+        admitted.insert(key, candidate);
+        return;
+    }
+    let largest = admitted.keys().next_back().cloned();
+    match largest {
+        Some(largest) if key < largest => {
+            admitted.remove(&largest);
+            *truncated += 1;
+            admitted.insert(key, candidate);
+        }
+        _ => *truncated += 1,
+    }
 }
 
 /// Discover footprint candidates for `apps` using bounded probes. See
@@ -182,7 +292,10 @@ pub fn discover_footprints(
     prober: &dyn PathProber,
     limits: &DiscoveryLimits,
 ) -> FootprintReport {
-    let mut out: Vec<FootprintCandidate> = Vec::new();
+    let mut admitted: std::collections::BTreeMap<CandidateKey, FootprintCandidate> =
+        std::collections::BTreeMap::new();
+    let mut candidates_truncated = 0u64;
+    let mut evidence_truncated = 0u64;
     let mut children_truncated = 0u64;
     let mut apps_truncated = 0u64;
     // Apps are probed in canonical order, then capped — deterministic.
@@ -203,19 +316,25 @@ pub fn discover_footprints(
         let publisher_norm = app.publisher.as_deref().map(normalize_name);
 
         if let Some(loc) = &app.install_location {
-            out.push(FootprintCandidate {
-                path: loc.clone(),
-                app: app.id.clone(),
-                kind: FootprintKind::InstallationDirectory,
-                confidence: Confidence::Confirmed,
-                evidence: vec![FootprintEvidence::new(
-                    EvidenceKind::InstallLocation,
-                    Confidence::Confirmed,
-                    "inventory",
-                    AssociationScope::ThisMachine,
-                    "directory equals the installer-recorded install location",
-                )],
-            });
+            admit_candidate(
+                &mut admitted,
+                limits,
+                &mut candidates_truncated,
+                &mut evidence_truncated,
+                FootprintCandidate {
+                    path: loc.clone(),
+                    app: app.id.clone(),
+                    kind: FootprintKind::InstallationDirectory,
+                    confidence: Confidence::Confirmed,
+                    evidence: vec![FootprintEvidence::new(
+                        EvidenceKind::InstallLocation,
+                        Confidence::Confirmed,
+                        "inventory",
+                        AssociationScope::ThisMachine,
+                        "directory equals the installer-recorded install location",
+                    )],
+                },
+            );
         }
 
         for (root, scope) in [
@@ -250,7 +369,12 @@ pub fn discover_footprints(
                     ) {
                         let grand_norm = normalize_name(&child_name(&grand));
                         if names_match(&grand_norm, &norm) {
-                            out.push(FootprintCandidate {
+                            admit_candidate(
+                    &mut admitted,
+                    limits,
+                    &mut candidates_truncated,
+                    &mut evidence_truncated,
+                    FootprintCandidate {
                                 path: grand,
                                 app: app.id.clone(),
                                 kind: FootprintKind::UserData,
@@ -284,7 +408,12 @@ pub fn discover_footprints(
                     } else {
                         FootprintKind::UserData
                     };
-                    out.push(FootprintCandidate {
+                    admit_candidate(
+                    &mut admitted,
+                    limits,
+                    &mut candidates_truncated,
+                    &mut evidence_truncated,
+                    FootprintCandidate {
                         path: child,
                         app: app.id.clone(),
                         kind,
@@ -311,19 +440,25 @@ pub fn discover_footprints(
                 if entry.extension().and_then(|e| e.to_str()) == Some("lnk")
                     && file_stem_match(&entry, &norm)
                 {
-                    out.push(FootprintCandidate {
-                        path: entry,
-                        app: app.id.clone(),
-                        kind: FootprintKind::ShortcutEntry,
-                        confidence: Confidence::Probable,
-                        evidence: vec![FootprintEvidence::new(
+                    admit_candidate(
+                        &mut admitted,
+                        limits,
+                        &mut candidates_truncated,
+                        &mut evidence_truncated,
+                        FootprintCandidate {
+                            path: entry,
+                            app: app.id.clone(),
+                            kind: FootprintKind::ShortcutEntry,
+                            confidence: Confidence::Probable,
+                            evidence: vec![FootprintEvidence::new(
                             EvidenceKind::ShortcutReference,
                             Confidence::Probable,
                             "footprint-scan",
                             AssociationScope::ThisMachine,
                             "Start Menu shortcut file name matches the installed application name",
                         )],
-                    });
+                        },
+                    );
                 }
             }
         }
@@ -336,19 +471,25 @@ pub fn discover_footprints(
                 &mut children_truncated,
             ) {
                 if file_stem_match(&entry, &norm) {
-                    out.push(FootprintCandidate {
-                        path: entry,
-                        app: app.id.clone(),
-                        kind: FootprintKind::StartupIntegration,
-                        confidence: Confidence::Probable,
-                        evidence: vec![FootprintEvidence::new(
-                            EvidenceKind::ShortcutReference,
-                            Confidence::Probable,
-                            "footprint-scan",
-                            AssociationScope::CurrentUser,
-                            "startup entry name matches the installed application name",
-                        )],
-                    });
+                    admit_candidate(
+                        &mut admitted,
+                        limits,
+                        &mut candidates_truncated,
+                        &mut evidence_truncated,
+                        FootprintCandidate {
+                            path: entry,
+                            app: app.id.clone(),
+                            kind: FootprintKind::StartupIntegration,
+                            confidence: Confidence::Probable,
+                            evidence: vec![FootprintEvidence::new(
+                                EvidenceKind::ShortcutReference,
+                                Confidence::Probable,
+                                "footprint-scan",
+                                AssociationScope::CurrentUser,
+                                "startup entry name matches the installed application name",
+                            )],
+                        },
+                    );
                 }
             }
         }
@@ -363,25 +504,35 @@ pub fn discover_footprints(
                 if entry.extension().and_then(|e| e.to_str()) == Some("lnk")
                     && file_stem_match(&entry, &norm)
                 {
-                    out.push(FootprintCandidate {
-                        path: entry,
-                        app: app.id.clone(),
-                        kind: FootprintKind::ShortcutEntry,
-                        confidence: Confidence::Probable,
-                        evidence: vec![FootprintEvidence::new(
-                            EvidenceKind::ShortcutReference,
-                            Confidence::Probable,
-                            "footprint-scan",
-                            AssociationScope::CurrentUser,
-                            "desktop shortcut file name matches the installed application name",
-                        )],
-                    });
+                    admit_candidate(
+                        &mut admitted,
+                        limits,
+                        &mut candidates_truncated,
+                        &mut evidence_truncated,
+                        FootprintCandidate {
+                            path: entry,
+                            app: app.id.clone(),
+                            kind: FootprintKind::ShortcutEntry,
+                            confidence: Confidence::Probable,
+                            evidence: vec![FootprintEvidence::new(
+                                EvidenceKind::ShortcutReference,
+                                Confidence::Probable,
+                                "footprint-scan",
+                                AssociationScope::CurrentUser,
+                                "desktop shortcut file name matches the installed application name",
+                            )],
+                        },
+                    );
                 }
             }
         }
     }
 
-    out.sort_by(|a, b| {
+    // The published set was admitted under the `max_records` bound during
+    // probing (see [`admit_candidate`]); publishing re-orders it into the
+    // canonical order. Memory stayed O(max_records) throughout.
+    let mut candidates: Vec<FootprintCandidate> = admitted.into_values().collect();
+    candidates.sort_by(|a, b| {
         a.path
             .as_os_str()
             .as_encoded_bytes()
@@ -389,29 +540,9 @@ pub fn discover_footprints(
             .then(a.app.0.cmp(&b.app.0))
             .then(a.kind.cmp(&b.kind))
     });
-    out.dedup_by(|a, b| a.path == b.path && a.app == b.app && a.kind == b.kind);
-
-    // Per-candidate evidence bound (declared policy; counted exactly).
-    let mut evidence_truncated = 0u64;
-    for cand in &mut out {
-        if cand.evidence.len() > limits.max_evidence_per_candidate {
-            evidence_truncated += (cand.evidence.len() - limits.max_evidence_per_candidate) as u64;
-            cand.evidence.truncate(limits.max_evidence_per_candidate);
-        }
-    }
-
-    // Total candidate bound — after canonical ordering, so which
-    // candidates are published is deterministic.
-    let candidates_truncated = if out.len() > limits.max_records {
-        let overflow = (out.len() - limits.max_records) as u64;
-        out.truncate(limits.max_records);
-        overflow
-    } else {
-        0
-    };
 
     FootprintReport {
-        candidates: out,
+        candidates,
         candidates_truncated,
         children_truncated,
         apps_truncated,

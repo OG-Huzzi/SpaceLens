@@ -51,7 +51,7 @@ pub enum AssociationScope {
 }
 
 /// One piece of evidence supporting a candidate association.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FootprintEvidence {
     pub kind: EvidenceKind,

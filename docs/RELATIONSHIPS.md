@@ -11,12 +11,14 @@ exist in Phase 4** (those belong to later phases, per the master plan).
 ```text
 Path identity            FsEntry::id / FsEntry::path (scan-scoped)
        ↓
-Object identity          FileIdentity — (volume, file id) proven from
-                         handles: Unix st_dev/st_ino via fstat; Windows
-                         volume serial + FILE_ID_INFO file id via
-                         query-only handles (Phase 3.2). Hard links
+Object identity          ObjectIdentity — (volume, file id, wide high
+                         bits) proven from handles: Unix st_dev/st_ino
+                         via fstat; Windows volume serial + FILE_ID_INFO
+                         via query-only handles (Phase 3.2). Hard links
                          share it. Never fabricated where the OS cannot
-                         prove it.
+                         prove it; high-bit provability is part of the
+                         identity — narrow never silently equals wide
+                         (Phase 6.1 unification).
        ↓
 Content identity         ContentHash — SHA-256 over bytes, published only
                          after the full Phase 3 mutation/identity/TOCTOU
@@ -157,7 +159,7 @@ without redesigning the relationship model.
 ## API / IPC contract (`coresight.v1.relationship.*`)
 
 `RelationshipReport`, `Relationship`, `RelationshipKind`, `Evidence`,
-`MemberRef`, `ObjectRef`, `AliasSet`, `ContentRef`, `Undetermined`,
+`MemberRef`, `ObjectIdentity`, `AliasSet`, `ContentRef`, `Undetermined`,
 `RelationshipStats`, `RelationshipOptions` — all serde camelCase (evidence
 `SCREAMING_SNAKE_CASE`), deterministic, additive-only within v1
 (docs/API_CONTRACTS.md). Internal engine types (raw digests, handles,

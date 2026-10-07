@@ -16,7 +16,7 @@ use coresight_history::{
     SnapshotBuilder, StoreError,
 };
 use coresight_identity::{
-    ContentRef, DuplicateStatus, MemberRef, ObjectRef, Relationship, RelationshipKind,
+    ContentRef, DuplicateStatus, MemberRef, ObjectIdentity, Relationship, RelationshipKind,
     RelationshipReport, RelationshipStats, StorageAccounting, Undetermined,
 };
 
@@ -625,17 +625,19 @@ fn relationship_round_trip() {
                 MemberRef {
                     entry_id: 1,
                     path: PathBuf::from("/scope-a/a.bin"),
-                    object: Some(ObjectRef {
+                    object: Some(ObjectIdentity {
                         volume: 1,
                         file_id: 10,
+                        file_id_hi: None,
                     }),
                 },
                 MemberRef {
                     entry_id: 2,
                     path: PathBuf::from("/scope-a/b.bin"),
-                    object: Some(ObjectRef {
+                    object: Some(ObjectIdentity {
                         volume: 1,
                         file_id: 11,
+                        file_id_hi: None,
                     }),
                 },
             ],
