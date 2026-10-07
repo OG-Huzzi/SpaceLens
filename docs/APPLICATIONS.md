@@ -309,3 +309,47 @@ tests the whole workspace natively on Ubuntu, Windows, and macOS.
 * `BundleMetadata`/`DesktopEntryMetadata` cover the common flat shapes; an
   input the parser cannot represent yields absent fields rather than guessed
   ones.
+
+## 22. Verification record
+
+Local gate on the verified HEAD (Windows host):
+
+```text
+cargo fmt --all --check                                     clean
+cargo clippy --workspace --all-targets --all-features -- -D warnings   clean
+cargo test --workspace                       661 passed, 0 failed (6 ignored)
+cargo test --workspace --all-features        661 passed, 0 failed (6 ignored)
+npm ci && npm run build                      success (tsc --noEmit + vite)
+git diff --check                             clean
+cross-target check (apps/capabilities/macos)  linux + darwin compile clean
+```
+
+CI for the exact verified commit **23a3f27** — run
+[37622477933](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37622477933),
+conclusion **success**:
+
+```text
+rust (ubuntu-latest)   success
+rust (windows-latest)  success
+rust (macos-latest)    success
+frontend               success
+```
+
+An earlier commit in this phase (`afad3bd`) went red on the two Unix jobs
+because one new Unix-gated assertion claimed a non-UTF-8 name never
+normalizes to the empty matching key; on Unix it does (U+FFFD is not
+alphanumeric). That was a test-authoring error, not a product defect — the
+behavior was already conservative. Fixed in `23a3f27`, with the invariant
+re-stated portably so it is exercised on every platform.
+
+## 23. Performance smoke suites
+
+The repository's existing `--ignored` performance guards were run locally and
+pass unchanged: engine, classifier, identity (with the >4 GiB streaming case
+skipped locally as CI does in the non-release job), history, and apps. No new
+benchmark was added, and no new performance suite is required by this layer —
+its bounded operations are covered by the hostile-fixture bounds tests above.
+
+The 4 GiB streaming proof (`huge_file_streams_beyond_4gib`) runs in release
+mode in CI only.
+
