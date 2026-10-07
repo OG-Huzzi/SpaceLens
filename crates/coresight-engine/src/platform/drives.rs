@@ -133,6 +133,8 @@ mod windows_drives {
 
 #[cfg(unix)]
 mod unix_drives {
+    use std::ffi::OsString;
+
     use super::*;
 
     struct UnixDrives;
@@ -165,38 +167,15 @@ mod unix_drives {
     impl DriveInfo for UnixDrives {
         fn list_volumes(&self) -> io::Result<Vec<VolumeInfo>> {
             // Linux: /proc/mounts (kernel-provided; no subprocess involved).
-            match std::fs::read_to_string("/proc/mounts") {
-                Ok(text) => {
-                    let mut out = Vec::new();
-                    for line in text.lines() {
-                        let mut fields = line.split_whitespace();
-                        let (Some(_dev), Some(mount), Some(fs_type)) =
-                            (fields.next(), fields.next(), fields.next())
-                        else {
-                            continue;
-                        };
-                        if is_pseudo(fs_type) {
-                            continue;
-                        }
-                        let mount = unescape_mount_path(mount);
-                        out.push(VolumeInfo {
-                            id: None,
-                            root: PathBuf::from(mount),
-                            label: None,
-                            fs_type: Some(fs_type.to_string()),
-                            kind: if fs_type == "nfs" || fs_type == "cifs" || fs_type == "smbfs" {
-                                VolumeKind::Network
-                            } else {
-                                VolumeKind::Unknown
-                            },
-                            // statvfs needs a libc dependency; Phase 1 reports
-                            // Unix capacity as unknown. Owned follow-up.
-                            capacity: None,
-                            available: None,
-                        });
-                    }
-                    Ok(out)
-                }
+            // Read as raw bytes: a mount path is an arbitrary byte string,
+            // and the project's path-losslessness guarantee forbids UTF-8
+            // round-trips on paths (a read_to_string would silently drop
+            // the whole table the moment any path is not valid UTF-8).
+            match std::fs::read("/proc/mounts") {
+                Ok(bytes) => Ok(bytes
+                    .split(|b| *b == b'\n')
+                    .filter_map(parse_mount_line)
+                    .collect()),
                 Err(_) => {
                     // Non-Linux Unix (e.g. macOS): no std-reachable mount
                     // table. Report the root honestly and nothing else.
@@ -214,10 +193,50 @@ mod unix_drives {
         }
     }
 
+    /// Parse one /proc/mounts line into a volume entry. `None` for malformed
+    /// lines and pseudo filesystems (filtered by policy, not by hope).
+    fn parse_mount_line(line: &[u8]) -> Option<VolumeInfo> {
+        let mut fields = line
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|f| !f.is_empty());
+        let (Some(_dev), Some(mount), Some(fs_type)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        // Filesystem type names are kernel ASCII identifiers; a non-UTF-8
+        // one is reported as `None` (honest unknown), never mangled.
+        let fs_type = std::str::from_utf8(fs_type).ok();
+        if fs_type.map(is_pseudo).unwrap_or(false) {
+            return None;
+        }
+        let network = matches!(fs_type, Some("nfs") | Some("cifs") | Some("smbfs"));
+        Some(VolumeInfo {
+            id: None,
+            root: PathBuf::from(unescape_mount_path(mount)),
+            label: None,
+            fs_type: fs_type.map(str::to_string),
+            kind: if network {
+                VolumeKind::Network
+            } else {
+                VolumeKind::Unknown
+            },
+            // statvfs needs a libc dependency; Phase 1 reports
+            // Unix capacity as unknown. Owned follow-up.
+            capacity: None,
+            available: None,
+        })
+    }
+
     /// Decode the octal escapes /proc/mounts uses (`\040` space, `\134`
-    /// backslash, `\011` tab, `\012` newline) so paths stay correct.
-    fn unescape_mount_path(s: &str) -> String {
-        let bytes = s.as_bytes();
+    /// backslash, `\011` tab, `\012` newline) at the BYTE level and build
+    /// the mount path losslessly. The kernel's escape set is ASCII, but the
+    /// path bytes around the escapes are arbitrary: a lossy UTF-8 decode
+    /// here could collapse two distinct mounts onto one fabricated path
+    /// (U+FFFD), violating the project's path-losslessness guarantee. Octal
+    /// escapes ≥ 128 stay literal, as before (the kernel never emits them).
+    fn unescape_mount_path(bytes: &[u8]) -> OsString {
+        use std::os::unix::ffi::OsStringExt;
         let mut out = Vec::with_capacity(bytes.len());
         let mut i = 0;
         while i < bytes.len() {
@@ -237,7 +256,7 @@ mod unix_drives {
             out.push(bytes[i]);
             i += 1;
         }
-        String::from_utf8_lossy(&out).into_owned()
+        OsString::from_vec(out)
     }
 
     pub(super) fn drive_info() -> &'static dyn DriveInfo {
@@ -247,17 +266,69 @@ mod unix_drives {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::path::PathBuf;
+
+        fn decoded(bytes: &[u8]) -> PathBuf {
+            PathBuf::from(unescape_mount_path(bytes))
+        }
 
         #[test]
         fn mount_path_unescaping_decodes_octal_escapes() {
             assert_eq!(
-                unescape_mount_path("/mnt/with\\040space"),
-                "/mnt/with space"
+                decoded(b"/mnt/with\\040space"),
+                PathBuf::from("/mnt/with space")
             );
-            assert_eq!(unescape_mount_path("/plain"), "/plain");
-            assert_eq!(unescape_mount_path("/tab\\011sep"), "/tab\tsep");
+            assert_eq!(decoded(b"/plain"), PathBuf::from("/plain"));
+            assert_eq!(decoded(b"/tab\\011sep"), PathBuf::from("/tab\tsep"));
             // Incomplete escape stays literal.
-            assert_eq!(unescape_mount_path("/trailing\\04"), "/trailing\\04");
+            assert_eq!(decoded(b"/trailing\\04"), PathBuf::from("/trailing\\04"));
+        }
+
+        #[test]
+        fn mount_path_decoding_is_lossless_for_non_utf8_bytes() {
+            use std::os::unix::ffi::OsStrExt;
+            // A mount path is an arbitrary byte string: every byte must
+            // survive exactly (no U+FFFD substitution, no UTF-8 round-trip).
+            let raw: &[u8] = b"/mnt/\xff\xfe-dir";
+            let first = unescape_mount_path(raw);
+            assert_eq!(first.as_os_str().as_bytes(), raw);
+            // Distinct byte strings must stay distinct paths.
+            let other: &[u8] = b"/mnt/\xff\xff-dir";
+            assert_ne!(first, unescape_mount_path(other));
+        }
+
+        #[test]
+        fn mount_line_parsing_decodes_and_filters() {
+            let vol = parse_mount_line(b"/dev/sda1 /mnt/with\\040space ext4 rw 0 0")
+                .expect("a plain ext4 line parses");
+            assert_eq!(vol.root, PathBuf::from("/mnt/with space"));
+            assert_eq!(vol.fs_type.as_deref(), Some("ext4"));
+            assert_eq!(vol.kind, VolumeKind::Unknown);
+
+            assert!(
+                parse_mount_line(b"proc /proc proc rw 0 0").is_none(),
+                "pseudo filesystems are filtered"
+            );
+            assert!(
+                parse_mount_line(b"").is_none(),
+                "malformed lines are dropped"
+            );
+
+            let nfs =
+                parse_mount_line(b"host:/share /mnt/nas nfs rw 0 0").expect("an nfs line parses");
+            assert_eq!(nfs.kind, VolumeKind::Network);
+        }
+
+        #[test]
+        fn mount_line_with_invalid_utf8_keeps_entry_honestly() {
+            // A non-UTF-8 filesystem type is not a pseudo filesystem and
+            // must not mangle the entry: fs_type becomes `None`, the mount
+            // path survives byte-exactly.
+            use std::os::unix::ffi::OsStrExt;
+            let line: &[u8] = b"/dev/sdb1 /mnt/ok \xff\xfe-type rw 0 0";
+            let vol = parse_mount_line(line).expect("the entry is kept");
+            assert_eq!(vol.fs_type, None);
+            assert_eq!(vol.root.as_os_str().as_bytes(), b"/mnt/ok" as &[u8]);
         }
     }
 }
@@ -278,15 +349,37 @@ pub fn drive_info() -> &'static dyn DriveInfo {
 
 struct StdDirs;
 
+// Platform behavior lives in cfg-selected modules — the shared `SysDirs`
+// impl never branches at runtime (docs/CROSS_PLATFORM.md). Mirrors the
+// `drive_info()` selection pattern above.
+#[cfg(windows)]
+mod windows_dirs {
+    use super::*;
+
+    pub(super) fn home() -> Option<PathBuf> {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+}
+
+#[cfg(unix)]
+mod unix_dirs {
+    use super::*;
+
+    pub(super) fn home() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
 impl SysDirs for StdDirs {
     fn home(&self) -> Option<PathBuf> {
         // Deliberately not std::env::home_dir (its behavior differs across
-        // versions); read the canonical env vars directly.
-        if cfg!(windows) {
-            std::env::var_os("USERPROFILE").map(PathBuf::from)
-        } else {
-            std::env::var_os("HOME").map(PathBuf::from)
-        }
+        // versions); read the canonical per-OS env var directly.
+        #[cfg(windows)]
+        return windows_dirs::home();
+        #[cfg(unix)]
+        return unix_dirs::home();
+        #[cfg(not(any(unix, windows)))]
+        return None;
     }
 
     fn temp(&self) -> PathBuf {

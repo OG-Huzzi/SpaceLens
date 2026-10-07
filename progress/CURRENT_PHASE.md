@@ -1,111 +1,112 @@
 # CoreSight — Current State
 
-- **Current phase:** PHASE 6 — Application intelligence (foundation hardened)
-- **Status:** Phase 6 foundation COMPLETE and second-order audited.
-  Phase 5.1 REPAIRED and second-order audited. CI regression repaired
-  (see CI section for the recorded run).
+- **Current phase:** PHASE 6.1 — Mac-first power-tools foundation &
+  product architecture.
+- **Status:** Phase 6.1 COMPLETE on this machine (all local gates green,
+  macOS/Linux cross-checks green). NOT yet VERIFIED as a phase: the
+  macOS runtime observation path awaits macOS-CI execution, and this
+  phase awaits independent verification before any further work.
+- **Product direction (binding from this phase):** CoreSight is a
+  **macOS system intelligence + power-tools application** — NOT a "Mac
+  cleaner". macOS is the primary implementation and launch platform;
+  Windows/Linux remain architectural targets with their abstractions
+  intact. Storage is one pillar of seven
+  (docs/MACOS_ARCHITECTURE.md).
 - **Last updated:** 2026-10-06.
 
-## What happened (2026-10-04 → 2026-10-06)
+## What happened in this phase (2026-10-06 → 2026-10-07)
 
-1. **CI regression repaired.** The `coresight-apps` push failed Rust CI
-   on all three platforms under current stable Clippy
-   (`needless_borrow`, `new_without_default`, `manual_map`,
-   `chunks_exact_to_as_chunks`, plus `cmp_owned` and
-   `cloned_ref_to_slice_refs` surfaced under `--all-targets`). Fixed by
-   idiomatic rewrites — no `allow(...)` suppressions, no behavior change.
-   Hive-path splitting and REG_SZ/EXPAND_SZ decoding were extracted into
-   platform-neutral helpers (`split_hive_path`, `decode_registry_string`)
-   with 16 new tests that run on every CI platform.
-2. **Phase 5.1 second-order audit.** Verified and hardened:
-   - 128-bit identity: extreme values (`0`, `1`,
-     `0x7fff_ffff_ffff_ffff`, `0x8000_0000_0000_0000`, `u64::MAX`)
-     round-trip model → SQLite → reload exactly (new tests).
-   - Event ids: the canonical event tuple now uses the LOSSLESS path
-     encoding instead of `Path::display()` — distinct non-UTF-8 paths
-     that display-collapse to the same U+FFFD spelling no longer
-     collide on event id (regression test).
-   - Corruption handling: persisted status/kind/config/roots/path
-     decoders are strict. Unknown persisted values are typed errors, not
-     silent defaults (previously an unknown status reloaded as
-     `Running`, unknown kind as `File`, corrupt config as the CURRENT
-     config, corrupt roots as an empty scope, malformed tagged paths as
-     raw strings). Legacy untagged paths still load as-represented.
-   - Schema safety: a store whose `schema_version` is newer than the
-     build is refused (`StoreError::SchemaTooNew`) without modifying it.
-   - Relationship completeness: migration v4 persists each run's
-     relationship-report status/truncation; a reloaded run can no longer
-     claim `Completed` when the derivation was partial, and a run with
-     no recorded report reloads with none.
-3. **Phase 6 second-order audit.** Verified and hardened:
-   - Source coverage is now a five-state model
-     (`COMPLETE`/`PARTIAL`/`UNSUPPORTED`/`FAILED`/`UNAVAILABLE`).
-     An absent registry view is `Partial`/`Unavailable`, MSIX is
-     `Unsupported`; "source unavailable" can never read as "nothing
-     found".
-   - Inventory merging is bounded and deterministic: canonical source
-     order, first-applied-view preference (call-order independent),
-     over-long names rejected (not truncated) with exact counting.
-   - Footprint discovery is bounded on every axis (apps, children per
-     root, evidence per candidate, total candidates) with canonical
-     ordering BEFORE capping and exact truncation counters.
-   - Identity: deterministic, version-independent,
-     publisher/source-sensitive (tests for duplicate records, version
-     upgrades, same-name/different-publisher, cross-source).
-   - Shared-resource safety: name-coincidence evidence maps to at most
-     `Possible` ownership; a shared directory matching no app is never
-     claimed; only installer-recorded install locations are `Confirmed`.
+1. **Architecture audit.** Read every doc, all six crates and the
+   progress files; verified each Phase 6.1 assumption in code rather
+   than trusting prior reports.
+2. **New shared contracts crate `coresight-capabilities`** (platform-
+   neutral; a source-scan test bans OS conditionals in it):
+   - Seven-pillar capability taxonomy (`Pillar`).
+   - Typed capability contracts A–H plus privacy/software-management,
+     each with a stable kebab id, pillar, and a PINNED honest status
+     (`Implemented`/`Partial`/`Planned`/`Deferred`) in `CONTRACTS` —
+     overclaiming is now a failing test.
+   - `Observation<T>` honesty envelope: observed / inferred /
+     unsupported / unavailable / failed as a tagged enum — a
+     non-observed state structurally cannot carry a payload, and
+     deserialization cannot smuggle one in (`deny_unknown_fields`).
+   - `AccessState` path-access truth model (7 states): exists-but-
+     inaccessible ≠ empty ≠ does-not-exist ≠ unsupported ≠ failed.
+   - Safety action pipeline: explicit classification (exactly one
+     effect + optional privileged/permission-sensitive qualifiers),
+     OBSERVE→…→ROLLBACK with an unskippable stage machine, gate-only
+     VALIDATE, and `ExecutionPolicy::CURRENT_BUILD` (read-only only) at
+     the veto point. A blocked verdict permanently bars EXECUTE. No
+     executor exists anywhere in this build.
+3. **New macOS boundary crate `coresight-macos`** (compiles everywhere;
+   observes only on macOS; `Unsupported` on other hosts — never empty):
+   - 15-source catalog (`SOURCES`): read access / sensitivity /
+     modification risk / phase availability for /Applications, ~/Library
+     areas (Application Support, Caches, Logs, Containers, Group
+     Containers, Preferences), LaunchAgents/LaunchDaemons (user +
+     system), login items (deferred — needs OS API), TCC-protected user
+     data (RequiresFullDiskAccess, deferred, never probed without an
+     explicit user grant), mounted volumes, APFS volume info (deferred).
+   - Bounded read-only listing observation with honest access-state
+     mapping (metadata-denied ⇒ Failed, listing-denied-after-stat ⇒
+     ExistsButInaccessible, empty listing ⇒ Empty). No content reads,
+     no recursion, no writes, no subprocesses, no privilege escalation.
+   - Capability↔source relation table; non-macOS hosts report every
+     source `Unsupported` with a reason.
+4. **Scanner honesty repairs (Task 8):**
+   - `SymlinkPolicy::FollowWithCycleGuard` was declared but ignored by
+     the scanner (a silent downgrade to record-only). It is now
+     explicitly REJECTED: the scan fails with a typed `Unsupported`
+     error before the filesystem is touched (`is_implemented()` added;
+     docs + 3 tests).
+   - Scan-root links now get child-link semantics (honest target +
+     broken flags) via a shared `build_link_entry`; a root link is
+     recorded, never followed (2 tests).
+   - `read_link_target` errors are typed, never silent `.ok()` "no
+     target": the entry carries the real category and the error is
+     tallied (2 tests). A link whose own metadata fails keeps its real
+     category and makes no broken claims (1 test).
+   - `cfg!(windows)` removed from the shared `SysDirs` impl; platform
+     selection now lives in cfg-selected modules (the `drive_info()`
+     pattern).
+   - Linux mount-path decoding is now byte-exact (lossless): /proc/mounts
+     is read as bytes and paths are built from raw bytes via
+     `OsString::from_vec`; a non-UTF-8 fs-type keeps the entry with
+     `fs_type: None` instead of mangling or dropping it. This repairs a
+     real path-losslessness violation (U+FFFD could collapse two mounts
+     onto one fabricated path). 4 unit tests, plus parse extraction.
 
-## Verification (local, 2026-10-06)
+## Verification (local, 2026-10-07, Windows 11 GNU toolchain, Rust 1.99.0)
 
 - `cargo fmt --check` — clean.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-  — clean (Rust 1.99.0, the CI toolchain generation).
-- `cargo test --workspace` — green: 515 passed, 0 failed (2 ignored
-  perf suites run separately).
-- `cargo check -p coresight-apps` for Linux and macOS targets — green.
-- New tests: 20 app-audit regressions + 16 registry-decode + 16
-  history-audit regressions (extreme identities, lossless event ids,
-  corruption rejection, schema refusal, relationship-status persistence).
+  — clean.
+- `cargo test --workspace` — **577 passed, 0 failed** (2 ignored perf
+  suites run separately; was 515 before this phase → +62 new tests).
+- Cross-target compile checks (all targets incl. tests):
+  `cargo check -p coresight-capabilities -p coresight-macos -p
+  coresight-engine --all-targets --target x86_64-apple-darwin` — green;
+  same for `x86_64-unknown-linux-gnu` — green.
 
-## CI
+## Honest limitations
 
-`.github/workflows/ci.yml` runs the full gate on Windows/Linux/macOS plus
-the frontend. `--workspace` includes `coresight-apps` and
-`coresight-history` automatically.
-
-**CI VERIFIED (2026-10-06): run 37483779232 for commit `e697fec` —
-rust ubuntu SUCCESS, rust windows SUCCESS, rust macos SUCCESS,
-frontend SUCCESS.**
-https://github.com/OG-Huzzi/SpaceLens/actions/runs/37483779232
-The two follow-up commits after it (`3d2db26` docs, `5a4b5be` error-text
-privacy fix) each re-ran the full gate and are green as well — current
-HEAD `5a4b5be`: run 37487037197, conclusion SUCCESS.
-
-Repair sequence recorded: `20778a1` (gate + audit repairs) exposed two
-pre-existing platform-dependent test-fixture bugs on Linux/macOS that
-Clippy had previously gated (`db1b612` phase-6 fake-fs fixtures,
-`d782e4e` registry-key separators, `e697fec` path-coverage fixture) —
-all fixed as fixture corrections; product code unchanged in those
-commits.
-
-## Known limitations
-
-- MSIX/AppX enumeration is abstracted but returns an explicit
-  `Unsupported` error on Windows (not silently empty).
-- Footprint discovery is name/evidence based; it does not yet read
-  package manifests, shortcut targets, or process-write observations.
-- Phase 6 does not persist application graph to SQLite yet, and does
-  not yet feed observed entries from `coresight-history` snapshots.
-- `Win32RegistryView` enumerates subkeys with a fixed 260-UTF-16-unit
-  buffer: names longer than that are skipped and COUNTED, and an OS
-  enumeration error marks the view's coverage `Partial` (never a silent
-  clean end). Real machines do not produce such keys in the uninstall
-  views, but the accounting is exact either way.
-- No uninstaller behavior — foundation only.
+- The macOS runtime observation path (`observe_host_sources` + the
+  macOS-gated host tests) is compile-checked for
+  `x86_64-apple-darwin` here but NOT runtime-verified on a Mac in this
+  phase: it requires the macOS CI job (`.github/workflows/ci.yml` picks
+  up the new crates automatically via `--workspace`). Per the phase
+  rules, no macOS capability is claimed verified beyond compilation.
+- The unix-gated Linux unit tests (mount parsing, lossless decoding)
+  compile-checked for the Linux target; runtime execution likewise
+  awaits Linux/macOS CI.
+- No capability produces real data yet beyond the existing Windows
+  application-intelligence providers; every new contract is honestly
+  `Planned`/`Partial`/`Deferred` in the pinned `CONTRACTS` table.
+- The safety pipeline is a boundary, not an executor: nothing in this
+  build executes any state-changing action.
 
 ## Next authorized work
 
-- Nothing is authorized until the repair push's CI run is recorded green
-  here. The next candidate milestone is application-intelligence
-  persistence (inventory → SQLite) once CI is verified.
+- NOTHING is authorized until this phase passes independent
+  verification and its CI run is recorded green here. Stop after this
+  phase (per the phase contract).

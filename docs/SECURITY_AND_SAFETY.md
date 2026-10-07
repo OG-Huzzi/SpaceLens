@@ -23,6 +23,25 @@ Rules:
   for items Trash cannot hold. Permanent deletion requires explicit, separate,
   twice-confirmed user intent and is never the default button.
 
+## Typed action classification + stage pipeline (Phase 6.1)
+
+`coresight-capabilities::safety` encodes the generic model every future
+capability action must flow through (docs/MACOS_ARCHITECTURE.md):
+
+- Stages, strictly in order: `OBSERVE → ANALYZE → RECOMMEND → PREVIEW →
+  VALIDATE → EXECUTE → VERIFY → ROLLBACK`. The pipeline accepts only the
+  next stage — skipping is a typed error — and EXECUTE requires an ALLOWED
+  verdict from the gate. Tests prove discovery cannot jump to deletion.
+- Actions are explicitly classified: exactly one effect (read-only /
+  reversible / destructive) plus optional qualifiers (privileged /
+  permission-sensitive). There is no unclassified action.
+- `SafetyGate` is the veto point: it depends on nothing but the
+  classification and `ExecutionPolicy::CURRENT_BUILD` (read-only only).
+  In this build **no state-changing action can reach EXECUTE** — widening
+  the policy is a deliberate, separately authorized change with its own
+  review and tests. This section's pipeline above is the human-facing
+  form of the same contract; the typed pipeline is its enforcement.
+
 ## Protection domains (non-exhaustive; policy tables versioned in code)
 
 - **System & boot:** OS install dirs, bootloaders, WinSxS/Installer, /System,

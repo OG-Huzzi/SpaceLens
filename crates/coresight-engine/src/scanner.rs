@@ -20,7 +20,7 @@ use std::time::{Instant, SystemTime};
 use crate::cancel::CancelHandle;
 use crate::error::{ErrorCategory, ScanError, ScanErrorReport};
 use crate::model::{EntryKind, FsEntry, LinkInfo, LinkKind};
-use crate::options::ScanOptions;
+use crate::options::{ScanOptions, SymlinkPolicy};
 use crate::platform::{ChildInfo, FsKind, PlatformFs};
 use crate::progress::ScanEvent;
 use crate::summary::{ScanStatus, ScanSummary};
@@ -68,6 +68,19 @@ pub fn scan_with(
         );
     }
 
+    // An unimplemented follow-mode is refused explicitly, before the
+    // filesystem is touched: silently downgrading to record-only would
+    // misrepresent what was scanned (docs/SCANNER.md §Symlink policy).
+    if options.symlink_policy == SymlinkPolicy::FollowWithCycleGuard {
+        let err = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "SymlinkPolicy::FollowWithCycleGuard is not implemented; no traversal was performed",
+        );
+        shared.record_error_categorized(ErrorCategory::Unsupported, root, &err);
+        sink(ScanEvent::Progress(shared.snapshot(started)));
+        return finish(ScanStatus::Failed, root, &shared, started_at, started, sink);
+    }
+
     // Phase: preparing — resolve the root.
     let root_meta = match platform.metadata(root) {
         Ok(md) => md,
@@ -81,8 +94,16 @@ pub fn scan_with(
 
     // A non-directory root is a one-entry scan (file / link / special node).
     if root_meta.kind != crate::platform::FsKind::Dir {
-        let entry = shared.build_entry(None, root.to_path_buf(), &root_meta, platform);
-        shared.apply_entry(&entry, &root_meta);
+        let entry = if root_meta.kind == crate::platform::FsKind::Symlink {
+            // Root links get exactly the same honest target/broken semantics
+            // as any other link — and like every link, they are recorded,
+            // never followed.
+            shared.build_link_entry(None, root.to_path_buf(), platform)
+        } else {
+            let entry = shared.build_entry(None, root.to_path_buf(), &root_meta, platform);
+            shared.apply_entry(&entry, &root_meta);
+            entry
+        };
         if options.emit_entries {
             sink(ScanEvent::Entry(Box::new(entry)));
         }
@@ -263,7 +284,14 @@ impl Shared {
     }
 
     fn record_error(&self, path: &Path, err: &std::io::Error, platform: &dyn PlatformFs) {
-        let scan_err = ScanError::new(platform.categorize_error(err), path.to_path_buf(), err);
+        self.record_error_categorized(platform.categorize_error(err), path, err);
+    }
+
+    /// Record an error whose category is already known — platform behavior
+    /// was applied earlier, or the category is platform-independent (e.g. a
+    /// policy refusal).
+    fn record_error_categorized(&self, category: ErrorCategory, path: &Path, err: &std::io::Error) {
+        let scan_err = ScanError::new(category, path.to_path_buf(), err);
         self.report.lock().unwrap().record(scan_err);
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
@@ -336,6 +364,118 @@ impl Shared {
         if entry.error.is_some() {
             self.entries_with_errors.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Build one link entry (root or child) with honest semantics:
+    ///
+    /// - a failure of the link's own metadata is recorded with its real
+    ///   category, and no target/broken claims are made — we do not describe
+    ///   a link we could not stat;
+    /// - the target is read once; a failed target read is a typed entry
+    ///   error, never a silent "no target";
+    /// - a target that stats as missing marks the link `broken`;
+    /// - root links (parent `None`) get exactly these semantics — no
+    ///   special case.
+    ///
+    /// Counter updates (links, entries-with-errors) are applied here.
+    fn build_link_entry(
+        &self,
+        parent_id: Option<u64>,
+        link_path: PathBuf,
+        platform: &dyn PlatformFs,
+    ) -> FsEntry {
+        let md = platform.metadata(&link_path);
+        let mut entry = match &md {
+            Ok(md) => self.build_entry(parent_id, link_path.clone(), md, platform),
+            Err(err) => {
+                let category = platform.categorize_error(err);
+                self.record_error_categorized(category, &link_path, err);
+                FsEntry {
+                    id: self.next_id.fetch_add(1, Ordering::Relaxed),
+                    parent_id,
+                    path: link_path.clone(),
+                    kind: EntryKind::Link(LinkInfo {
+                        kind: LinkKind::Unknown,
+                        target: None,
+                        broken: false,
+                    }),
+                    size: 0,
+                    allocated_size: None,
+                    modified: None,
+                    created: None,
+                    accessed: None,
+                    changed: None,
+                    device: None,
+                    inode: None,
+                    file_id_hi: None,
+                    hidden: false,
+                    error: Some(crate::model::ErrorCategoryRef::from(category)),
+                }
+            }
+        };
+
+        let (raw_target, target_read_error, broken) = if md.is_err() {
+            (None, None, false)
+        } else {
+            // Read the target path (this does not resolve its existence by
+            // itself). A failed read is typed — it must never collapse into
+            // "no target".
+            let mut target_read_error = None;
+            let raw_target = match platform.read_link_target(&link_path) {
+                Ok(target) => Some(target),
+                Err(err) => {
+                    let category = platform.categorize_error(&err);
+                    self.record_error_categorized(category, &link_path, &err);
+                    target_read_error = Some(category);
+                    None
+                }
+            };
+            let mut broken = false;
+            if let Some(target) = &raw_target {
+                // read_link may return a target relative to the link's
+                // directory.
+                let resolved = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    link_path
+                        .parent()
+                        .map(|p| p.join(target))
+                        .unwrap_or_else(|| target.clone())
+                };
+                match platform.metadata(&resolved) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if platform.categorize_error(&err) == ErrorCategory::NotFound {
+                            broken = true;
+                        } else {
+                            self.record_error(&resolved, &err, platform);
+                        }
+                    }
+                }
+            }
+            (raw_target, target_read_error, broken)
+        };
+
+        if let EntryKind::Link(info) = &mut entry.kind {
+            info.target = raw_target;
+            info.broken = broken;
+        }
+
+        // Error precedence: a proven-broken target is the entry's state;
+        // otherwise the first intrinsic failure keeps its real category.
+        if broken {
+            entry.error = Some(crate::model::ErrorCategoryRef::BrokenLink);
+        } else if entry.error.is_none() {
+            if let Some(category) = target_read_error {
+                entry.error = Some(crate::model::ErrorCategoryRef::from(category));
+            }
+        }
+
+        self.links.fetch_add(1, Ordering::Relaxed);
+        if entry.error.is_some() {
+            self.entries_with_errors.fetch_add(1, Ordering::Relaxed);
+        }
+        entry
     }
 
     fn snapshot(&self, started: Instant) -> crate::progress::ProgressSnapshot {
@@ -506,9 +646,9 @@ fn process_dir(
     }
 }
 
-/// Record a link without recursing into it. Broken links are an explicit
-/// recorded state; a link whose target errors while resolving records a
-/// typed error and continues the scan.
+/// Record a link without recursing into it. All semantics — metadata,
+/// target read, brokenness — live in [`Shared::build_link_entry`] so root
+/// links and child links behave identically.
 fn handle_link(
     shared: &Shared,
     platform: &dyn PlatformFs,
@@ -517,73 +657,7 @@ fn handle_link(
     link_path: PathBuf,
     tx: &SyncSender<FsEntry>,
 ) {
-    let (md, md_err) = match platform.metadata(&link_path) {
-        Ok(md) => (Some(md), None),
-        Err(err) => (None, Some(err)),
-    };
-
-    let mut entry = match &md {
-        Some(md) => shared.build_entry(Some(parent_id), link_path.clone(), md, platform),
-        None => FsEntry {
-            id: shared.next_id.fetch_add(1, Ordering::Relaxed),
-            parent_id: Some(parent_id),
-            path: link_path.clone(),
-            kind: EntryKind::Link(LinkInfo {
-                kind: LinkKind::Unknown,
-                target: None,
-                broken: true,
-            }),
-            size: 0,
-            allocated_size: None,
-            modified: None,
-            created: None,
-            accessed: None,
-            changed: None,
-            device: None,
-            inode: None,
-            file_id_hi: None,
-            hidden: false,
-            error: Some(crate::model::ErrorCategoryRef::from(
-                platform.categorize_error(md_err.as_ref().unwrap()),
-            )),
-        },
-    };
-
-    // Read the target path (this does not resolve its existence by itself).
-    let raw_target = platform.read_link_target(&link_path).ok();
-    let mut broken = false;
-    if let Some(target) = &raw_target {
-        // read_link may return a target relative to the link's directory.
-        let resolved = if target.is_absolute() {
-            target.clone()
-        } else {
-            link_path
-                .parent()
-                .map(|p| p.join(target))
-                .unwrap_or_else(|| target.clone())
-        };
-        match platform.metadata(&resolved) {
-            Ok(_) => {}
-            Err(err) => {
-                if platform.categorize_error(&err) == ErrorCategory::NotFound {
-                    broken = true;
-                } else {
-                    shared.record_error(&resolved, &err, platform);
-                }
-            }
-        }
-    }
-
-    if let EntryKind::Link(info) = &mut entry.kind {
-        info.target = raw_target;
-        info.broken = broken;
-    }
-
-    shared.links.fetch_add(1, Ordering::Relaxed);
-    if broken || md.is_none() {
-        shared.entries_with_errors.fetch_add(1, Ordering::Relaxed);
-        entry.error = Some(crate::model::ErrorCategoryRef::BrokenLink);
-    }
+    let entry = shared.build_link_entry(Some(parent_id), link_path, platform);
     if options.emit_entries {
         let _ = tx.send(entry);
     }

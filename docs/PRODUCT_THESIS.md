@@ -1,12 +1,34 @@
 # CoreSight — Product Thesis
 
-Status: Phase 0 foundation document. Hypotheses to be validated with real users before Phase 1 scope is locked.
+Status: Phase 0 foundation document; direction revised in Phase 6.1.
+Hypotheses to be validated with real users before launch scope is locked.
+
+> **Direction update (Phase 6.1, 2026-10-06):** CoreSight is now a
+> **macOS-first** launch product and a **macOS system intelligence +
+> power-tools application** — NOT a "Mac cleaner". Storage intelligence is
+> one pillar of seven (Storage, Applications, System, Privacy/Housekeeping,
+> Performance/Diagnostics, Software Management, History/Forensics — see
+> `docs/MACOS_ARCHITECTURE.md`). macOS is the primary implementation and
+> launch platform; Windows/Linux abstractions stay intact as future
+> targets. Distinguish carefully:
+>
+> - **IMPLEMENTED** — exists in this build and is exercised by tests
+>   (scanner, classifier, identity, history, application foundation on
+>   Windows; capability contracts everywhere).
+> - **VERIFIED** — implemented AND crossed a recorded gate
+>   (`progress/PHASES.md`, `progress/CURRENT_PHASE.md`).
+> - **PLANNED** — typed contract only; macOS providers, diagnostics,
+>   startup intelligence, and ANY state-changing action are planned or
+>   deferred, never claimed.
 
 ## Who CoreSight is for
 
-Primary: non-technical to semi-technical desktop owners (Windows first, then macOS/Linux)
-who hit "disk full" and feel anxiety, not curiosity. They do not know what AppData,
-Library, or inodes are, and they should never need to.
+Primary: Mac owners — non-technical to semi-technical — who hit "disk
+full", wonder why their Mac slowed down, or want to know what an app left
+behind. They do not know what Library, Containers, or inodes are, and they
+should never need to. (Revised Phase 6.1: the launch audience is macOS
+first; the original "Windows first" phrasing below predates the
+Mac-first direction.)
 
 Secondary: developers, gamers, and creators whose drives fill with large, legible
 categories (repos, models, games, media) and who want fast answers plus drill-down control.

@@ -1,5 +1,28 @@
 # CoreSight — Phase Map & Roadmap
 
+## Launch-platform priority (Phase 6.1, 2026-10-06)
+
+**macOS is the PRIMARY implementation and launch platform.** Development
+priority order from here on:
+
+```
+macOS backend/core
+    ↓
+macOS capabilities (inventory, footprints, startup/launchd, volumes, diagnostics)
+    ↓
+macOS safety (typed pipeline hardening against real actions)
+    ↓
+macOS product completeness
+    ↓
+frontend / release work
+    ↓
+Windows/Linux expansion (later; abstractions stay intact meanwhile)
+```
+
+Windows/Linux abstractions and existing per-OS behavior are NOT deleted.
+CoreSight is NOT a "Mac cleaner" — it is a macOS system intelligence +
+power-tools application; storage is one pillar (docs/MACOS_ARCHITECTURE.md).
+
 ## Gate rule
 
 A phase is VERIFIED only when its status file checks every acceptance criterion
@@ -56,6 +79,20 @@ current-state claims. Current-state documents use CoreSight.
     NOT VERIFIED as a phase: persistence is not built and the phase's
     own success criteria (platform-matrix parity review) are unmet.
     See `progress/CURRENT_PHASE.md`.
+  - [x] **PHASE 6.1 — Mac-first power-tools foundation & product
+    architecture.** CoreSight re-architected as a macOS system
+    intelligence + power-tools application (7 pillars): new shared
+    contracts crate `coresight-capabilities` (pillars, typed capability
+    contracts A–H with pinned honest statuses, observation honesty
+    envelope, path-access truth model, safety action pipeline with
+    unskippable stages + policy-gated veto point) and new macOS boundary
+    crate `coresight-macos` (15-source classified catalog, bounded
+    read-only observation, honest `Unsupported` on non-macOS hosts).
+    Scanner honesty repairs: `FollowWithCycleGuard` explicitly rejected
+    with typed `Unsupported` (never silently record-only), root links
+    get child-link semantics, link-target/metadata read errors typed.
+    Linux mount paths decoded byte-exactly (lossless). Status: see
+    `progress/CURRENT_PHASE.md` (macOS runtime observation awaits CI).
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.

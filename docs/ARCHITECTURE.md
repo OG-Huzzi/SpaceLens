@@ -1,7 +1,9 @@
 # CoreSight — Technical Architecture
 
-Status: Phase 0 contract. Evaluated against the proposed stack; stack is KEPT.
-Minimal scaffold validation in Phase 0; full implementation starts Phase 1.
+Status: Phase 0 contract; capability layer added in Phase 6.1. Evaluated
+against the proposed stack; stack is KEPT. The product is a macOS system
+intelligence + power-tools application (see docs/MACOS_ARCHITECTURE.md) —
+storage is one pillar, not the whole product.
 
 ## Stack decision
 
@@ -94,6 +96,22 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   candidates with confidence levels, ownership strength that never
   upgrades weak evidence, and human-readable explanations
   (`crates/coresight-apps`; no network, no execution — foundation only).
+- `capabilities` — the Phase 6.1 Mac-first capability architecture:
+  the seven product pillars, the typed capability contracts with pinned
+  honest statuses, the observation honesty envelope (observed / inferred /
+  unsupported / unavailable / failed — a non-observed state structurally
+  cannot carry a payload), the path-access truth model (exists-but-
+  inaccessible ≠ empty, seven states), and the safety action pipeline
+  (OBSERVE → ANALYZE → RECOMMEND → PREVIEW → VALIDATE → EXECUTE → VERIFY
+  → ROLLBACK with an unskippable stage machine and a policy-gated veto
+  point) (`crates/coresight-capabilities`; platform-neutral by source-scan
+  test).
+- `macos` — the Phase 6.1 macOS discovery boundary: the classified source
+  catalog (14+ macOS locations with read access, sensitivity, modification
+  risk, phase availability), bounded read-only listing observation with
+  honest access states, and `Unsupported` reporting on non-macOS hosts
+  (`crates/coresight-macos`; never modifies anything, never bypasses TCC).
+  See docs/MACOS_ARCHITECTURE.md.
 - `relationships` — the Phase 4 relationship-intelligence layer: typed
   relationship kinds (hard-link aliases vs content duplicates), categorical
   evidence, deterministic ordering, conservative recoverability, undetermined

@@ -52,14 +52,23 @@ in downstream without touching it.
 
 - A link is emitted as `EntryKind::Link` with its target (as the OS reports
   it — may be relative) and a `broken` flag (target stat → NotFound).
+- Scan ROOTS that are links get the same semantics as child links (Phase
+  6.1): honest target, honest broken flag, never followed — no special case.
+- A link whose target cannot be READ is a typed per-entry error with its
+  real category (e.g. `PERMISSION_DENIED`) — never a silent "no target".
+  A link whose own metadata cannot be read keeps that real category too,
+  and makes no target/broken claims (Phase 6.1).
 - Windows junctions/mount points/symlinks all carry the reparse bit; they are
   classified `LinkKind::Reparse` (precise tag identification is a Phase-2+
   refinement; behavior is identical).
 - Consequence: filesystem cycles cannot cause infinite traversal — there is
   no recursion through links at all. Tested with a→b→a cycles, self-links,
   and broken links (fake platform + real-fs fixtures).
-- Follow-modes (with dev/ino cycle guards) are deliberately NOT implemented
-  in Phase 1; the policy enum is where they will land.
+- Follow-modes (with dev/ino cycle guards) remain UNIMPLEMENTED (Phase 6.1
+  decision): requesting `SymlinkPolicy::FollowWithCycleGuard` fails the scan
+  with a typed `Unsupported` error BEFORE the filesystem is touched — a
+  silent downgrade to record-only would misrepresent the scan. Implementation
+  is reserved for a later, separately authorized phase.
 
 ## Error handling
 
@@ -108,8 +117,10 @@ strings cross this boundary.
   (drives, capacity, fs type, volume serial), reparse/hidden attributes via
   std `MetadataExt`. Long paths: verified working via std's verbatim handling
   (test creates a >260-char fixture path).
-- Linux: `/proc/mounts` parsing (octal escapes decoded), pseudo-filesystem
-  filter list. Capacity: `None` (statvfs needs `libc` — owned follow-up).
+- Linux: `/proc/mounts` parsing (octal escapes decoded BYTE-EXACTLY — mount
+  paths survive as raw byte strings, never lossy-UTF-8; Phase 6.1),
+  pseudo-filesystem filter list. Capacity: `None` (statvfs needs `libc` —
+  owned follow-up).
 - macOS: no std-reachable mount table without `libc`; reports only the root
   volume honestly. Engine compiles + tests on macOS CI.
 - `Trash` trait intentionally absent (belongs to cleanup phases).
@@ -145,7 +156,9 @@ to nothing.
    — Phase 2+ (app attribution needs it).
 4. Allocated size on Windows requires `GetFileInformationByHandle` FFI —
    deferred; Unix reports blocks×512 already.
-5. Symlink follow-modes with cycle guards — future, opt-in only.
+5. Symlink follow-modes with cycle guards — explicitly UNIMPLEMENTED
+   (Phase 6.1): requesting one fails typed (`Unsupported`), it never
+   silently record-onlys.
 6. DB persistence of scan records — deferred until the Tauri service layer
    exists (keeps the engine DB-free per the Phase-1 boundary).
 

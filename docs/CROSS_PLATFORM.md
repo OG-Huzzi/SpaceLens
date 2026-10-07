@@ -1,7 +1,18 @@
 # CoreSight — Cross-Platform Strategy
 
-Status: Phase 0. Rule: shared by default, isolated by trait. Never a Windows-only
-core with ports bolted on later.
+Status: Phase 0; priority revised in Phase 6.1. Rule: shared by default,
+isolated by trait. Never a single-OS core with ports bolted on later.
+
+## Launch-platform priority (Phase 6.1)
+
+**macOS is the primary implementation and launch platform.** Development
+priority is: macOS backend/core → macOS capabilities → macOS safety →
+macOS product completeness → frontend/release work → Windows/Linux
+expansion later. The shared-core/platform-boundary rule below is unchanged
+and still binding; Windows/Linux abstractions (`PlatformFs`, `Trash`
+later, `DriveInfo`, `SysDirs`, per-OS trait impls) remain in place and are
+NOT deleted. macOS-specific behavior lives in `coresight-macos`; the
+shared layer never branches on the OS (enforced by source-scan tests).
 
 ## Principle
 

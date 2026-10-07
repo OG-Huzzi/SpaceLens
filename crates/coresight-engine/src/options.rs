@@ -15,12 +15,21 @@ pub enum SymlinkPolicy {
     /// Record links as [`crate::model::EntryKind::Link`] with their target
     /// (when readable) and never recurse into them. **Default.**
     RecordOnly,
-    /// Additionally recurse into directory links whose target the platform
-    /// can identify with a stable `(device, inode)` identity. Cycle-safe: a
-    /// directory already visited under that identity is never entered twice.
-    /// Links without a stable identity are recorded, not followed.
-    /// Must be enabled explicitly; never the default.
+    /// NOT IMPLEMENTED. Reserved for a later, separately authorized phase.
+    /// A scan requesting this policy fails with a typed `Unsupported` error
+    /// before the filesystem is touched — it is never silently downgraded
+    /// to record-only, which would misrepresent what was scanned
+    /// (docs/SCANNER.md §Symlink policy).
     FollowWithCycleGuard,
+}
+
+impl SymlinkPolicy {
+    /// Whether this build implements the policy. Only
+    /// [`SymlinkPolicy::RecordOnly`] is implemented; anything else is
+    /// refused with a typed `Unsupported` scan error.
+    pub fn is_implemented(self) -> bool {
+        matches!(self, SymlinkPolicy::RecordOnly)
+    }
 }
 
 /// Scan configuration. Root selection is always explicit — the engine never

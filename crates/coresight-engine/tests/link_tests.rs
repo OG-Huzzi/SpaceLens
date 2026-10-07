@@ -5,10 +5,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use common::{opts, run_fake, FakeFs};
+use common::{opts, run_fake, FakeFs, E_PERM};
 use coresight_engine::model::EntryKind;
 use coresight_engine::summary::ScanStatus;
-use coresight_engine::CancelHandle;
+use coresight_engine::{CancelHandle, ErrorCategory};
 
 #[test]
 fn symlink_cycle_terminates_and_is_not_followed() {
@@ -132,4 +132,153 @@ fn link_targets_may_be_relative() {
         }
         other => panic!("expected link, got {other:?}"),
     }
+}
+
+#[test]
+fn root_symlink_gets_child_link_semantics() {
+    // A root that is itself a link is recorded like any other link: honest
+    // target, honest broken flag, never followed (Phase 6.1).
+    let fs = Arc::new(FakeFs::new());
+    let root = PathBuf::from("/root-link");
+    let target = PathBuf::from("/real-dir");
+    fs.add_dir(&target);
+    fs.add_file(&target.join("inside.txt"), 4);
+    fs.add_symlink(&root, &target);
+
+    let rec = run_fake(&fs, &root, opts(), &CancelHandle::new());
+    let s = rec.summary();
+    assert_eq!(s.status, ScanStatus::Completed);
+    assert_eq!(s.links, 1);
+    assert_eq!(s.dirs, 0, "a root link is never followed into its target");
+    assert_eq!(s.files, 0, "files behind a root link are not counted");
+    let entry = rec.entries().find(|e| e.parent_id.is_none()).unwrap();
+    match &entry.kind {
+        EntryKind::Link(info) => {
+            assert_eq!(info.target.as_deref(), Some(Path::new("/real-dir")));
+            assert!(!info.broken);
+        }
+        other => panic!("expected link, got {other:?}"),
+    }
+}
+
+#[test]
+fn root_broken_symlink_is_explicit_state() {
+    let fs = Arc::new(FakeFs::new());
+    let root = PathBuf::from("/dangling-root");
+    fs.add_symlink(&root, &PathBuf::from("/missing-target"));
+    let rec = run_fake(&fs, &root, opts(), &CancelHandle::new());
+    let s = rec.summary();
+    assert_eq!(s.status, ScanStatus::Completed);
+    assert_eq!(s.links, 1);
+    assert_eq!(s.entries_with_errors, 1);
+    let entry = rec.entries().find(|e| e.parent_id.is_none()).unwrap();
+    match &entry.kind {
+        EntryKind::Link(info) => {
+            assert!(info.broken);
+            assert_eq!(info.target.as_deref(), Some(Path::new("/missing-target")));
+        }
+        other => panic!("expected link, got {other:?}"),
+    }
+}
+
+#[test]
+fn unreadable_link_target_is_typed_not_silent() {
+    // read_link_target failing (e.g. permission denied on the link) must
+    // not silently become "no target": the entry carries the real category
+    // and the error is tallied (Phase 6.1).
+    let fs = Arc::new(FakeFs::new());
+    let root = PathBuf::from("/links");
+    fs.add_dir(&root);
+    fs.add_symlink(&root.join("locked"), &PathBuf::from("/elsewhere"));
+    fs.fail_read_link(&root.join("locked"), E_PERM);
+
+    let rec = run_fake(&fs, &root, opts(), &CancelHandle::new());
+    let s = rec.summary();
+    assert_eq!(s.status, ScanStatus::Completed);
+    let entry = rec
+        .entries()
+        .find(|e| e.path.file_name().unwrap() == "locked")
+        .unwrap();
+    match &entry.kind {
+        EntryKind::Link(info) => {
+            assert_eq!(
+                info.target, None,
+                "target unreadable — but typed, not silent"
+            );
+            assert!(
+                !info.broken,
+                "an unreadable target is not a proven-broken target"
+            );
+        }
+        other => panic!("expected link, got {other:?}"),
+    }
+    assert_eq!(
+        entry.error,
+        Some(coresight_engine::model::ErrorCategoryRef::PermissionDenied)
+    );
+    assert_eq!(s.error_count(ErrorCategory::PermissionDenied), 1);
+    assert_eq!(s.entries_with_errors, 1);
+}
+
+#[test]
+fn root_link_target_read_error_matches_child_semantics() {
+    let fs = Arc::new(FakeFs::new());
+    let root = PathBuf::from("/locked-root-link");
+    fs.add_symlink(&root, &PathBuf::from("/elsewhere"));
+    fs.fail_read_link(&root, E_PERM);
+    let rec = run_fake(&fs, &root, opts(), &CancelHandle::new());
+    let s = rec.summary();
+    assert_eq!(s.status, ScanStatus::Completed);
+    let entry = rec.entries().find(|e| e.parent_id.is_none()).unwrap();
+    match &entry.kind {
+        EntryKind::Link(info) => {
+            assert_eq!(info.target, None);
+            assert!(!info.broken);
+        }
+        other => panic!("expected link, got {other:?}"),
+    }
+    assert_eq!(
+        entry.error,
+        Some(coresight_engine::model::ErrorCategoryRef::PermissionDenied)
+    );
+    assert_eq!(s.error_count(ErrorCategory::PermissionDenied), 1);
+    assert_eq!(s.entries_with_errors, 1);
+    assert_eq!(s.links, 1);
+}
+
+#[test]
+fn link_metadata_failure_keeps_its_real_category() {
+    // A link whose own stat fails (e.g. permission denied) is not "broken":
+    // the entry keeps the metadata error's real category, and no target or
+    // broken claims are made about a link we could not stat (Phase 6.1).
+    let fs = Arc::new(FakeFs::new());
+    let root = PathBuf::from("/ghost-link");
+    let target = PathBuf::from("/elsewhere");
+    fs.add_dir(&root);
+    fs.add_dir(&target);
+    fs.add_symlink(&root.join("ghost"), &target);
+    fs.fail_metadata(&root.join("ghost"), E_PERM);
+    let rec = run_fake(&fs, &root, opts(), &CancelHandle::new());
+    let s = rec.summary();
+    assert_eq!(s.status, ScanStatus::Completed);
+    let entry = rec
+        .entries()
+        .find(|e| e.path.file_name().unwrap() == "ghost")
+        .unwrap();
+    match &entry.kind {
+        EntryKind::Link(info) => {
+            assert!(
+                !info.broken,
+                "metadata failure does not prove the target missing"
+            );
+            assert_eq!(info.target, None);
+        }
+        other => panic!("expected link, got {other:?}"),
+    }
+    assert_eq!(
+        entry.error,
+        Some(coresight_engine::model::ErrorCategoryRef::PermissionDenied)
+    );
+    assert_eq!(s.error_count(ErrorCategory::PermissionDenied), 1);
+    assert_eq!(s.entries_with_errors, 1);
 }

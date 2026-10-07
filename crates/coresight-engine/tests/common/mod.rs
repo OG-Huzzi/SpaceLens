@@ -36,6 +36,8 @@ pub struct FakeNode {
     pub fail_metadata: Option<i32>,
     /// When set, listing this directory fails with this raw OS error code.
     pub fail_list: Option<i32>,
+    /// When set, reading this link's target fails with this raw OS error code.
+    pub fail_read_link: Option<i32>,
 }
 
 impl FakeNode {
@@ -45,6 +47,7 @@ impl FakeNode {
             hidden: false,
             fail_metadata: None,
             fail_list: None,
+            fail_read_link: None,
         }
     }
 }
@@ -217,6 +220,16 @@ impl FakeFs {
             .unwrap()
             .fail_metadata = Some(code);
     }
+
+    pub fn fail_read_link(&self, path: &Path, code: i32) {
+        self.inner
+            .lock()
+            .unwrap()
+            .nodes
+            .get_mut(path)
+            .unwrap()
+            .fail_read_link = Some(code);
+    }
 }
 
 impl PlatformFs for FakeFs {
@@ -283,8 +296,12 @@ impl PlatformFs for FakeFs {
 
     fn read_link_target(&self, path: &Path) -> io::Result<PathBuf> {
         let inner = self.inner.lock().unwrap();
-        match inner.nodes.get(path).map(|n| &n.kind) {
-            Some(FakeKind::Symlink { target }) => Ok(target.clone()),
+        let node = inner.nodes.get(path).ok_or_else(|| err(E_NOT_FOUND))?;
+        match &node.kind {
+            FakeKind::Symlink { target } => match node.fail_read_link {
+                Some(code) => Err(err(code)),
+                None => Ok(target.clone()),
+            },
             _ => Err(err(E_NOT_FOUND)),
         }
     }
