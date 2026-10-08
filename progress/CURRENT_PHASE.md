@@ -2,9 +2,10 @@
 
 - **Current phase:** PHASE 6.3 — Independent Verification & Hardening (final
   gate before Phase 6.4).
-- **Status:** IN PROGRESS. Do not report VERIFIED or begin Phase 6.4 until the
-  audited hardening tree is committed, pushed, and every CI job is green for
-  the exact pushed HEAD.
+- **Status:** VERIFIED for the Phase 6.3 hardening source commit. Commit
+  `df2e24c55807032f1bb5f61c088c660fb6587ebd` is pushed to `main`; its exact-SHA
+  CI run is green on all four jobs (run 37797444920, attempt 2). The final
+  verification-record change is documentation-only.
 - **Implementation base:** `0676223be40ace103f0c9ba2fa831c7df484a3e4`.
   Starting `main` HEAD: `d6ee4226487d33e321c434adc531f3d7c1ccaeca`.
 - **Baseline CI:** run [37650663398](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37650663398)
@@ -22,7 +23,11 @@
   `npm run build` are green. All established ignored performance suites are
   green. Cross-target `cargo check --all-targets` is green for Apple Darwin,
   Linux GNU, and Windows GNU; native Windows MSVC workspace tests are green.
-  Final commit/push and exact pushed-HEAD CI remain pending.
+  Hardening commit `df2e24c55807032f1bb5f61c088c660fb6587ebd` is pushed to
+  `main`. Exact-SHA CI run [37797444920](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37797444920)
+  attempt 2 completed successfully with frontend, Ubuntu, Windows, and macOS
+  all green. The first macOS attempt was canceled before runner acquisition due
+  to provider capacity; the targeted retry succeeded without source changes.
 - **Phase 6.4:** NOT STARTED; do not begin it during this gate.
 - **Product direction (binding):** CoreSight is a **macOS system
   intelligence + power-tools application** — NOT a "Mac cleaner". macOS is

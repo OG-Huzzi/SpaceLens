@@ -381,8 +381,20 @@ rust (macos-latest)    success
 frontend               success
 ```
 
-The hardening gate (the contracts in this document) lands in dedicated
-`fix:` commits AFTER the implementation commit; the FINAL verified HEAD
-and its CI run are recorded in `progress/CURRENT_PHASE.md`. A docs-only
-verification commit is never presented as the implementation commit —
-implementation, hardening, and verification stay distinguished there.
+Hardening source commit `df2e24c55807032f1bb5f61c088c660fb6587ebd` is pushed
+to `main` and verified by CI run
+[37797444920](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37797444920),
+attempt 2, conclusion **success**:
+
+```text
+rust (ubuntu-latest)   success
+rust (windows-latest)  success
+rust (macos-latest)    success
+frontend               success
+```
+
+The first macOS attempt was canceled by hosted-runner capacity before
+acquiring a runner; the targeted retry completed successfully. No source
+changes were made between attempts. The final verification-record change is
+documentation-only: implementation, hardening, and verification remain
+distinguished in `progress/CURRENT_PHASE.md`.

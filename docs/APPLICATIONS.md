@@ -299,19 +299,20 @@ yields no identity rather than a lossy name.
 * Application persistence, database tables, snapshots, and migrations:
   **NOT STARTED**. The model is in-memory only. No schema was changed.
 * GUI work: none added.
-* Phase 6.3: the in-memory system model is implemented; independent hardening
-  and re-verification are in progress. This does not start Phase 6.4.
+* Phase 6.3: in-memory system model hardening is verified on source commit
+  `df2e24c55807032f1bb5f61c088c660fb6587ebd`; all CI jobs passed on run
+  [37797444920](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37797444920),
+  attempt 2. Phase 6.4 has NOT STARTED.
 
 ## 20. Cross-target verification performed
 
-`cargo check -p coresight-apps -p coresight-capabilities -p coresight-macos
---target x86_64-unknown-linux-gnu` and `--target x86_64-apple-darwin` both
-pass from the Windows host, so the shared intelligence layer compiles for all
-three platforms. The full-workspace Linux cross-check additionally requires a
-cross C toolchain for `libsqlite3-sys` (the history crate's bundled SQLite),
-which is not installed on this host; that is a pre-existing environment
-limitation and not a property of this layer. Every Rust job in CI builds and
-tests the whole workspace natively on Ubuntu, Windows, and macOS.
+Cross-host `cargo check --all-targets` passes from Windows for the hardened
+`coresight-system-model`/`coresight-apps`/`coresight-capabilities` set on
+`x86_64-unknown-linux-gnu` and `x86_64-pc-windows-gnu`, and additionally includes
+`coresight-macos` on `x86_64-apple-darwin`. Native Windows MSVC ran the full
+workspace tests and clippy. A full-workspace non-Windows cross-build, which
+would include `libsqlite3-sys`'s bundled C source, was not attempted; CI builds
+and tests the whole workspace natively on Ubuntu, Windows, and macOS.
 
 ## 21. Known limitations
 

@@ -121,8 +121,8 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   honest access states, and `Unsupported` reporting on non-macOS hosts
   (`crates/coresight-macos`; never modifies anything, never bypasses TCC).
   See docs/MACOS_ARCHITECTURE.md.
-- `system-model` — the Phase 6.3 unified, in-memory system model, currently
-  in independent hardening/re-verification (not yet the final VERIFIED gate).
+- `system-model` — the Phase 6.3 unified, in-memory system model, independently
+  hardened and verified on commit `df2e24c`; Phase 6.4 has not started.
   A pure, deterministic, bounded correlation
   of filesystem observations, canonical object identity, classification
   (copied, never re-derived), identity relationships, Phase 6.2 application
