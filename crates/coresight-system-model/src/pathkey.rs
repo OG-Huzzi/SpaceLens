@@ -159,22 +159,29 @@ mod tests {
         );
     }
 
-    /// Non-UTF-8 paths must round-trip byte-exactly. Built portably via the
-    /// platform encoding itself (`from_encoded_bytes_unchecked`), so the
-    /// regression runs on every CI platform — not just Unix.
+    /// Non-UTF-8 paths must round-trip byte-exactly. The three-byte
+    /// surrogate encoding is valid WTF-8 on Windows and an arbitrary
+    /// non-UTF-8 path component on Unix, so the unsafe constructor's
+    /// platform-encoding precondition holds on every CI platform.
     #[test]
     fn non_utf8_paths_round_trip_exactly() {
         use std::ffi::OsString;
-        let raw = b"/data/\xff\xfe/name";
-        let p = PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(raw.to_vec()) });
+        let mut raw = b"/data/".to_vec();
+        raw.extend_from_slice(&[0xed, 0xa0, 0x80]);
+        raw.extend_from_slice(b"/name");
+        let p = PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(raw.clone()) });
         let key = ArtifactKey::of(&p);
         assert_eq!(
             key.decode().unwrap().as_os_str().as_encoded_bytes(),
-            raw,
+            raw.as_slice(),
             "the key must reproduce the exact bytes"
         );
-        // And a name differing only in one byte gets a different key.
-        let other_bytes = b"/data/\xff\xfd/name";
+        assert!(
+            std::str::from_utf8(raw.as_slice()).is_err(),
+            "the test bytes must be non-UTF-8"
+        );
+        // Another valid encoded unpaired surrogate has a distinct key.
+        let other_bytes = b"/data/\xed\xa0\x81/name";
         let other =
             PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(other_bytes.to_vec()) });
         assert_ne!(key, ArtifactKey::of(&other));

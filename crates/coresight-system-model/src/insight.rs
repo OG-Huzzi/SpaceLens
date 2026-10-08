@@ -3,7 +3,14 @@
 //! Every insight is descriptive. None of them authorizes an action, and none
 //! of them calls anything an orphan: an artifact with no application claim is
 //! reported as [`InsightKind::UnassociatedArtifact`], and only when the
-//! application sources were actually usable.
+//! application sources were actually usable AND no bound dropped a claim.
+//!
+//! ## Complexity
+//!
+//! Duplicate-content and hard-link-alias detection group through
+//! `BTreeMap` indexes built once over the artifact set — `O(A log A)`,
+//! never pairwise `O(A²)` scans. Per-artifact insight work is `O(1)`
+//! amortized lookups into those groups.
 
 use std::collections::BTreeMap;
 
@@ -12,20 +19,30 @@ use coresight_capabilities::ActionClass;
 
 use crate::model::{
     ApplicationClaim, ApplicationNode, ApplicationState, ArtifactApplicationStatus, ArtifactNode,
-    CandidateActionKind, InsightBlocker, InsightKind, InsightSeverity, NodeRef, NodeRefKind,
-    SystemCandidate, SystemEdge, SystemEdgeKind, SystemInsight, SystemModelLimits,
+    CandidateActionKind, HistoricalAssertion, HistoricalRelation, InsightBlocker, InsightKind,
+    InsightSeverity, NodeRef, NodeRefKind, SystemCandidate, SystemEdge, SystemEdgeKind,
+    SystemInsight, SystemModelLimits,
 };
 
+/// The output of [`derive`]: insights, inert candidates, and exact
+/// truncation accounting (including evidence dropped at admission).
+pub(crate) struct DerivedInsights {
+    pub(crate) insights: Vec<SystemInsight>,
+    pub(crate) candidates: Vec<SystemCandidate>,
+    pub(crate) insights_truncated: u64,
+    pub(crate) candidates_truncated: u64,
+    pub(crate) evidence_truncated: u64,
+}
+
 /// Derive insights and inert candidates from the finalized graph.
-///
-/// Returns `(insights, candidates, insights_truncated, candidates_truncated)`.
 pub(crate) fn derive(
     artifacts: &[ArtifactNode],
     applications: &[ApplicationNode],
     edges: &[SystemEdge],
+    assertions: &[HistoricalAssertion],
     coverage: &[coresight_apps::SourceCoverage],
     limits: &SystemModelLimits,
-) -> (Vec<SystemInsight>, Vec<SystemCandidate>, u64, u64) {
+) -> DerivedInsights {
     let sources_incomplete = coverage.iter().any(|c| {
         !matches!(
             c.status,
@@ -36,6 +53,7 @@ pub(crate) fn derive(
     let mut insight_top: BoundedTopK<String, SystemInsight> = BoundedTopK::new(limits.max_insights);
     let mut candidate_top: BoundedTopK<(String, String, CandidateActionKind), SystemCandidate> =
         BoundedTopK::new(limits.max_candidates);
+    let mut evidence_truncated = 0u64;
 
     // ---- Claim map, built once (O(E)) ---------------------------------
     let mut claims: BTreeMap<String, Vec<(&str, OwnershipAssessment, &SystemEdge)>> =
@@ -46,6 +64,26 @@ pub(crate) fn derive(
                 .entry(e.to.clone())
                 .or_default()
                 .push((e.from.as_str(), e.assessment, e));
+        }
+    }
+
+    // ---- Grouping indexes, built once (O(A log A)) --------------------
+    // digest → distinct known identities; identity → path count. Bounded by
+    // artifact count; deterministic BTreeMap order.
+    let mut identities_by_content: BTreeMap<
+        &str,
+        std::collections::BTreeSet<coresight_identity::ObjectIdentity>,
+    > = BTreeMap::new();
+    let mut count_by_object: BTreeMap<coresight_identity::ObjectIdentity, usize> = BTreeMap::new();
+    for node in artifacts {
+        if let (Some(content), Some(object)) = (node.content_sha256.as_deref(), node.identity) {
+            identities_by_content
+                .entry(content)
+                .or_default()
+                .insert(object);
+        }
+        if let Some(object) = node.identity {
+            *count_by_object.entry(object).or_default() += 1;
         }
     }
 
@@ -81,12 +119,15 @@ pub(crate) fn derive(
             blockers.push(InsightBlocker::ConflictingOwnership);
             push_insight(
                 &mut insight_top,
+                &mut evidence_truncated,
                 limits,
                 node,
                 InsightKind::ConflictingOwnership,
                 InsightSeverity::NeedsResolution,
                 strong.iter().map(|(a, _, _)| (*a).to_string()).collect(),
-                strong.iter().map(|(_, _, e)| e.evidence.clone()).collect(),
+                strong
+                    .iter()
+                    .flat_map(|(_, _, e)| e.evidence.iter().cloned()),
                 format!(
                     "{} applications hold strong-or-better evidence for one artifact",
                     strong.len()
@@ -97,6 +138,7 @@ pub(crate) fn derive(
             blockers.push(InsightBlocker::SharedArtifactOwnership);
             push_insight(
                 &mut insight_top,
+                &mut evidence_truncated,
                 limits,
                 node,
                 InsightKind::SharedArtifact,
@@ -104,8 +146,7 @@ pub(crate) fn derive(
                 credible.iter().map(|(a, _, _)| (*a).to_string()).collect(),
                 credible
                     .iter()
-                    .map(|(_, _, e)| e.evidence.clone())
-                    .collect(),
+                    .flat_map(|(_, _, e)| e.evidence.iter().cloned()),
                 format!(
                     "{} applications have credible evidence for one artifact",
                     credible.len()
@@ -113,64 +154,63 @@ pub(crate) fn derive(
                 blockers.clone(),
             );
         } else if node.application_status == ArtifactApplicationStatus::Unassociated {
+            // Genuinely unassociated ONLY: truncated associations never
+            // feed "no claim" reasoning (claim truncated ≠ no claim).
             blockers.push(InsightBlocker::InsufficientEvidence);
             push_insight(
                 &mut insight_top,
+                &mut evidence_truncated,
                 limits,
                 node,
                 InsightKind::UnassociatedArtifact,
                 InsightSeverity::Informational,
                 Vec::new(),
-                Vec::new(),
+                std::iter::empty(),
                 "no application claim was observed while application sources were usable"
                     .to_string(),
                 blockers.clone(),
             );
         }
 
-        // Identity-engine facts.
-        if node.content_sha256.is_some() {
-            let siblings = artifacts
-                .iter()
-                .filter(|a| {
-                    a.key != node.key
-                        && a.content_sha256.is_some()
-                        && a.content_sha256 == node.content_sha256
-                })
-                .map(|a| a.key.clone())
-                .collect::<Vec<_>>();
-            if !siblings.is_empty() {
-                let mut related = siblings;
-                related.push(node.key.clone());
-                related.sort();
-                related.dedup();
+        // Identity-engine facts, via the grouping indexes (O(1) lookups).
+        //
+        // DuplicateContent is proven when a digest group contains at least
+        // two distinct, known object identities and this node has a known
+        // identity. Unknown members do not erase that proven pair, but an
+        // unknown-only pair cannot produce a distinct-object claim. Group
+        // summaries make this O(A log A), including very large digest groups.
+        if let (Some(content), Some(_identity)) = (node.content_sha256.as_deref(), node.identity) {
+            if identities_by_content
+                .get(content)
+                .is_some_and(|identities| identities.len() > 1)
+            {
                 push_insight(
                     &mut insight_top,
+                    &mut evidence_truncated,
                     limits,
                     node,
                     InsightKind::DuplicateContent,
                     InsightSeverity::Informational,
                     Vec::new(),
-                    Vec::new(),
-                    "distinct objects hold byte-identical content (verified digest)".to_string(),
+                    std::iter::empty(),
+                    "distinct objects hold byte-identical content (verified digest, proven distinct identities)"
+                        .to_string(),
                     blockers.clone(),
                 );
             }
         }
-        if node.identity.is_some() {
-            let aliases = artifacts
-                .iter()
-                .filter(|a| a.key != node.key && a.identity == node.identity)
-                .count();
-            if aliases > 0 {
+        if let Some(object) = node.identity {
+            let aliases = count_by_object.get(&object).copied().unwrap_or(0);
+            if aliases > 1 {
                 push_insight(
                     &mut insight_top,
+                    &mut evidence_truncated,
                     limits,
                     node,
                     InsightKind::HardLinkAlias,
                     InsightSeverity::Informational,
                     Vec::new(),
-                    Vec::new(),
+                    std::iter::empty(),
                     "several paths refer to one filesystem object (proven identity)".to_string(),
                     blockers.clone(),
                 );
@@ -183,7 +223,6 @@ pub(crate) fn derive(
         match app.state {
             ApplicationState::PartiallyResolved => push_app_insight(
                 &mut insight_top,
-                limits,
                 app,
                 InsightKind::PartialApplication,
                 InsightSeverity::Notable,
@@ -192,7 +231,6 @@ pub(crate) fn derive(
             ),
             ApplicationState::Unresolved => push_app_insight(
                 &mut insight_top,
-                limits,
                 app,
                 InsightKind::UnresolvedApplication,
                 InsightSeverity::Notable,
@@ -203,40 +241,51 @@ pub(crate) fn derive(
         }
     }
 
-    // ---- Historical context -------------------------------------------
-    for e in edges.iter().filter(|e| {
-        matches!(
-            e.kind,
-            SystemEdgeKind::HistoricalAliasOf | SystemEdgeKind::HistoricalMoveOf
-        )
-    }) {
-        let Some(node) = artifacts.iter().find(|a| a.key == e.from) else {
+    // ---- Historical assertions (node-attached context, never edges) -----
+    // A single exact-key index prevents a history × artifact rescan.
+    let artifact_by_key: BTreeMap<&str, &ArtifactNode> = artifacts
+        .iter()
+        .map(|node| (node.key.as_str(), node))
+        .collect();
+    // Each assertion quotes a caller-supplied record joined to its current
+    // node: a proven move, a proven same-object observation, or an honest
+    // "identity unproven" — never sameness asserted without proof.
+    for assertion in assertions {
+        let Some(node) = artifact_by_key
+            .get(assertion.artifact_key.as_str())
+            .copied()
+        else {
             continue;
         };
         let mut blockers = vec![InsightBlocker::NoExecutorInThisPhase];
         if node.identity.is_none() {
             blockers.push(InsightBlocker::UnprovenObjectIdentity);
         }
-        let kind = InsightKind::HistoricalContext;
-        let severity = if e.kind == SystemEdgeKind::HistoricalMoveOf {
-            InsightSeverity::Notable
-        } else {
-            InsightSeverity::Informational
+        let (severity, explanation) = match assertion.relation {
+            HistoricalRelation::ObjectReplaced => (
+                InsightSeverity::Notable,
+                "stored history proves this path previously referred to a different object"
+                    .to_string(),
+            ),
+            HistoricalRelation::SameObjectObserved => (
+                InsightSeverity::Informational,
+                "stored history observed this path with the same object identity".to_string(),
+            ),
+            HistoricalRelation::IdentityUnproven => (
+                InsightSeverity::Informational,
+                "stored history names this path but proves no object identity".to_string(),
+            ),
         };
         push_insight(
             &mut insight_top,
+            &mut evidence_truncated,
             limits,
             node,
-            kind,
+            InsightKind::HistoricalContext,
             severity,
             Vec::new(),
-            vec![e.evidence.clone()],
-            if e.kind == SystemEdgeKind::HistoricalMoveOf {
-                "stored history shows this path previously referred to a different object"
-                    .to_string()
-            } else {
-                "stored history observed this path with the same object identity".to_string()
-            },
+            assertion.evidence.iter().cloned(),
+            explanation,
             blockers,
         );
     }
@@ -297,6 +346,8 @@ pub(crate) fn derive(
                 owner,
             )
         } else if node.application_status == ArtifactApplicationStatus::Unassociated {
+            // Genuinely unassociated ONLY: a truncated association is
+            // incomplete knowledge and must never become an Orphan.
             blockers.push(InsightBlocker::InsufficientEvidence);
             (
                 CandidateActionKind::Orphan,
@@ -314,16 +365,25 @@ pub(crate) fn derive(
 
         blockers.sort();
         blockers.dedup();
-        let evidence = node_claims
-            .map(|c| {
-                let mut ev: Vec<OwnershipEvidence> =
-                    c.iter().flat_map(|(_, _, e)| e.evidence.clone()).collect();
-                ev.sort();
-                ev.dedup();
-                ev.truncate(limits.max_evidence_per_edge);
-                ev
-            })
-            .unwrap_or_default();
+        // Bounded evidence at admission: claimant edges stream through one
+        // bounded accumulator (O(max_evidence) working memory), so thousands
+        // of claimant edges can never materialize an unbounded vector
+        // before truncation. Discarded items count exactly.
+        let mut evidence_acc =
+            coresight_apps::EvidenceAccumulator::new(limits.max_evidence_per_edge);
+        if let Some(c) = node_claims {
+            for (_, _, e) in c.iter() {
+                for item in e.evidence.iter().cloned() {
+                    evidence_acc.offer(item);
+                }
+            }
+        }
+        let (mut evidence, candidate_evidence_overflow) = evidence_acc.into_parts();
+        evidence_truncated += candidate_evidence_overflow;
+        // The accumulator retains strongest-first; re-sort canonically for
+        // the published candidate (deterministic under any offer order).
+        evidence.sort();
+        evidence.dedup();
 
         let candidate = SystemCandidate {
             action_kind: kind,
@@ -360,25 +420,40 @@ pub(crate) fn derive(
             .then(a.action_kind.cmp(&b.action_kind))
     });
 
-    (insights, candidates, insight_overflow, cand_overflow)
+    DerivedInsights {
+        insights,
+        candidates,
+        insights_truncated: insight_overflow,
+        candidates_truncated: cand_overflow,
+        evidence_truncated,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn push_insight(
     top: &mut BoundedTopK<String, SystemInsight>,
+    evidence_truncated: &mut u64,
     limits: &SystemModelLimits,
     node: &ArtifactNode,
     kind: InsightKind,
     severity: InsightSeverity,
     related_applications: Vec<String>,
-    evidence_groups: Vec<Vec<OwnershipEvidence>>,
+    evidence_items: impl IntoIterator<Item = OwnershipEvidence>,
     explanation: String,
     blockers: Vec<InsightBlocker>,
 ) {
-    let mut evidence: Vec<OwnershipEvidence> = evidence_groups.into_iter().flatten().collect();
+    // Bounded evidence at admission: items stream through one bounded
+    // accumulator (O(max_evidence) working memory); claimant evidence is
+    // borrowed and cloned one item at a time, never flattened into a large
+    // temporary vector. Discarded items count exactly.
+    let mut acc = coresight_apps::EvidenceAccumulator::new(limits.max_evidence_per_edge);
+    for item in evidence_items {
+        acc.offer(item);
+    }
+    let (mut evidence, overflow) = acc.into_parts();
+    *evidence_truncated += overflow;
     evidence.sort();
     evidence.dedup();
-    evidence.truncate(limits.max_evidence_per_edge);
     let id = format!("ins-{:?}-{}", kind, node.key)
         .to_lowercase()
         .replace(' ', "-");
@@ -405,7 +480,6 @@ fn push_insight(
 
 fn push_app_insight(
     top: &mut BoundedTopK<String, SystemInsight>,
-    limits: &SystemModelLimits,
     app: &ApplicationNode,
     kind: InsightKind,
     severity: InsightSeverity,
@@ -437,12 +511,18 @@ fn push_app_insight(
         explanation: explanation.to_string(),
         blockers,
     };
-    let _ = limits;
     top.offer(id, insight, |new, old| new.severity > old.severity);
 }
 
 // ---------------------------------------------------------------------------
 // Bounded, typed queries
+//
+// Honesty contract: every query scans bounded canonical model data
+// (artifacts ≤ max_artifacts, insights ≤ max_insights, incident edges ≤
+// max_edges_per_node). Queries that group one node's incident edges may use
+// O(degree) temporary memory before their final limit-capped admission; only
+// queries that stream directly to BoundedTopK use O(limit) extra memory.
+// Each query documents its actual bound and exact overflow semantics.
 // ---------------------------------------------------------------------------
 
 /// The result of a bounded query: typed items plus the exact number of
@@ -471,7 +551,8 @@ pub const DEFAULT_QUERY_LIMIT: usize = 256;
 /// application relates — whereas claimant COUNTING uses only the ownership
 /// edges, so one application can never be counted twice.
 ///
-/// Complexity: `O(deg(node) log deg)`.
+/// Complexity: `O(deg(node) log deg)` time, `O(deg(node))` memory; the
+/// returned rows are then admitted through a `limit`-capped store.
 pub fn applications_for_artifact(
     model: &crate::model::SystemModel,
     artifact_key: &str,
@@ -540,6 +621,8 @@ pub fn applications_for_artifact(
 /// Unlike [`applications_for_artifact`], this counts each application ONCE
 /// regardless of how many kinds of edge link it, so it is the query to use
 /// for "who owns this".
+///
+/// Complexity: `O(deg(node) log deg)` time, `O(deg(node))` memory.
 pub fn owning_applications(
     model: &crate::model::SystemModel,
     artifact_key: &str,
@@ -560,6 +643,8 @@ pub fn owning_applications(
 }
 
 /// Artifact node keys an application claims, canonically ordered.
+///
+/// Complexity: `O(deg(app) log deg(app))` time, `O(deg(app))` memory.
 pub fn artifacts_for_application(
     model: &crate::model::SystemModel,
     app: &ApplicationId,
@@ -579,6 +664,9 @@ pub fn artifacts_for_application(
 }
 
 /// Artifacts carrying one classification category.
+///
+/// Complexity: `O(members)` time over the category's index entries,
+/// `O(limit)` retained memory.
 pub fn artifacts_of_classification(
     model: &crate::model::SystemModel,
     category: coresight_classifier::Category,
@@ -604,6 +692,9 @@ pub fn artifacts_of_classification(
 }
 
 /// Artifacts several applications relate to.
+///
+/// Complexity: `O(A)` scan time over the bounded artifact set, `O(limit)`
+/// retained memory.
 pub fn shared_artifacts(
     model: &crate::model::SystemModel,
     limit: usize,
@@ -625,6 +716,9 @@ pub fn shared_artifacts(
 }
 
 /// Artifacts with conflicting strong claims.
+///
+/// Complexity: `O(A)` scan time over the bounded artifact set, `O(limit)`
+/// retained memory.
 pub fn conflicting_ownership(
     model: &crate::model::SystemModel,
     limit: usize,
@@ -641,8 +735,10 @@ pub fn conflicting_ownership(
 }
 
 /// Artifacts whose association is unresolved — either no claim was observed
-/// while sources were usable, or the association could not be established at
-/// all because the sources were unsupported/unavailable/failed.
+/// while sources were usable, the association could not be established at
+/// all because the sources were unsupported/unavailable/failed, or claims
+/// existed but bounds discarded them (`AssociationTruncated`: incomplete
+/// knowledge, reported here so truncated artifacts never vanish silently).
 pub fn unresolved_associations(
     model: &crate::model::SystemModel,
     limit: usize,
@@ -653,6 +749,7 @@ pub fn unresolved_associations(
         .filter(|a| {
             a.application_status.is_genuinely_unassociated()
                 || a.application_status.is_association_unknown()
+                || a.application_status.is_association_truncated()
                 || a.application_status == ArtifactApplicationStatus::Uncertain
         })
         .collect();
@@ -663,6 +760,9 @@ pub fn unresolved_associations(
 }
 
 /// Artifacts with a credible (`>= Moderate`) association.
+///
+/// Complexity: `O(A)` scan time over the bounded artifact set, `O(limit)`
+/// retained memory.
 pub fn strongly_associated_artifacts(
     model: &crate::model::SystemModel,
     limit: usize,
@@ -680,7 +780,11 @@ pub fn strongly_associated_artifacts(
 
 /// Artifacts with no application claim observed while the application
 /// sources were actually usable. This is the ONLY "no application" query, and
-/// it deliberately excludes artifacts whose association was never observable.
+/// it deliberately excludes artifacts whose association was never observable
+/// AND artifacts whose claims were truncated by a bound.
+///
+/// Complexity: `O(A)` scan time over the bounded artifact set, `O(limit)`
+/// retained memory.
 pub fn artifacts_without_application(
     model: &crate::model::SystemModel,
     limit: usize,
@@ -706,6 +810,9 @@ pub fn aliases_of_object(
 
 /// Artifacts whose association could not be established because the
 /// application sources were not usable. Distinct from "no claim observed".
+///
+/// Complexity: `O(A)` scan time over the bounded artifact set, `O(limit)`
+/// retained memory.
 pub fn association_unknown_artifacts(
     model: &crate::model::SystemModel,
     limit: usize,
@@ -722,12 +829,15 @@ pub fn association_unknown_artifacts(
 }
 
 /// Insights of one kind, canonically ordered.
+///
+/// Complexity: `O(I)` scan time over the bounded insight set, `O(limit)`
+/// retained memory.
 pub fn insights_of_kind(
     model: &crate::model::SystemModel,
     kind: InsightKind,
     limit: usize,
 ) -> QueryResult<&SystemInsight> {
-    let mut out: Vec<&SystemInsight> = model.insights.iter().filter(|i| i.kind == kind).collect();
+    let mut out: Vec<&SystemInsight> = model.insights().iter().filter(|i| i.kind == kind).collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     let overflow = out.len().saturating_sub(limit) as u64;
     out.truncate(limit);

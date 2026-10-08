@@ -18,6 +18,7 @@ pub mod explain;
 pub mod footprint;
 pub mod observe;
 pub mod ownership;
+pub mod pathmatch;
 pub mod relationships;
 pub mod roots;
 pub mod sources;
@@ -100,6 +101,9 @@ pub use ownership::{
     assess_groups, CorrelationGroup, EvidenceAccumulator, EvidenceSource, EvidenceStrength,
     MatchedAttribute, OwnershipAssessment, OwnershipEvidence,
 };
+pub use pathmatch::{
+    ascii_eq_ignore_case, extension_is_ascii, file_name_is_ascii, file_name_str, file_stem_str,
+};
 pub use relationships::{AppAssociation, AssociationKind, OwnershipStrength};
 pub use roots::{
     associate_executable, bundle_root_of, containing_root, detect_install_roots, path_within,
@@ -125,19 +129,22 @@ mod architecture_guard_tests {
 
     /// The Phase 6.2 intelligence layer is SHARED code: it must contain no
     /// platform conditionals (OS behavior belongs in the cfg-selected
-    /// modules), no subprocess/network capability, and no lossy
-    /// `to_str().unwrap_or_default()` path conversion in semantic logic.
+    /// modules), no subprocess/network capability, and no lossy path
+    /// decoding in semantic logic.
     ///
     /// The needles are assembled at runtime so this test's own source does
-    /// not match them.
+    /// not match them. Comment lines are stripped before matching so prose
+    /// about a forbidden pattern does not trip the guard.
     #[test]
     fn intelligence_layer_is_platform_neutral_and_inert() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let shared = [
             "analysis.rs",
             "bounded.rs",
+            "footprint.rs",
             "observe.rs",
             "ownership.rs",
+            "pathmatch.rs",
             "roots.rs",
             "sources.rs",
         ];
@@ -148,14 +155,23 @@ mod architecture_guard_tests {
         }
         for needle in [
             "std::process",
+            "std::net",
             "Command::new",
             "TcpStream",
+            "TcpListener",
             "UdpSocket",
             "to_str().unwrap_or_default",
             "to_str().unwrap()",
         ] {
             forbidden.push(needle.to_string());
         }
+        // Assembled so this source never contains them contiguously.
+        forbidden.push(["to_string", "_lossy"].concat());
+        forbidden.push(["from_utf8", "_lossy"].concat());
+        forbidden.push(["from_utf16", "_lossy"].concat());
+        forbidden.push(["std::fs", "::remove_file"].concat());
+        forbidden.push(["std::fs", "::remove_dir"].concat());
+        forbidden.push(["Open", "Options"].concat());
 
         for file in shared {
             let path = src.join(file);
@@ -163,9 +179,13 @@ mod architecture_guard_tests {
                 .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
             // The guard test itself exempts lines inside `#[cfg(test)]`
             // blocks by construction: the needles are runtime-assembled.
+            let code: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect();
             for needle in &forbidden {
                 assert!(
-                    !text.contains(needle.as_str()),
+                    !code.iter().any(|l| l.contains(needle.as_str())),
                     "{needle:?} found in {}",
                     path.display()
                 );

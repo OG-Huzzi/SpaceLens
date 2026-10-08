@@ -1,18 +1,37 @@
 # CoreSight — Current State
 
-- **Current phase:** PHASE 6.1 — independent verification & architectural
-  hardening (audit pass over commit `54f0e7f`).
-- **Status:** Phase 6.1 code AUDITED independently; the audit findings were
-  REPAIRED in this phase. VERIFIED status requires the CI run of the
-  verification commit to be recorded green here (see CI section).
+- **Current phase:** PHASE 6.3 — Independent Verification & Hardening (final
+  gate before Phase 6.4).
+- **Status:** IN PROGRESS. Do not report VERIFIED or begin Phase 6.4 until the
+  audited hardening tree is committed, pushed, and every CI job is green for
+  the exact pushed HEAD.
+- **Implementation base:** `0676223be40ace103f0c9ba2fa831c7df484a3e4`.
+  Starting `main` HEAD: `d6ee4226487d33e321c434adc531f3d7c1ccaeca`.
+- **Baseline CI:** run [37650663398](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37650663398)
+  succeeded on the starting HEAD with frontend, Windows, macOS, and Ubuntu
+  jobs all green. This predates the current hardening edits and is not their
+  verification.
+- **Audit findings being hardened:** source-specific root provenance (including
+  desktop-entry Exec-parent scope), candidate executable confidence and
+  application state, evidence ceilings at public aggregation/deserialization
+  boundaries, lossless path comparison, and safe history path decoding.
+- **Local gate status:** strict workspace clippy with all targets/features and
+  `-D warnings`, plus workspace tests with and without all features, are green.
+  The frontend audit advisory was patched (`source-map-js` 1.2.1 → 1.2.2);
+  clean `npm ci`, `npm audit --audit-level=high` (zero vulnerabilities), and
+  `npm run build` are green. All established ignored performance suites are
+  green. Cross-target `cargo check --all-targets` is green for Apple Darwin,
+  Linux GNU, and Windows GNU; native Windows MSVC workspace tests are green.
+  Final commit/push and exact pushed-HEAD CI remain pending.
+- **Phase 6.4:** NOT STARTED; do not begin it during this gate.
 - **Product direction (binding):** CoreSight is a **macOS system
   intelligence + power-tools application** — NOT a "Mac cleaner". macOS is
   the primary implementation and launch platform; Windows/Linux remain
   architectural targets with their abstractions intact. Storage is one
   pillar of seven (docs/MACOS_ARCHITECTURE.md).
-- **Last updated:** 2026-10-07.
+- **Last updated:** 2026-10-08.
 
-## What happened in this phase (2026-10-07)
+## Historical record: Phase 6.1 (2026-10-07)
 
 Independent audit of the Phase 6.1 commit (no prior report trusted). Code,
 tests, dependency graph, docs, and git state were re-inspected; the
@@ -119,7 +138,7 @@ following findings were repaired:
   contracts say so (e.g. relationship reports are transitively bounded by
   pipeline caps; the boundedness sweep covered apps/macOS/capabilities).
 
-## CI
+## Historical Phase 6.1 CI
 
 **CI VERIFIED (2026-10-07): run 37589662213 for commit `94c3164` —
 rust ubuntu SUCCESS, rust windows SUCCESS, rust macos SUCCESS,
@@ -131,8 +150,9 @@ ubuntu/macos — unix-only test fixtures missing a trait import, a class
 of failure invisible on the Windows dev host; repaired in `94c3164`,
 all gates re-run locally, cross-target clippy clean.)
 
-## Next authorized work
+## Historical Phase 6.1 gate status
 
-- NOTHING starts until this verification phase passes independent review
-  and its CI run is recorded green above. Phase 6.2 and application-
-  intelligence persistence remain NOT STARTED.
+At that checkpoint, later work had not been authorized until its review and
+CI record completed; Phase 6.2 persistence was NOT STARTED. This is archival
+history only. The current Phase 6.3 gate status is recorded at the top of
+this file.

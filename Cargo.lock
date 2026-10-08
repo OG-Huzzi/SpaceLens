@@ -141,7 +141,6 @@ dependencies = [
  "coresight-apps",
  "coresight-capabilities",
  "coresight-classifier",
- "coresight-engine",
  "coresight-identity",
  "serde",
  "serde_json",

@@ -11,8 +11,13 @@ Status: Phase 0 conceptual schema. Implemented from Phase 1. Owner: Rust
   failed), root, file/dir counts, bytes, exclusions summary (what was NOT scanned).
 - `entries` — one row per file/dir per scan: scan_id, parent path-id, name, kind,
   size (logical + physical where OS reports both), mtimes, attributes, symlink/
-  junction target, volume boundary flags. Path storage: normalized, case-policy
-  per OS noted; lookups by (scan_id, parent, name).
+  junction target, volume boundary flags. Current history path storage is tagged
+  and lossless: `u:` UTF-8, `e:` lowercase hex of platform-encoded bytes for
+  non-UTF-8 paths, and `l:` for irreversibly lossy legacy rows. It performs no
+  normalization, case-folding, or separator conversion; lookups use the exact
+  stored path semantics. `e:` decoding validates Windows WTF-8 before forming
+  UTF-16 and returns a typed decode error for malformed hex/encoding, never an
+  unchecked OS-string conversion. No Phase 6.3 schema change.
 - `hashes` — entry identity → SHA-256, algorithm version, hashed-at, bytes hashed.
   Cache key includes size+mtime so stale hashes invalidate without re-read.
 - `snapshots` — immutable per-scan rollups: per-category bytes, totals, created-at.

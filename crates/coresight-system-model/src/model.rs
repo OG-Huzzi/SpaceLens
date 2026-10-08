@@ -21,10 +21,14 @@
 //!
 //! ## Design contracts
 //!
-//! * **Node identity is never a path.** An artifact node is keyed by its
-//!   canonical [`ObjectIdentity`] where the platform proved one, and by a
-//!   lossless path key otherwise. Path, object identity, and content identity
-//!   are three different facts and remain separately representable.
+//! * **Artifact nodes are path occurrences, never objects.** An artifact
+//!   node is ONE observed path, keyed by a lossless path-occurrence key
+//!   ([`ArtifactKey`]); the canonical [`ObjectIdentity`] rides along as a
+//!   separate fact and its own index. `artifact key != object identity`:
+//!   several nodes may share one identity (hard-link aliases), several
+//!   nodes may share one digest (content duplicates), and a node may carry
+//!   neither. Path, object identity, and content identity are three
+//!   different facts and remain separately representable.
 //! * **Containment is not ownership.** [`SystemEdgeKind`] keeps `Contains`,
 //!   `LocatedUnder`, `OwnedBy`, `AssociatedWith`, `SharedBy`, and the
 //!   relationship kinds distinct.
@@ -34,6 +38,11 @@
 //!   clamped by the Phase 6.2 correlation ceilings.
 //! * **Conflicts are preserved.** Contradictory claims coexist; nothing is
 //!   averaged and nothing is overwritten by arrival order.
+//! * **Truncation is incomplete knowledge, never absence.** A dropped claim,
+//!   edge, or history row is counted exactly in [`ModelTruncation`] and can
+//!   never surface as "no claim", "no edge", or "no history".
+//!   [`ArtifactApplicationStatus::AssociationTruncated`] exists precisely so
+//!   a bound can never manufacture a false [`ArtifactApplicationStatus::Unassociated`].
 //! * **Bounded by admission.** Every collection admits through
 //!   [`coresight_apps::BoundedTopK`] — O(limit) memory, never
 //!   collect-then-truncate.
@@ -45,7 +54,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use coresight_apps::{ApplicationId, OwnershipAssessment, OwnershipEvidence};
+use coresight_apps::{
+    ApplicationId, EvidenceKind, EvidenceStrength, OwnershipAssessment, OwnershipEvidence,
+};
 use coresight_capabilities::access::AccessState;
 use coresight_capabilities::{CapabilityId, CapabilityStatus};
 use coresight_classifier::{Category, Subcategory};
@@ -73,6 +84,8 @@ pub struct SystemModelLimits {
     pub max_insights: usize,
     /// Maximum analysis candidates published.
     pub max_candidates: usize,
+    /// Maximum source-coverage summary rows retained.
+    pub max_source_states: usize,
 }
 
 impl Default for SystemModelLimits {
@@ -86,6 +99,7 @@ impl Default for SystemModelLimits {
             max_historical_context: 4_096,
             max_insights: 4_096,
             max_candidates: 4_096,
+            max_source_states: 64,
         }
     }
 }
@@ -102,6 +116,21 @@ pub struct ModelTruncation {
     pub historical_context_truncated: u64,
     pub insights_truncated: u64,
     pub candidates_truncated: u64,
+    /// Claim pairs admitted but not retained because the bounded claim store
+    /// was full. `#[serde(default)]` keeps older payloads readable.
+    #[serde(default)]
+    pub claims_truncated: u64,
+    /// Install-root groupings admitted but not retained because the bounded
+    /// root store was full.
+    #[serde(default)]
+    pub roots_truncated: u64,
+    /// Relationship facts rejected because their proofs contradicted or
+    /// exceeded the supported participant bound.
+    #[serde(default)]
+    pub relationships_rejected: u64,
+    /// Source-coverage summary rows omitted at the configured output bound.
+    #[serde(default)]
+    pub source_states_truncated: u64,
 }
 
 /// How a fact came to be known. The observed/inferred distinction survives
@@ -196,7 +225,9 @@ pub struct ArtifactNode {
 /// The model's explicit vocabulary for "which application(s) does this
 /// artifact relate to". Critically, **"no association observed" is not
 /// "orphan"**: an artifact whose application sources were unsupported is a
-/// different fact from one no application claimed.
+/// different fact from one no application claimed — and an artifact whose
+/// claims were dropped by a bound is a third fact again
+/// ([`Self::AssociationTruncated`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ArtifactApplicationStatus {
@@ -210,6 +241,11 @@ pub enum ArtifactApplicationStatus {
     Conflicting,
     /// Claims exist but none is credible.
     Uncertain,
+    /// Claims were observed for this artifact but none survived the model's
+    /// edge/claim bounds. **Claim truncated ≠ no claim**: this status is
+    /// never genuinely unassociated, never feeds orphan reasoning, and the
+    /// exact drop count lives in [`ModelTruncation`].
+    AssociationTruncated,
     /// Application discovery was unsupported on this host.
     AssociationUnsupported,
     /// Application discovery was unavailable (no source could be read).
@@ -220,9 +256,10 @@ pub enum ArtifactApplicationStatus {
 
 impl ArtifactApplicationStatus {
     /// True only when the model genuinely observed no claim AND the
-    /// application sources were actually usable. This is the ONLY condition
-    /// under which "orphan-like" reasoning is permitted, and even then the
-    /// model does not call it an orphan (see [`InsightKind::UnassociatedArtifact`]).
+    /// application sources were actually usable AND no bound dropped a
+    /// claim. This is the ONLY condition under which "orphan-like"
+    /// reasoning is permitted, and even then the model does not call it an
+    /// orphan (see [`InsightKind::UnassociatedArtifact`]).
     pub fn is_genuinely_unassociated(self) -> bool {
         matches!(self, ArtifactApplicationStatus::Unassociated)
     }
@@ -236,6 +273,12 @@ impl ArtifactApplicationStatus {
                 | ArtifactApplicationStatus::AssociationUnavailable
                 | ArtifactApplicationStatus::AssociationFailed
         )
+    }
+
+    /// True when claims existed but bounds discarded them: incomplete
+    /// knowledge, never absence.
+    pub fn is_association_truncated(self) -> bool {
+        matches!(self, ArtifactApplicationStatus::AssociationTruncated)
     }
 }
 
@@ -262,7 +305,8 @@ pub struct ApplicationNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ApplicationState {
-    /// An install root was observed and at least one artifact resolved.
+    /// An exact expected install root or executable resolved, with no known
+    /// expected-data gap.
     Resolved,
     /// Some expected parts resolved and some did not.
     PartiallyResolved,
@@ -282,6 +326,9 @@ pub enum ApplicationStateReason {
     InstallRootUnobserved,
     /// The recorded install location does not exist.
     InstallRootMissing,
+    /// Observed artifacts lie under a recorded root whose own node was
+    /// not observed: a partial footprint, never "nothing observed".
+    DescendantObserved,
     /// An exact executable was recorded and observed.
     ExecutableObserved,
     /// An exact executable was recorded but could not be observed.
@@ -311,9 +358,11 @@ pub enum SystemEdgeKind {
     /// either direction is a single lookup).
     LocatedUnder,
     // ---- Application → Artifact ----------------------------------------
-    /// The artifact is the application's install root.
+    /// An install-root path; observed only for an exact recorded location,
+    /// otherwise inferred weak scope.
     ApplicationInstallRoot,
-    /// The artifact is the application's recorded executable.
+    /// An executable path; observed only for an exact recorded path, otherwise
+    /// a weak candidate that cannot resolve the application by itself.
     ApplicationExecutable,
     /// The artifact is application data (classifier category corroborates).
     ApplicationData,
@@ -334,11 +383,6 @@ pub enum SystemEdgeKind {
     DuplicateOf,
     /// Different paths, same filesystem object (identity engine).
     HardLinkAliasOf,
-    // ---- History context (only from real history facts) -----------------
-    /// A stored historical observation names this path/object.
-    HistoricalAliasOf,
-    /// History proves this path previously referred to a different object.
-    HistoricalMoveOf,
 }
 
 impl SystemEdgeKind {
@@ -348,17 +392,16 @@ impl SystemEdgeKind {
             SystemEdgeKind::Contains | SystemEdgeKind::LocatedUnder => EdgeDomain::Filesystem,
             SystemEdgeKind::ApplicationInstallRoot
             | SystemEdgeKind::ApplicationExecutable
-            | SystemEdgeKind::ApplicationData
+            | SystemEdgeKind::SharedBy
+            | SystemEdgeKind::OwnedBy
+            | SystemEdgeKind::AssociatedWith => EdgeDomain::ApplicationIntelligence,
+            // Descriptive roles are chosen from the CLASSIFIER's verdict, so
+            // their domain is classification — never rewritten by ownership.
+            SystemEdgeKind::ApplicationData
             | SystemEdgeKind::ApplicationCache
             | SystemEdgeKind::ApplicationLog
-            | SystemEdgeKind::ApplicationConfig
-            | SystemEdgeKind::OwnedBy
-            | SystemEdgeKind::AssociatedWith
-            | SystemEdgeKind::SharedBy => EdgeDomain::ApplicationIntelligence,
+            | SystemEdgeKind::ApplicationConfig => EdgeDomain::Classification,
             SystemEdgeKind::DuplicateOf | SystemEdgeKind::HardLinkAliasOf => EdgeDomain::Identity,
-            SystemEdgeKind::HistoricalAliasOf | SystemEdgeKind::HistoricalMoveOf => {
-                EdgeDomain::History
-            }
         }
     }
 
@@ -408,8 +451,6 @@ impl SystemEdgeKind {
             SystemEdgeKind::SharedBy => 10,
             SystemEdgeKind::DuplicateOf => 11,
             SystemEdgeKind::HardLinkAliasOf => 12,
-            SystemEdgeKind::HistoricalAliasOf => 13,
-            SystemEdgeKind::HistoricalMoveOf => 14,
         }
     }
 }
@@ -422,7 +463,6 @@ pub enum EdgeDomain {
     Classification,
     Identity,
     ApplicationIntelligence,
-    History,
 }
 
 /// One edge of the system graph. Carries the machine-readable reason.
@@ -473,6 +513,62 @@ pub struct HistoricalContext {
     /// The classification recorded in that run.
     pub category: Option<String>,
     pub provenance: ProvenanceState,
+}
+
+/// What a historical record says about the artifact node it joins to.
+///
+/// History is node-attached context, never a graph edge: a "move" is an
+/// assertion ABOUT one current node ("history proves this path previously
+/// referred to a different object"), and a self-loop edge would mislead by
+/// suggesting a relationship between two nodes. No history is ever inferred
+/// from current state — every assertion quotes a caller-supplied record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HistoricalRelation {
+    /// Stored history and the current node prove the SAME object identity.
+    SameObjectObserved,
+    /// Stored history proves an object identity that differs from the
+    /// current node's proven identity: the path previously referred to a
+    /// different object.
+    ObjectReplaced,
+    /// The stored record and/or the current node prove no object identity,
+    /// so the relation cannot be established. Recorded honestly instead of
+    /// asserting sameness without proof.
+    IdentityUnproven,
+}
+
+/// One historical record joined to its current artifact node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoricalAssertion {
+    /// The current artifact node this record joins to.
+    pub artifact_key: String,
+    /// The run the fact came from.
+    pub run_id: String,
+    pub path: PathBuf,
+    /// The object identity the stored record carries (quoted, never
+    /// re-derived).
+    pub recorded_identity: Option<ObjectIdentity>,
+    /// The current node's identity (quoted, never re-derived).
+    pub current_identity: Option<ObjectIdentity>,
+    /// What the record establishes about the node.
+    pub relation: HistoricalRelation,
+    /// The classification recorded in that run.
+    pub category: Option<String>,
+    pub provenance: ProvenanceState,
+    /// Structured evidence for the assertion.
+    pub evidence: Vec<OwnershipEvidence>,
+}
+
+impl HistoricalAssertion {
+    /// Canonical ordering key: node, then run, then path bytes.
+    pub(crate) fn order_key(&self) -> (&str, &str, Vec<u8>) {
+        (
+            self.artifact_key.as_str(),
+            self.run_id.as_str(),
+            self.path.as_os_str().as_encoded_bytes().to_vec(),
+        )
+    }
 }
 
 /// Which capability a report refers to, and that capability's honest status.
@@ -617,71 +713,46 @@ pub enum CandidateActionKind {
 
 /// The immutable, finalized system model.
 ///
-/// Constructed only by [`crate::build::build_system_model`]; every field is
-/// public for reading but the type has no mutating API, so callers cannot
-/// create an inconsistent graph. All indexes are built at finalization and
-/// therefore cannot go stale.
+/// Constructed only by [`crate::build::build_system_model`]; every canonical
+/// collection is PRIVATE, so external code can read but never mutate a node
+/// set without its indexes. The only construction route
+/// ([`SystemModel::finalize`]) builds every index from the canonical sets,
+/// and deserialization rebuilds the indexes the same way instead of trusting
+/// serialized ones. There is no mutating API of any kind.
 ///
-/// `indexes` is serialized through a string-keyed form (see
-/// [`SerialIndexes`]) because serde maps require string keys; the canonical
-/// data is the node/edge sets, and the indexes are exactly reconstructible
-/// from them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Read-only accessors use the repository's existing names where they exist
+/// (`artifact_nodes`, `artifact`, `application`, `edges_for_node`, ...); the
+/// remaining collections expose `artifacts()`, `applications()`, `edges()`,
+/// `historical_context()`, `historical_assertions()`, `insights()`,
+/// `candidates()`, `observations()`, and `truncation()`.
+///
+/// The wire form carries canonical data only: indexes are never serialized
+/// and never accepted from input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemModel {
     /// Artifact nodes, canonically ordered by node key.
-    pub artifacts: Vec<ArtifactNode>,
+    artifacts: Vec<ArtifactNode>,
     /// Application nodes, canonically ordered by application id.
-    pub applications: Vec<ApplicationNode>,
+    applications: Vec<ApplicationNode>,
     /// Edges, canonically ordered by (kind rank, from, to).
-    pub edges: Vec<SystemEdge>,
+    edges: Vec<SystemEdge>,
     /// Historical context records, canonically ordered.
-    pub historical_context: Vec<HistoricalContext>,
+    historical_context: Vec<HistoricalContext>,
+    /// Node-attached historical assertions, canonically ordered.
+    historical_assertions: Vec<HistoricalAssertion>,
     /// Higher-order conclusions, canonically ordered by id.
-    pub insights: Vec<SystemInsight>,
+    insights: Vec<SystemInsight>,
     /// Inert read-only candidates, canonically ordered.
-    pub candidates: Vec<SystemCandidate>,
+    candidates: Vec<SystemCandidate>,
     /// Honest coverage of the domains this model joined.
-    pub observations: ObservationSummary,
+    observations: ObservationSummary,
     /// Exact truncation accounting for every applied bound.
-    pub truncation: ModelTruncation,
-    /// Derived indexes. Kept private-ish via accessor methods so they cannot
-    /// be mutated independently of the node sets.
-    #[serde(
-        serialize_with = "serialize_model_indexes",
-        deserialize_with = "deserialize_model_indexes"
-    )]
+    truncation: ModelTruncation,
+    /// Derived indexes. Never serialized, never deserialized: rebuilt from
+    /// the canonical collections on every construction route.
+    #[serde(skip)]
     indexes: ModelIndexes,
-}
-
-fn serialize_model_indexes<S>(indexes: &ModelIndexes, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    indexes.to_serial().serialize(serializer)
-}
-
-fn deserialize_model_indexes<'de, D>(deserializer: D) -> Result<ModelIndexes, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    SerialIndexes::deserialize(deserializer).map(ModelIndexes::from_serial)
-}
-
-/// Serialization form of the lookup indexes. Serde cannot emit a non-string
-/// map key, so the canonical [`ObjectIdentity`] index is stored as a sorted
-/// list of `(identity, keys)` pairs; [`ModelIndexes::from_serial`] restores
-/// it canonically. Indexes are never part of any semantic comparison —
-/// they are fully derivable from the node/edge sets.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct SerialIndexes {
-    artifact_by_key: BTreeMap<String, usize>,
-    application_by_id: BTreeMap<String, usize>,
-    edges_by_node: BTreeMap<String, Vec<usize>>,
-    artifacts_by_object: Vec<(ObjectIdentity, Vec<String>)>,
-    artifacts_by_content: BTreeMap<String, Vec<String>>,
-    artifacts_by_category: BTreeMap<String, Vec<String>>,
-    artifacts_by_application: BTreeMap<String, Vec<String>>,
 }
 
 /// Derived lookup indexes. Constructed once, at finalization, from the
@@ -706,45 +777,7 @@ pub(crate) struct ModelIndexes {
     pub(crate) artifacts_by_application: BTreeMap<String, Vec<String>>,
 }
 
-impl ModelIndexes {
-    fn to_serial(&self) -> SerialIndexes {
-        let mut by_object: Vec<(ObjectIdentity, Vec<String>)> = self
-            .artifacts_by_object
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        by_object.sort();
-        SerialIndexes {
-            artifact_by_key: self.artifact_by_key.clone(),
-            application_by_id: self.application_by_id.clone(),
-            edges_by_node: self.edges_by_node.clone(),
-            artifacts_by_object: by_object,
-            artifacts_by_content: self.artifacts_by_content.clone(),
-            artifacts_by_category: self.artifacts_by_category.clone(),
-            artifacts_by_application: self.artifacts_by_application.clone(),
-        }
-    }
-
-    fn from_serial(value: SerialIndexes) -> Self {
-        let mut artifacts_by_object: BTreeMap<ObjectIdentity, Vec<String>> = BTreeMap::new();
-        for (identity, mut keys) in value.artifacts_by_object {
-            keys.sort();
-            keys.dedup();
-            artifacts_by_object.insert(identity, keys);
-        }
-        ModelIndexes {
-            artifact_by_key: value.artifact_by_key,
-            application_by_id: value.application_by_id,
-            edges_by_node: value.edges_by_node,
-            artifacts_by_object,
-            artifacts_by_content: value.artifacts_by_content,
-            artifacts_by_category: value.artifacts_by_category,
-            artifacts_by_application: value.artifacts_by_application,
-        }
-    }
-}
-
-/// One finalized-model ingredient bundle. Grouping the eight inputs keeps the
+/// One finalized-model ingredient bundle. Grouping the inputs keeps the
 /// [`SystemModel::finalize`] signature under the lint limit without changing
 /// any semantics.
 pub(crate) struct FinalizeInput {
@@ -752,16 +785,189 @@ pub(crate) struct FinalizeInput {
     pub(crate) applications: Vec<ApplicationNode>,
     pub(crate) edges: Vec<SystemEdge>,
     pub(crate) historical_context: Vec<HistoricalContext>,
+    pub(crate) historical_assertions: Vec<HistoricalAssertion>,
     pub(crate) insights: Vec<SystemInsight>,
     pub(crate) candidates: Vec<SystemCandidate>,
     pub(crate) observations: ObservationSummary,
     pub(crate) truncation: ModelTruncation,
 }
 
+/// Canonical-only wire form: every canonical collection, never the derived
+/// indexes. Unknown fields are ignored so older payloads (which carried an
+/// `indexes` section) still parse — the indexes are always rebuilt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelWire {
+    artifacts: Vec<ArtifactNode>,
+    applications: Vec<ApplicationNode>,
+    edges: Vec<SystemEdge>,
+    #[serde(default)]
+    historical_context: Vec<HistoricalContext>,
+    #[serde(default)]
+    historical_assertions: Vec<HistoricalAssertion>,
+    #[serde(default)]
+    insights: Vec<SystemInsight>,
+    #[serde(default)]
+    candidates: Vec<SystemCandidate>,
+    observations: ObservationSummary,
+    truncation: ModelTruncation,
+}
+
+impl<'de> Deserialize<'de> for SystemModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let wire = ModelWire::deserialize(deserializer)?;
+        // Deserialize canonical fields → validate structural invariants →
+        // rebuild indexes → produce a finalized model. Serialized indexes
+        // are never accepted as authoritative (they are not even read).
+        validate_canonical_wire(&wire).map_err(D::Error::custom)?;
+        let model = SystemModel::finalize(FinalizeInput {
+            artifacts: wire.artifacts,
+            applications: wire.applications,
+            edges: wire.edges,
+            historical_context: wire.historical_context,
+            historical_assertions: wire.historical_assertions,
+            insights: wire.insights,
+            candidates: wire.candidates,
+            observations: wire.observations,
+            truncation: wire.truncation,
+        });
+        model
+            .check_invariants()
+            .map_err(|e| D::Error::custom(format!("invalid system model: {e}")))?;
+        Ok(model)
+    }
+}
+
+/// Structural validation applied to canonical wire data before the indexes
+/// are rebuilt: canonical ordering, key uniqueness, and endpoint existence.
+/// Anything failing here is rejected rather than rebuilt.
+fn validate_canonical_wire(wire: &ModelWire) -> Result<(), String> {
+    for w in wire.artifacts.windows(2) {
+        if w[0].key >= w[1].key {
+            return Err(format!(
+                "artifacts not canonically ordered or duplicate key: {}",
+                w[0].key
+            ));
+        }
+        if w[0].key.is_empty() {
+            return Err("artifact with an empty node key".to_string());
+        }
+    }
+    if wire.artifacts.last().is_some_and(|a| a.key.is_empty()) {
+        return Err("artifact with an empty node key".to_string());
+    }
+    for artifact in &wire.artifacts {
+        if ArtifactKey::of(&artifact.path).as_str() != artifact.key {
+            return Err(format!(
+                "artifact key does not encode its path: {}",
+                artifact.key
+            ));
+        }
+    }
+    for w in wire.applications.windows(2) {
+        if w[0].id.0 >= w[1].id.0 {
+            return Err(format!(
+                "applications not canonically ordered or duplicate id: {}",
+                w[0].id.0
+            ));
+        }
+    }
+    for w in wire.edges.windows(2) {
+        if w[0].order_key() >= w[1].order_key() {
+            return Err("edges not uniquely canonically ordered".to_string());
+        }
+    }
+    // NOTE: `>` (not `>=`) is deliberate: conflicting history rows share
+    // one (run, path) key by design (conflict preservation), and insights
+    // legitimately share ... no — insight ids are unique. History rows and
+    // assertions may repeat a key; artifacts, applications, insights, and
+    // candidates may not.
+    for w in wire.historical_context.windows(2) {
+        if historical_context_key(&w[0]) > historical_context_key(&w[1]) {
+            return Err("historical context not canonically ordered".to_string());
+        }
+    }
+    for w in wire.historical_assertions.windows(2) {
+        if w[0].order_key() > w[1].order_key() {
+            return Err("historical assertions not canonically ordered".to_string());
+        }
+    }
+    for w in wire.insights.windows(2) {
+        if w[0].id >= w[1].id {
+            return Err(format!("insights not canonically ordered: {}", w[0].id));
+        }
+        if w[0].id.is_empty() {
+            return Err("insight with an empty id".to_string());
+        }
+    }
+    if wire.insights.last().is_some_and(|i| i.id.is_empty()) {
+        return Err("insight with an empty id".to_string());
+    }
+    for w in wire.candidates.windows(2) {
+        if candidate_order_key(&w[0]) >= candidate_order_key(&w[1]) {
+            return Err("candidates not canonically ordered".to_string());
+        }
+    }
+    // Every edge endpoint must resolve to a node carried by this payload.
+    // Canonical ordering was checked above, so binary search validates
+    // endpoints in O(log N) rather than rescanning all artifacts per edge.
+    let artifact = |k: &str| {
+        wire.artifacts
+            .binary_search_by(|a| a.key.as_str().cmp(k))
+            .is_ok()
+    };
+    let application = |k: &str| {
+        wire.applications
+            .binary_search_by(|a| a.id.0.as_str().cmp(k))
+            .is_ok()
+    };
+    let node_exists = |k: &str| artifact(k) || application(k);
+    for e in &wire.edges {
+        if e.from.is_empty() || e.to.is_empty() {
+            return Err("edge with an empty endpoint".to_string());
+        }
+        if !node_exists(&e.from) {
+            return Err(format!("edge from unknown node: {}", e.from));
+        }
+        if !node_exists(&e.to) {
+            return Err(format!("edge to unknown node: {}", e.to));
+        }
+    }
+    for a in &wire.historical_assertions {
+        if !artifact(&a.artifact_key) {
+            return Err(format!(
+                "historical assertion for unknown artifact: {}",
+                a.artifact_key
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Canonical ordering key of one historical-context record.
+fn historical_context_key(ctx: &HistoricalContext) -> (&str, Vec<u8>) {
+    (
+        ctx.run_id.as_str(),
+        ctx.path.as_os_str().as_encoded_bytes().to_vec(),
+    )
+}
+
+/// Canonical ordering key of one candidate.
+fn candidate_order_key(c: &SystemCandidate) -> (&str, CandidateActionKind) {
+    (c.target.as_str(), c.action_kind)
+}
+
 impl SystemModel {
     /// Finalize a model from its one grouped input, building every index.
     /// This is the only constructor; it assumes the caller already
     /// canonicalized and bounded the collections (see [`crate::build`]).
+    /// Deserialization funnels through here too, after structural
+    /// validation — so indexes always derive from canonical data and can
+    /// never be stale or poisoned.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finalize(bundle: FinalizeInput) -> Self {
         let FinalizeInput {
@@ -769,6 +975,7 @@ impl SystemModel {
             applications,
             edges,
             historical_context,
+            historical_assertions,
             insights,
             candidates,
             observations,
@@ -857,6 +1064,7 @@ impl SystemModel {
             applications,
             edges,
             historical_context,
+            historical_assertions,
             insights,
             candidates,
             observations,
@@ -868,6 +1076,51 @@ impl SystemModel {
     /// Every artifact node (canonical order).
     pub fn artifact_nodes(&self) -> &[ArtifactNode] {
         &self.artifacts
+    }
+
+    /// Every artifact node (canonical order). Alias of [`Self::artifact_nodes`].
+    pub fn artifacts(&self) -> &[ArtifactNode] {
+        &self.artifacts
+    }
+
+    /// Every application node (canonical order).
+    pub fn applications(&self) -> &[ApplicationNode] {
+        &self.applications
+    }
+
+    /// Every edge (canonical order).
+    pub fn edges(&self) -> &[SystemEdge] {
+        &self.edges
+    }
+
+    /// Every historical-context record (canonical order).
+    pub fn historical_context(&self) -> &[HistoricalContext] {
+        &self.historical_context
+    }
+
+    /// Every node-attached historical assertion (canonical order).
+    pub fn historical_assertions(&self) -> &[HistoricalAssertion] {
+        &self.historical_assertions
+    }
+
+    /// Every insight (canonical order).
+    pub fn insights(&self) -> &[SystemInsight] {
+        &self.insights
+    }
+
+    /// Every inert candidate (canonical order).
+    pub fn candidates(&self) -> &[SystemCandidate] {
+        &self.candidates
+    }
+
+    /// Honest coverage of the domains this model joined.
+    pub fn observations(&self) -> &ObservationSummary {
+        &self.observations
+    }
+
+    /// Exact truncation accounting for every applied bound.
+    pub fn truncation(&self) -> &ModelTruncation {
+        &self.truncation
     }
 
     /// Look up one artifact by node key.
@@ -925,85 +1178,432 @@ impl SystemModel {
             .unwrap_or_default()
     }
 
-    /// Index consistency invariant: every indexed target exists, and every
-    /// canonical node is discoverable through its required index. Used by
-    /// tests and by [`Self::check_invariants`].
-    pub fn indexes_are_consistent(&self) -> bool {
-        let node_exists = |k: &str| self.indexes.artifact_by_key.contains_key(k);
-        for (object, keys) in &self.indexes.artifacts_by_object {
-            for k in keys {
-                let Some(artifact) = self
-                    .indexes
-                    .artifact_by_key
-                    .get(k)
-                    .and_then(|i| self.artifacts.get(*i))
-                else {
-                    return false;
-                };
-                if artifact.identity != Some(*object) {
-                    return false;
+    /// Full model self-check: genuine bidirectional index consistency plus
+    /// canonical ordering. Every direction is proven both ways:
+    ///
+    /// ```text
+    /// canonical → index AND index → canonical
+    /// ```
+    ///
+    /// for artifacts, applications, edges, and every secondary index
+    /// (object, content, category, application). Duplicate keys, dangling
+    /// positions, impossible node references, and unordered collections all
+    /// fail.
+    pub fn check_invariants(&self) -> Result<(), String> {
+        // ---- Canonical → index: every canonical member is indexed. -----
+        for (i, a) in self.artifacts.iter().enumerate() {
+            if ArtifactKey::of(&a.path).as_str() != a.key {
+                return Err(format!("artifact key does not encode its path: {}", a.key));
+            }
+            match self.indexes.artifact_by_key.get(&a.key) {
+                Some(&pos) if pos == i => {}
+                Some(&pos) => {
+                    return Err(format!(
+                        "artifact index position {pos} does not point at canonical position {i} ({})",
+                        a.key
+                    ));
+                }
+                None => {
+                    return Err(format!("canonical artifact missing from index: {}", a.key));
                 }
             }
+        }
+        for (i, app) in self.applications.iter().enumerate() {
+            match self.indexes.application_by_id.get(&app.id.0) {
+                Some(&pos) if pos == i => {}
+                Some(&pos) => {
+                    return Err(format!(
+                        "application index position {pos} does not point at canonical position {i} ({})",
+                        app.id.0
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "canonical application missing from index: {}",
+                        app.id.0
+                    ));
+                }
+            }
+        }
+        // Edge facts retain their source-domain and confidence semantics.
+        // These checks also stop a canonical payload from relabeling an
+        // inferred claim as observed (or a descriptive edge as ownership).
+        for (i, edge) in self.edges.iter().enumerate() {
+            if edge.domain != edge.kind.domain() {
+                return Err(format!("edge {i} domain disagrees with its kind"));
+            }
+            let from_is_artifact = self.artifact(&edge.from).is_some();
+            let to_is_artifact = self.artifact(&edge.to).is_some();
+            let from_is_application = self.application_by_id(&edge.from).is_some();
+            let to_is_application = self.application_by_id(&edge.to).is_some();
+            let endpoint_types_valid = match edge.kind {
+                SystemEdgeKind::Contains
+                | SystemEdgeKind::LocatedUnder
+                | SystemEdgeKind::DuplicateOf
+                | SystemEdgeKind::HardLinkAliasOf => from_is_artifact && to_is_artifact,
+                SystemEdgeKind::ApplicationInstallRoot
+                | SystemEdgeKind::ApplicationExecutable
+                | SystemEdgeKind::ApplicationData
+                | SystemEdgeKind::ApplicationCache
+                | SystemEdgeKind::ApplicationLog
+                | SystemEdgeKind::ApplicationConfig
+                | SystemEdgeKind::OwnedBy
+                | SystemEdgeKind::AssociatedWith => from_is_application && to_is_artifact,
+                SystemEdgeKind::SharedBy => from_is_application && to_is_application,
+            };
+            if !endpoint_types_valid {
+                return Err(format!(
+                    "edge {i} endpoints have types incompatible with its kind"
+                ));
+            }
+            if matches!(
+                edge.kind,
+                SystemEdgeKind::SharedBy
+                    | SystemEdgeKind::DuplicateOf
+                    | SystemEdgeKind::HardLinkAliasOf
+            ) && edge.from >= edge.to
+            {
+                return Err(format!(
+                    "symmetric edge {i} is self-linked or not canonically oriented"
+                ));
+            }
+            let provenance_valid = match edge.kind {
+                SystemEdgeKind::ApplicationInstallRoot | SystemEdgeKind::ApplicationExecutable => {
+                    matches!(
+                        edge.provenance,
+                        ProvenanceState::Observed
+                            | ProvenanceState::Inferred
+                            | ProvenanceState::Candidate
+                    )
+                }
+                SystemEdgeKind::Contains
+                | SystemEdgeKind::LocatedUnder
+                | SystemEdgeKind::DuplicateOf
+                | SystemEdgeKind::HardLinkAliasOf => edge.provenance == ProvenanceState::Observed,
+                SystemEdgeKind::ApplicationData
+                | SystemEdgeKind::ApplicationCache
+                | SystemEdgeKind::ApplicationLog
+                | SystemEdgeKind::ApplicationConfig
+                | SystemEdgeKind::OwnedBy
+                | SystemEdgeKind::AssociatedWith
+                | SystemEdgeKind::SharedBy => edge.provenance == ProvenanceState::Inferred,
+            };
+            if !provenance_valid {
+                return Err(format!("edge {i} provenance disagrees with its kind"));
+            }
+            let role_evidence_points_to_target = edge.evidence.iter().all(|e| {
+                ArtifactKey::of(&e.observed_path).to_string() == edge.to
+                    && e.matched_path
+                        .as_ref()
+                        .is_some_and(|path| ArtifactKey::of(path).to_string() == edge.to)
+            });
+            let role_semantics_valid = match (edge.kind, edge.provenance) {
+                (SystemEdgeKind::ApplicationInstallRoot, ProvenanceState::Observed) => {
+                    edge.assessment == OwnershipAssessment::Direct
+                        && role_evidence_points_to_target
+                        && edge.evidence.iter().any(|e| {
+                            e.kind == EvidenceKind::InstallLocation
+                                && e.strength == EvidenceStrength::Direct
+                        })
+                }
+                (SystemEdgeKind::ApplicationInstallRoot, ProvenanceState::Inferred) => {
+                    edge.assessment == OwnershipAssessment::Weak
+                        && role_evidence_points_to_target
+                        && edge.evidence.iter().any(|e| {
+                            e.kind == EvidenceKind::InstallRootContainment
+                                && e.strength <= EvidenceStrength::Weak
+                        })
+                }
+                (SystemEdgeKind::ApplicationInstallRoot, _) => false,
+                (SystemEdgeKind::ApplicationExecutable, ProvenanceState::Observed) => {
+                    edge.assessment == OwnershipAssessment::Strong
+                        && role_evidence_points_to_target
+                        && edge.evidence.iter().any(|e| {
+                            e.kind == EvidenceKind::ExactExecutablePath
+                                && e.strength == EvidenceStrength::Strong
+                        })
+                }
+                (SystemEdgeKind::ApplicationExecutable, ProvenanceState::Candidate) => {
+                    edge.assessment == OwnershipAssessment::Weak
+                        && role_evidence_points_to_target
+                        && edge.evidence.iter().any(|e| {
+                            e.kind == EvidenceKind::FilenameSimilarity
+                                && e.strength == EvidenceStrength::Weak
+                        })
+                }
+                (SystemEdgeKind::ApplicationExecutable, _) => false,
+                _ => true,
+            };
+            if !role_semantics_valid {
+                return Err(format!("edge {i} role confidence exceeds its evidence"));
+            }
+            if edge.evidence.iter().any(|e| {
+                e.strength > e.kind.max_strength() || e.strength > e.correlation_group.ceiling()
+            }) {
+                return Err(format!("edge {i} evidence exceeds a kind/group ceiling"));
+            }
+            if edge.evidence.windows(2).any(|w| w[0] >= w[1]) {
+                return Err(format!("edge {i} evidence is not unique and ordered"));
+            }
+            match edge.kind {
+                SystemEdgeKind::Contains | SystemEdgeKind::LocatedUnder
+                    if edge.assessment != OwnershipAssessment::Direct =>
+                {
+                    return Err(format!("filesystem edge {i} is not a direct observation"));
+                }
+                SystemEdgeKind::OwnedBy if !edge.assessment.is_credible() => {
+                    return Err(format!("OwnedBy edge {i} is not credible"));
+                }
+                SystemEdgeKind::AssociatedWith if edge.assessment.is_credible() => {
+                    return Err(format!("AssociatedWith edge {i} is credible"));
+                }
+                SystemEdgeKind::SharedBy
+                    if edge.assessment != OwnershipAssessment::Moderate
+                        || !edge.evidence.is_empty() =>
+                {
+                    return Err(format!(
+                        "SharedBy edge {i} has invalid assessment or evidence"
+                    ));
+                }
+                SystemEdgeKind::DuplicateOf if edge.assessment != OwnershipAssessment::Strong => {
+                    return Err(format!("DuplicateOf edge {i} is not strongly proven"));
+                }
+                SystemEdgeKind::HardLinkAliasOf
+                    if edge.assessment != OwnershipAssessment::Direct =>
+                {
+                    return Err(format!("HardLinkAliasOf edge {i} is not directly proven"));
+                }
+                _ => {}
+            }
+        }
+        // Every edge is indexed by EVERY endpoint it touches.
+        for (i, e) in self.edges.iter().enumerate() {
+            for endpoint in [&e.from, &e.to] {
+                let Some(idxs) = self.indexes.edges_by_node.get(endpoint) else {
+                    return Err(format!("edge {i} endpoint not indexed: {endpoint}"));
+                };
+                if idxs.binary_search(&i).is_err() {
+                    return Err(format!("edge {i} missing from endpoint index: {endpoint}"));
+                }
+            }
+        }
+        // ---- Index → canonical: every index entry resolves exactly. -----
+        if self.indexes.artifact_by_key.len() != self.artifacts.len() {
+            return Err("artifact index size differs from canonical artifact count".to_string());
+        }
+        for (key, pos) in &self.indexes.artifact_by_key {
+            let Some(node) = self.artifacts.get(*pos) else {
+                return Err(format!("artifact index position {pos} dangles ({key})"));
+            };
+            if &node.key != key {
+                return Err(format!(
+                    "artifact index position {pos} points at {} instead of {key}",
+                    node.key
+                ));
+            }
+        }
+        if self.indexes.application_by_id.len() != self.applications.len() {
+            return Err(
+                "application index size differs from canonical application count".to_string(),
+            );
+        }
+        for (id, pos) in &self.indexes.application_by_id {
+            let Some(node) = self.applications.get(*pos) else {
+                return Err(format!("application index position {pos} dangles ({id})"));
+            };
+            if &node.id.0 != id {
+                return Err(format!(
+                    "application index position {pos} points at {} instead of {id}",
+                    node.id.0
+                ));
+            }
+        }
+        // Object index: exact membership match, no duplicates.
+        let mut object_seen: BTreeMap<ObjectIdentity, usize> = BTreeMap::new();
+        for a in &self.artifacts {
+            if let Some(object) = a.identity {
+                *object_seen.entry(object).or_default() += 1;
+            }
+        }
+        if self.indexes.artifacts_by_object.len() != object_seen.len() {
+            return Err("object index covers a different identity set".to_string());
+        }
+        for (object, keys) in &self.indexes.artifacts_by_object {
+            let mut sorted = keys.clone();
+            sorted.sort();
+            sorted.dedup();
+            if *keys != sorted {
+                return Err("object index membership is not unique and ordered".to_string());
+            }
+            for k in keys {
+                let Some(node) = self.artifact(k) else {
+                    return Err(format!("object index member is not a node: {k}"));
+                };
+                if node.identity != Some(*object) {
+                    return Err(format!("object index member has a different identity: {k}"));
+                }
+            }
+            if keys.len() != object_seen.get(object).copied().unwrap_or(0) {
+                return Err(
+                    "object index membership does not match canonical identities".to_string(),
+                );
+            }
+        }
+        // Content index: exact membership match, no duplicates.
+        let mut content_seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for a in &self.artifacts {
+            if let Some(content) = a.content_sha256.as_deref() {
+                *content_seen.entry(content).or_default() += 1;
+            }
+        }
+        if self.indexes.artifacts_by_content.len() != content_seen.len() {
+            return Err("content index covers a different digest set".to_string());
         }
         for (content, keys) in &self.indexes.artifacts_by_content {
+            let mut sorted = keys.clone();
+            sorted.sort();
+            sorted.dedup();
+            if *keys != sorted {
+                return Err("content index membership is not unique and ordered".to_string());
+            }
             for k in keys {
-                let Some(artifact) = self
-                    .indexes
-                    .artifact_by_key
-                    .get(k)
-                    .and_then(|i| self.artifacts.get(*i))
-                else {
-                    return false;
+                let Some(node) = self.artifact(k) else {
+                    return Err(format!("content index member is not a node: {k}"));
                 };
-                if artifact.content_sha256.as_deref() != Some(content.as_str()) {
-                    return false;
+                if node.content_sha256.as_deref() != Some(content.as_str()) {
+                    return Err(format!("content index member has a different digest: {k}"));
                 }
             }
+            if keys.len() != content_seen.get(content.as_str()).copied().unwrap_or(0) {
+                return Err("content index membership does not match canonical digests".to_string());
+            }
+        }
+        // Category index: exact membership match, no duplicates.
+        let mut category_seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for a in &self.artifacts {
+            if let Some(category) = a.category {
+                *category_seen.entry(category.code()).or_default() += 1;
+            }
+        }
+        if self.indexes.artifacts_by_category.len() != category_seen.len() {
+            return Err("category index covers a different category set".to_string());
         }
         for (category, keys) in &self.indexes.artifacts_by_category {
+            let mut sorted = keys.clone();
+            sorted.sort();
+            sorted.dedup();
+            if *keys != sorted {
+                return Err("category index membership is not unique and ordered".to_string());
+            }
             for k in keys {
-                let Some(artifact) = self
-                    .indexes
-                    .artifact_by_key
-                    .get(k)
-                    .and_then(|i| self.artifacts.get(*i))
-                else {
-                    return false;
+                let Some(node) = self.artifact(k) else {
+                    return Err(format!("category index member is not a node: {k}"));
                 };
-                if artifact.category.map(|c| c.code()) != Some(category.as_str()) {
-                    return false;
+                if node.category.map(|c| c.code()) != Some(category.as_str()) {
+                    return Err(format!(
+                        "category index member has a different category: {k}"
+                    ));
                 }
             }
-        }
-        for keys in self.indexes.artifacts_by_application.values() {
-            if !keys.iter().all(|k| node_exists(k)) {
-                return false;
+            if keys.len() != category_seen.get(category.as_str()).copied().unwrap_or(0) {
+                return Err(
+                    "category index membership does not match canonical categories".to_string(),
+                );
             }
         }
+        // Application index: exact match against the credible claim edges —
+        // no more, no fewer, no duplicates, every member a real artifact.
+        // NOTE: a `SharedBy` edge links two APPLICATIONS (its `to` endpoint
+        // is an application, not an artifact), so it is checked for endpoint
+        // existence but excluded from the artifact-membership comparison.
+        let mut expected_by_app: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for e in &self.edges {
+            let is_claim = (e.kind.asserts_ownership() || e.kind == SystemEdgeKind::SharedBy)
+                && e.assessment.is_credible();
+            if !is_claim {
+                continue;
+            }
+            if self.application_by_id(&e.from).is_none() {
+                return Err(format!("claim edge from unknown application: {}", e.from));
+            }
+            if e.kind == SystemEdgeKind::SharedBy {
+                // App↔app sharing fact: both endpoints must be applications.
+                if self.application_by_id(&e.to).is_none() {
+                    return Err(format!("SharedBy edge to non-application: {}", e.to));
+                }
+                continue;
+            }
+            if self.artifact(&e.to).is_none() {
+                return Err(format!(
+                    "claim edge references a non-node: {} → {}",
+                    e.from, e.to
+                ));
+            }
+            expected_by_app
+                .entry(e.from.as_str())
+                .or_default()
+                .push(e.to.as_str());
+        }
+        for members in expected_by_app.values_mut() {
+            members.sort();
+            members.dedup();
+        }
+        if self.indexes.artifacts_by_application.len() != expected_by_app.len() {
+            return Err("application index covers a different application set".to_string());
+        }
+        for (app, keys) in &self.indexes.artifacts_by_application {
+            if self.application_by_id(app).is_none() {
+                return Err(format!(
+                    "application index key is not an application: {app}"
+                ));
+            }
+            let mut sorted = keys.clone();
+            sorted.sort();
+            sorted.dedup();
+            if *keys != sorted {
+                return Err("application index membership is not unique and ordered".to_string());
+            }
+            for k in keys {
+                if self.artifact(k).is_none() {
+                    return Err(format!("application index member is not an artifact: {k}"));
+                }
+            }
+            let expected = expected_by_app
+                .get(app.as_str())
+                .cloned()
+                .unwrap_or_default();
+            let actual: Vec<&str> = keys.iter().map(String::as_str).collect();
+            if actual != expected {
+                return Err(format!(
+                    "application index membership does not match credible claim edges: {app}"
+                ));
+            }
+        }
+        // Edge index: every entry touches a real node and its edge; no
+        // dangling positions, no duplicates.
         for (node, idxs) in &self.indexes.edges_by_node {
-            // Every edge-index target must exist and really touch the node.
-            if !self.indexes.artifact_by_key.contains_key(node)
-                && !self.indexes.application_by_id.contains_key(node)
-            {
-                return false;
+            if idxs.is_empty() {
+                return Err(format!("edge index contains an empty entry: {node}"));
+            }
+            if self.artifact(node).is_none() && self.application_by_id(node).is_none() {
+                return Err(format!("edge index key is not a node: {node}"));
+            }
+            let mut sorted = idxs.clone();
+            sorted.sort();
+            sorted.dedup();
+            if *idxs != sorted {
+                return Err(format!("edge index for {node} is not unique and ordered"));
             }
             for i in idxs {
                 let Some(edge) = self.edges.get(*i) else {
-                    return false;
+                    return Err(format!("edge index position {i} dangles ({node})"));
                 };
                 if &edge.from != node && &edge.to != node {
-                    return false;
+                    return Err(format!("edge {i} does not touch its index node {node}"));
                 }
             }
         }
-        true
-    }
-
-    /// Full model self-check: index consistency plus canonical ordering.
-    pub fn check_invariants(&self) -> Result<(), String> {
-        if !self.indexes_are_consistent() {
-            return Err("indexes diverge from the canonical node/edge sets".to_string());
-        }
+        // ---- Canonical ordering for every ordered collection. -----------
         for w in self.artifacts.windows(2) {
             if w[0].key >= w[1].key {
                 return Err(format!("artifacts not canonically ordered: {}", w[0].key));
@@ -1018,8 +1618,20 @@ impl SystemModel {
             }
         }
         for w in self.edges.windows(2) {
+            if w[0].order_key() >= w[1].order_key() {
+                return Err("edges not uniquely canonically ordered".to_string());
+            }
+        }
+        // History rows and assertions sort non-decreasing (`>` rejects):
+        // conflicting rows legitimately share one (run, path) key.
+        for w in self.historical_context.windows(2) {
+            if historical_context_key(&w[0]) > historical_context_key(&w[1]) {
+                return Err("historical context not canonically ordered".to_string());
+            }
+        }
+        for w in self.historical_assertions.windows(2) {
             if w[0].order_key() > w[1].order_key() {
-                return Err("edges not canonically ordered".to_string());
+                return Err("historical assertions not canonically ordered".to_string());
             }
         }
         for w in self.insights.windows(2) {
@@ -1027,7 +1639,77 @@ impl SystemModel {
                 return Err(format!("insights not canonically ordered: {}", w[0].id));
             }
         }
+        for w in self.candidates.windows(2) {
+            if candidate_order_key(&w[0]) >= candidate_order_key(&w[1]) {
+                return Err("candidates not canonically ordered".to_string());
+            }
+        }
+        for w in self.observations.source_states.windows(2) {
+            let previous = (&w[0].source, w[0].status, &w[0].note);
+            let next = (&w[1].source, w[1].status, &w[1].note);
+            if previous >= next {
+                return Err("source states are not unique and canonically ordered".to_string());
+            }
+        }
+        for candidate in &self.candidates {
+            let Some(target) = self.artifact(&candidate.target) else {
+                return Err(format!(
+                    "candidate target is not an artifact: {}",
+                    candidate.target
+                ));
+            };
+            if target.path != candidate.path {
+                return Err(format!(
+                    "candidate path disagrees with target: {}",
+                    candidate.target
+                ));
+            }
+            if candidate.effect != coresight_capabilities::ActionClass::Destructive {
+                return Err(format!(
+                    "candidate {} has a non-destructive effect label",
+                    candidate.target
+                ));
+            }
+            let expected_confidence = candidate
+                .assessment
+                .strength()
+                .map(|strength| strength.to_confidence())
+                .unwrap_or(coresight_apps::Confidence::Unknown);
+            if candidate.confidence != expected_confidence {
+                return Err(format!(
+                    "candidate confidence disagrees with its assessment: {}",
+                    candidate.target
+                ));
+            }
+            if !candidate
+                .blockers
+                .contains(&InsightBlocker::NoExecutorInThisPhase)
+            {
+                return Err(format!(
+                    "candidate {} is missing NoExecutorInThisPhase",
+                    candidate.target
+                ));
+            }
+            if candidate.blockers.windows(2).any(|w| w[0] >= w[1]) {
+                return Err(format!(
+                    "candidate blockers are not unique and ordered: {}",
+                    candidate.target
+                ));
+            }
+            if candidate.evidence.windows(2).any(|w| w[0] >= w[1]) {
+                return Err(format!(
+                    "candidate evidence is not unique and ordered: {}",
+                    candidate.target
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Application id → canonical position. The private counterpart of the
+    /// public [`Self::application`] lookup, for invariant checking.
+    fn application_by_id(&self, id: &str) -> Option<usize> {
+        self.indexes.application_by_id.get(id).copied()
     }
 
     /// Total artifact count.

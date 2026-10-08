@@ -65,7 +65,7 @@ fn scenario_a_clean_application_resolves_with_all_roles() {
     );
 
     assert!(model.check_invariants().is_ok());
-    let app = &model.applications[0];
+    let app = &model.applications()[0];
     assert_eq!(app.name, "Clean App");
     assert!(
         matches!(
@@ -174,7 +174,7 @@ fn scenario_c_conflicting_strong_claims_are_preserved() {
 
     // The conflict is visible as an insight needing resolution.
     let conflicts: Vec<_> = model
-        .insights
+        .insights()
         .iter()
         .filter(|i| i.kind == InsightKind::ConflictingOwnership)
         .collect();
@@ -208,14 +208,14 @@ fn scenario_d_duplicate_content_is_not_confused_with_hard_link() {
     );
 
     let dupes: Vec<_> = model
-        .edges
+        .edges()
         .iter()
         .filter(|e| e.kind == SystemEdgeKind::DuplicateOf)
         .collect();
     assert_eq!(dupes.len(), 1, "one pairwise duplicate edge");
     assert!(
         model
-            .edges
+            .edges()
             .iter()
             .all(|e| e.kind != SystemEdgeKind::HardLinkAliasOf),
         "a content duplicate must never be published as a hard-link alias"
@@ -228,7 +228,7 @@ fn scenario_d_duplicate_content_is_not_confused_with_hard_link() {
         model.artifact(&b_key).unwrap().identity
     );
     assert!(model
-        .insights
+        .insights()
         .iter()
         .any(|i| i.kind == InsightKind::DuplicateContent));
 }
@@ -258,14 +258,14 @@ fn scenario_e_hard_link_alias_shares_one_object() {
     );
 
     let aliases: Vec<_> = model
-        .edges
+        .edges()
         .iter()
         .filter(|e| e.kind == SystemEdgeKind::HardLinkAliasOf)
         .collect();
     assert_eq!(aliases.len(), 1);
     assert!(
         model
-            .edges
+            .edges()
             .iter()
             .all(|e| e.kind != SystemEdgeKind::DuplicateOf),
         "an alias is one object, not a content duplicate"
@@ -301,11 +301,11 @@ fn scenario_f_denied_data_is_not_empty_and_is_recorded() {
     assert_eq!(node.access, AccessState::ExistsButInaccessible);
     assert_eq!(node.provenance, ProvenanceState::Unavailable);
     // Denied is a counted observation, never silently "empty".
-    assert_eq!(model.observations.inaccessible_artifacts, 1);
+    assert_eq!(model.observations().inaccessible_artifacts, 1);
     assert_ne!(node.provenance, ProvenanceState::Observed);
 
     // The application state records the inaccessible expected data.
-    assert!(model.applications[0]
+    assert!(model.applications()[0]
         .state_reasons
         .contains(&coresight_system_model::ApplicationStateReason::ExpectedDataInaccessible));
 }
@@ -340,9 +340,9 @@ fn scenario_g_unsupported_source_is_not_an_empty_inventory() {
     assert_eq!(association_unknown_artifacts(&model, 16).items.len(), 1);
 
     // And the source status is reported honestly.
-    assert_eq!(model.observations.source_states.len(), 1);
+    assert_eq!(model.observations().source_states.len(), 1);
     assert_eq!(
-        model.observations.source_states[0].status,
+        model.observations().source_states[0].status,
         SourceStatus::Unsupported
     );
 }
@@ -403,13 +403,13 @@ fn containment_never_becomes_ownership() {
     );
     assert!(
         model
-            .edges
+            .edges()
             .iter()
             .all(|e| e.kind != SystemEdgeKind::OwnedBy),
         "containment-only evidence must never publish an OwnedBy edge"
     );
     let assoc: Vec<_> = model
-        .edges
+        .edges()
         .iter()
         .filter(|e| e.kind == SystemEdgeKind::AssociatedWith)
         .collect();
@@ -430,14 +430,14 @@ fn contains_edges_are_pure_structure_and_carry_no_ownership() {
         &limits(),
     );
     let contains: Vec<_> = model
-        .edges
+        .edges()
         .iter()
         .filter(|e| e.kind == SystemEdgeKind::Contains)
         .collect();
     assert_eq!(contains.len(), 1);
     assert!(!contains[0].kind.asserts_ownership());
     let under: Vec<_> = model
-        .edges
+        .edges()
         .iter()
         .filter(|e| e.kind == SystemEdgeKind::LocatedUnder)
         .collect();
@@ -452,6 +452,7 @@ fn contains_edges_are_pure_structure_and_carry_no_ownership() {
 fn observed_and_inferred_remain_distinguishable() {
     let exe = "/opt/app/app.exe";
     let mut fact = app_fact("App", Some("V"), &[], &[exe]);
+    fact.record.executable_path = Some(exe.into());
     fact.executable = Some(exe.into());
     let model = build_system_model(
         &input(
@@ -481,11 +482,11 @@ fn observed_and_inferred_remain_distinguishable() {
     assert_ne!(exact.provenance, ownership.provenance);
     // And the observed/inferred distinction is preserved on the model itself.
     assert!(model
-        .edges
+        .edges()
         .iter()
         .any(|e| e.provenance == ProvenanceState::Observed));
     assert!(model
-        .edges
+        .edges()
         .iter()
         .any(|e| e.provenance == ProvenanceState::Inferred));
 }
@@ -507,7 +508,7 @@ fn no_model_can_authorize_execution() {
         &limits(),
     );
     assert!(!can_authorize_execution(&model));
-    for c in &model.candidates {
+    for c in model.candidates() {
         assert!(!candidate_is_authorized(c));
         assert!(c
             .blockers
@@ -526,7 +527,7 @@ fn capability_state_is_descriptive_and_never_upgraded() {
         &limits(),
     );
     let footprint = model
-        .observations
+        .observations()
         .capabilities
         .iter()
         .find(|c| c.capability == coresight_capabilities::CapabilityId::ApplicationFootprint)
@@ -537,8 +538,17 @@ fn capability_state_is_descriptive_and_never_upgraded() {
         coresight_capabilities::CapabilityStatus::Implemented
     );
     assert!(!footprint.blockers.is_empty(), "partial carries blockers");
+    // Platform-neutral: shared code must never invent a macOS-specific
+    // requirement on any host.
+    assert!(
+        footprint
+            .blockers
+            .iter()
+            .all(|b| !b.contains("macOS") && !b.contains("Full Disk Access")),
+        "no platform-specific blocker from shared code: {footprint:?}"
+    );
     let sw = model
-        .observations
+        .observations()
         .capabilities
         .iter()
         .find(|c| c.capability == coresight_capabilities::CapabilityId::SoftwareManagement)

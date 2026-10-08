@@ -151,6 +151,16 @@ change events on demand — see docs/HISTORY.md for full semantics.
 No IPC command surfaces these yet; the types are the contract for future
 phases and are covered by engine tests.
 
+## Unified system model (Phase 6.3; internal only)
+
+`coresight-system-model` is a Rust in-memory correlation API, not a `v1`
+command/event or frontend wire contract. Phase 6.3 adds no IPC surface, DB
+schema, or persistence. Its serde form is internal canonical graph data:
+derived indexes are skipped/rebuilt, malformed graph/evidence semantics are
+rejected, and candidate actions are always inert and unauthorized. Paths and
+evidence remain lossless and provenance-bounded; source-specific resolution
+semantics are documented in `docs/SYSTEM_MODEL.md`.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

@@ -28,6 +28,7 @@ fn stress_limits() -> SystemModelLimits {
         max_historical_context: 512,
         max_insights: 512,
         max_candidates: 2_000,
+        max_source_states: 64,
     }
 }
 
@@ -120,7 +121,7 @@ fn hostile_graph_stays_bounded_deterministic_and_duplicate_free() {
     assert_eq!(model, build_system_model(&reversed, &stress_limits()));
 
     // Evidence never double-counts at scale.
-    for e in &model.edges {
+    for e in model.edges() {
         for ev in &e.evidence {
             assert!(ev.strength <= ev.kind.max_strength());
             assert!(ev.strength <= ev.correlation_group.ceiling());
@@ -139,6 +140,7 @@ fn multi_stage_evidence_keeps_its_source_provenance() {
         &["/opt/staged"],
         &["/opt/staged/s.exe"],
     );
+    fact.record.executable_path = Some("/opt/staged/s.exe".into());
     fact.executable = Some("/opt/staged/s.exe".into());
     let model = build_system_model(
         &input(
@@ -161,25 +163,20 @@ fn multi_stage_evidence_keeps_its_source_provenance() {
 
     // Stage 2: the SAME record arrives again through a duplicate input —
     // the assessment must be unchanged (idempotent appraisal).
+    let mut base_fact = app_fact(
+        "Staged",
+        Some("Vendor"),
+        &["/opt/staged"],
+        &["/opt/staged/s.exe"],
+    );
+    base_fact.record.executable_path = Some("/opt/staged/s.exe".into());
+    base_fact.executable = Some("/opt/staged/s.exe".into());
     let base = coresight_system_model::build::SystemModelInput {
         artifacts: vec![
             dir("/opt/staged"),
             artifact("/opt/staged/s.exe", 1, 1, None),
         ],
-        applications: vec![
-            app_fact(
-                "Staged",
-                Some("Vendor"),
-                &["/opt/staged"],
-                &["/opt/staged/s.exe"],
-            ),
-            app_fact(
-                "Staged",
-                Some("Vendor"),
-                &["/opt/staged"],
-                &["/opt/staged/s.exe"],
-            ),
-        ],
+        applications: vec![base_fact.clone(), base_fact],
         relationships: vec![],
         history: vec![],
         source_coverage: complete_coverage(),
@@ -218,12 +215,12 @@ fn name_evidence_forwarded_through_two_hops_stays_weak() {
         coresight_system_model::ArtifactApplicationStatus::Uncertain
     );
     assert!(model
-        .edges
+        .edges()
         .iter()
         .all(|e| e.kind != SystemEdgeKind::OwnedBy));
     // And the correlation group on the published evidence is still the
     // name-derived one — the provenance was not laundered.
-    for e in &model.edges {
+    for e in model.edges() {
         for ev in &e.evidence {
             if ev.correlation_group == CorrelationGroup::NameDerived {
                 assert!(ev.strength <= EvidenceStrength::Weak);

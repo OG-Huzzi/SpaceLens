@@ -104,9 +104,15 @@ recorded on the root itself (`RootSignal`):
 Rules: the application name is **never** assumed to equal its directory name;
 original paths are preserved byte-for-byte and compared through
 `PathKey` (platform-encoded bytes); normalization happens only in the
-comparison layer. Roots are bounded by `max_roots_per_app`, deduplicated
-across signals by path, and ordered canonically — arrival order is never a
-tie-breaker. A root is a *scope*, not a claim.
+comparison layer. Semantic matching never depends on replacement
+characters from lossy decoding: name keys decode path components with
+STRICT UTF-8 (`crates/coresight-apps/src/pathmatch.rs`) — a non-UTF-8
+component is "cannot interpret" and never matches — and ASCII-defined
+constants (`MacOS`, `Contents`, `exe`, `app`, `lnk`, `desktop`, …) compare
+at the byte level without decoding the arbitrary file name at all. Roots
+are bounded by `max_roots_per_app`, deduplicated across signals by path,
+and ordered canonically — arrival order is never a tie-breaker. A root is
+a *scope*, not a claim.
 
 ## 6. Executable association
 
@@ -280,12 +286,21 @@ only the `[Desktop Entry]` group and ignores localized keys so identity stays
 stable; a relative or bare `Exec` command is **not** resolved (CoreSight does
 not guess `PATH`).
 
+Both parsers are STRICT about text encoding: a value that is not valid UTF-8
+becomes absent (flagged via `encoding_invalid`, counted as truncated
+knowledge) — never a replacement-character string that could pass as a
+plausible application name, version, or identifier. Bundle and desktop-entry
+projections reject metadata marked encoding-invalid rather than publishing a
+partial identity. Likewise, a non-UTF-8 bundle/`.desktop` file-stem fallback
+yields no identity rather than a lossy name.
+
 ## 19. Explicit non-scope
 
 * Application persistence, database tables, snapshots, and migrations:
   **NOT STARTED**. The model is in-memory only. No schema was changed.
 * GUI work: none added.
-* Phase 6.3: not begun.
+* Phase 6.3: the in-memory system model is implemented; independent hardening
+  and re-verification are in progress. This does not start Phase 6.4.
 
 ## 20. Cross-target verification performed
 
@@ -308,7 +323,14 @@ tests the whole workspace natively on Ubuntu, Windows, and macOS.
 * No real-world hostile-filesystem validation beyond synthetic fixtures.
 * `BundleMetadata`/`DesktopEntryMetadata` cover the common flat shapes; an
   input the parser cannot represent yields absent fields rather than guessed
-  ones.
+  ones. Malformed text encoding yields absent values flagged by
+  `encoding_invalid` — never replacement-character identities.
+* Phase 6.3 hardening (shared intelligence layer, no behavior change to
+  discovery itself): byte-level ASCII matching for bundle/extension/shape
+  checks; strict name-component decoding for root/executable/footprint
+  matching; a strengthened shared-crate source-scan guard covering
+  `footprint.rs`/`pathmatch.rs`, lossy-decode tokens, and mutating-primitive
+  tokens with comment-line stripping.
 
 ## 22. Verification record
 

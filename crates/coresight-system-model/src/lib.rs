@@ -22,10 +22,10 @@
 //!
 //! ## Contracts honored here
 //!
-//! * **Pure correlation.** [`build_system_model`] receives facts and returns a
-//!   model. It performs no filesystem access, no subprocess execution, no
-//!   network access, and no history inference — it has no capability to do
-//!   any of those.
+//! * **Pure correlation.** [`build_system_model`] receives already-projected
+//!   facts and returns a model. The implementation exposes no prober/provider
+//!   input and performs no filesystem access, subprocess execution, network
+//!   access, persistence, or history inference.
 //! * **One object identity.** Artifacts carry the canonical
 //!   [`coresight_apps::ObjectIdentity`] `{ volume, file_id, file_id_hi }`
 //!   with its wide high bits intact, or `None` when the platform proved none.
@@ -72,9 +72,10 @@ pub use insight::{
 pub use model::{
     artifact_key_for, ApplicationClaim, ApplicationNode, ApplicationState, ApplicationStateReason,
     ArtifactApplicationStatus, ArtifactNode, CandidateActionKind, CapabilityState, EdgeDomain,
-    HistoricalContext, InsightBlocker, InsightKind, InsightSeverity, ModelTruncation, NodeRef,
-    NodeRefKind, ObservationSummary, ProvenanceState, SourceStateSummary, SystemCandidate,
-    SystemEdge, SystemEdgeKind, SystemInsight, SystemModel, SystemModelLimits, SystemNodeKind,
+    HistoricalAssertion, HistoricalContext, HistoricalRelation, InsightBlocker, InsightKind,
+    InsightSeverity, ModelTruncation, NodeRef, NodeRefKind, ObservationSummary, ProvenanceState,
+    SourceStateSummary, SystemCandidate, SystemEdge, SystemEdgeKind, SystemInsight, SystemModel,
+    SystemModelLimits, SystemNodeKind,
 };
 pub use pathkey::ArtifactKey;
 
@@ -103,12 +104,42 @@ mod architecture_guard_tests {
 
     /// The system model is SHARED, platform-neutral code. It must contain no
     /// platform conditionals, no subprocess/network capability, no mutating
-    /// primitive, and no lossy semantic path conversion.
+    /// primitive, and no lossy semantic path conversion. Canonical storage
+    /// is private with read-only accessors; serialized indexes are never
+    /// trusted (they are not even read).
     ///
     /// The test module scans every `.rs` file, including this one, so every
     /// forbidden pattern must be assembled at runtime (fragments that never
     /// contain a forbidden substring in any combination); otherwise the
-    /// guard flags its own source.
+    /// guard flags its own source. Comment lines are stripped before
+    /// matching so prose about a forbidden pattern does not trip the guard.
+    #[test]
+    fn system_model_manifest_has_no_persistence_or_network_clients() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let text = fs::read_to_string(manifest)
+            .expect("manifest is readable")
+            .to_ascii_lowercase();
+        for parts in [
+            ["req", "west"],
+            ["hy", "per"],
+            ["ur", "eq"],
+            ["is", "ahc"],
+            ["su", "rf"],
+            ["sql", "x"],
+            ["ru", "sqlite"],
+            ["dies", "el"],
+            ["cu", "rl"],
+            ["to", "kio"],
+            ["aw", "c"],
+        ] {
+            let dependency = parts.concat();
+            assert!(
+                !text.contains(&dependency),
+                "forbidden network/persistence dependency: {dependency}"
+            );
+        }
+    }
+
     #[test]
     fn system_model_is_platform_neutral_read_only_and_lossless() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -118,6 +149,13 @@ mod architecture_guard_tests {
             forbidden.push(["cfg!(", word, ")"].concat());
             forbidden.push(["#[cfg(", word, ")]"].concat());
         }
+        forbidden.push(["cfg!(", "target_os"].concat());
+        forbidden.push(["#[cfg(", "target_os"].concat());
+        forbidden.push(["std::", "os::"].concat());
+        forbidden.push(["std::io::", "Write"].concat());
+        forbidden.push(["std::", "fs::"].concat());
+        forbidden.push(["std::", "env::"].concat());
+        forbidden.push(["std::", "time::"].concat());
         for tail in [
             "process",
             "net",
@@ -130,22 +168,76 @@ mod architecture_guard_tests {
         ] {
             forbidden.push(["std::", tail].concat());
         }
-        for pair in [["Tcp", "Stream"], ["Udp", "Socket"], ["File", "::create"]] {
+        for pair in [
+            ["Tcp", "Stream"],
+            ["Udp", "Socket"],
+            ["File", "::create"],
+            ["Command", "::new"],
+            ["Command", "::spawn"],
+            ["Child", "::kill"],
+            ["std::fs::", "write"],
+            ["fs::", "write"],
+            [".", "write_all"],
+            ["Reg", "SetValue"],
+            ["Reg", "DeleteKey"],
+            ["Reg", "DeleteValue"],
+            ["Reg", "CreateKey"],
+            ["PlatformPath", "Prober"],
+            ["Platform", "Fs"],
+            ["Path", "Prober"],
+            ["Win32Uninstall", "Enumerator"],
+            ["Win32Registry", "View"],
+            ["PackagedApp", "Provider"],
+            ["Registry", "View"],
+            ["discover_foot", "prints"],
+            [".", "exists("],
+            [".", "try_exists("],
+            [".", "is_file("],
+            [".", "is_dir("],
+            [".", "metadata("],
+            [".", "symlink_metadata("],
+            [".", "canonicalize("],
+            [".", "read_dir("],
+            ["Application", "Provider"],
+            ["req", "west"],
+            ["hy", "per"],
+            ["ur", "eq"],
+            ["is", "ahc"],
+            ["su", "rf"],
+            ["sql", "x"],
+            ["dies", "el"],
+        ] {
             forbidden.push(pair.concat());
         }
-        forbidden.push(["Command", "::new"].concat());
         forbidden.push(["to_str()", dot, "unwrap_or_default()"].concat());
         forbidden.push(["to_str()", dot, "unwrap()"].concat());
+        // Assembled so this source never contains them contiguously.
+        forbidden.push(["to_string", "_lossy"].concat());
+        forbidden.push(["from_utf8", "_lossy"].concat());
+        forbidden.push([".", "to_str", "()"].concat());
+        forbidden.push(["_", "_mut", "artifacts"].concat());
         let mut checked = 0;
         for entry in fs::read_dir(&src).expect("src tree is readable") {
             let path = entry.expect("src tree is readable").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            if path.extension().is_none_or(|e| {
+                e.as_encoded_bytes().len() != 2
+                    || e.as_encoded_bytes()[0] != b'r'
+                    || e.as_encoded_bytes()[1] != b's'
+            }) {
                 continue;
             }
             let text = fs::read_to_string(&path).expect("source is UTF-8");
+            // Unit-test modules may legitimately inspect source files to
+            // enforce this very guard; scan only production code to avoid
+            // recursively matching the scanner's own filesystem operations.
+            let production = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            let code: Vec<&str> = production
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect();
             for needle in &forbidden {
                 assert!(
-                    !text.contains(needle.as_str()),
+                    !code.iter().any(|l| l.contains(needle.as_str())),
                     "{needle:?} found in {}",
                     path.display()
                 );

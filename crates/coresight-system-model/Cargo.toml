@@ -11,7 +11,6 @@ crate-type = ["lib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-coresight-engine = { path = "../coresight-engine" }
 coresight-classifier = { path = "../coresight-classifier" }
 coresight-identity = { path = "../coresight-identity" }
 coresight-apps = { path = "../coresight-apps" }

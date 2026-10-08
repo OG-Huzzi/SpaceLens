@@ -400,7 +400,11 @@ impl OwnershipAssessment {
 pub fn assess_groups(
     group_best: &BTreeMap<CorrelationGroup, EvidenceStrength>,
 ) -> OwnershipAssessment {
-    let Some(best) = group_best.values().copied().max() else {
+    let Some(best) = group_best
+        .iter()
+        .map(|(group, strength)| (*strength).min(group.ceiling()))
+        .max()
+    else {
         return OwnershipAssessment::Unknown;
     };
     let independent = group_best.len();
@@ -455,7 +459,15 @@ impl EvidenceAccumulator {
         }
     }
 
-    pub fn offer(&mut self, evidence: OwnershipEvidence) {
+    pub fn offer(&mut self, mut evidence: OwnershipEvidence) {
+        // Struct fields are public for transport compatibility, so callers
+        // can bypass `OwnershipEvidence::new`. Reapply both ceilings at every
+        // aggregation boundary before either confidence or serialized
+        // evidence is retained.
+        evidence.strength = evidence
+            .strength
+            .min(evidence.kind.max_strength())
+            .min(evidence.correlation_group.ceiling());
         let slot = self
             .group_best
             .entry(evidence.correlation_group.clone())
@@ -535,6 +547,29 @@ mod tests {
             "/x",
         );
         assert_eq!(e.strength, EvidenceStrength::Weak, "kind ceiling wins");
+    }
+
+    #[test]
+    fn aggregation_reapplies_kind_and_group_ceilings_to_raw_transport_values() {
+        let mut malformed = ev(
+            EvidenceKind::FilenameSimilarity,
+            EvidenceStrength::Weak,
+            CorrelationGroup::NameDerived,
+            "/x",
+        );
+        // Public transport fields can be mutated after construction; the
+        // aggregation boundary must still refuse this overclaim.
+        malformed.strength = EvidenceStrength::Direct;
+        let mut accumulator = EvidenceAccumulator::new(4);
+        accumulator.offer(malformed);
+        assert_eq!(accumulator.assessment(), OwnershipAssessment::Weak);
+        let (retained, overflow) = accumulator.into_parts();
+        assert_eq!(overflow, 0);
+        assert_eq!(retained[0].strength, EvidenceStrength::Weak);
+
+        let raw_groups =
+            BTreeMap::from([(CorrelationGroup::NameDerived, EvidenceStrength::Direct)]);
+        assert_eq!(assess_groups(&raw_groups), OwnershipAssessment::Weak);
     }
 
     #[test]

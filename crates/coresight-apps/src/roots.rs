@@ -25,6 +25,7 @@ use crate::domain::{ApplicationRecord, DiscoveryLimits};
 use crate::footprint::{normalize_name, BoundedListing, KnownRoots, PathProber};
 use crate::observe::{PathKey, ProbedKind};
 use crate::ownership::{EvidenceSource, EvidenceStrength};
+use crate::pathmatch::{extension_is_ascii, file_name_is_ascii, file_name_str, file_stem_str};
 
 /// Which independent signal produced an install-root candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -195,7 +196,12 @@ pub fn detect_install_roots(
                 .cmp(b.as_os_str().as_encoded_bytes())
         });
         for child in listing.names {
-            let child_norm = normalize_name(&child_name(&child));
+            // Strict decoding: a non-UTF-8 child name is "cannot interpret"
+            // and never matches — it must not match through a
+            // replacement-character rendering either.
+            let Some(child_norm) = child_name_norm(&child) else {
+                continue;
+            };
             if child_norm.is_empty() {
                 continue;
             }
@@ -210,8 +216,10 @@ pub fn detect_install_roots(
                             .cmp(b.as_os_str().as_encoded_bytes())
                     });
                     for grand in inner.names {
-                        if names_agree(&normalize_name(&child_name(&grand)), &norm) {
-                            push(&mut found, grand, RootSignal::PublisherThenName);
+                        if let Some(grand_norm) = child_name_norm(&grand) {
+                            if names_agree(&grand_norm, &norm) {
+                                push(&mut found, grand, RootSignal::PublisherThenName);
+                            }
                         }
                     }
                     continue;
@@ -247,32 +255,26 @@ fn names_agree(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a == b || a.contains(b) || b.contains(a))
 }
 
-fn child_name(p: &Path) -> String {
-    // Comparison key only; a non-UTF-8 name stays a name and simply fails to
-    // match rather than vanishing into a match.
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+/// Normalized comparison key for a child path, or `None` when the final
+/// component is not UTF-8 ("cannot interpret": never matches, never
+/// fabricates agreement through replacement characters).
+fn child_name_norm(p: &Path) -> Option<String> {
+    file_name_str(p).map(normalize_name)
 }
 
 /// `…/X.app/Contents/MacOS/exe` → `…/X.app`. `None` when the shape is not a
 /// bundle layout — no root is fabricated.
 pub fn bundle_root_of(executable: &Path) -> Option<PathBuf> {
     let macos = executable.parent()?;
-    if macos.file_name().and_then(|n| n.to_str()) != Some("MacOS") {
+    if !file_name_is_ascii(macos, b"MacOS") {
         return None;
     }
     let contents = macos.parent()?;
-    if contents.file_name().and_then(|n| n.to_str()) != Some("Contents") {
+    if !file_name_is_ascii(contents, b"Contents") {
         return None;
     }
     let bundle = contents.parent()?;
-    let is_bundle = bundle
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("app"))
-        .unwrap_or(false);
-    if is_bundle {
+    if extension_is_ascii(bundle, b"app") {
         Some(bundle.to_path_buf())
     } else {
         None
@@ -355,9 +357,9 @@ pub fn associate_executable(
             if entry.kind != ProbedKind::File || !looks_executable(&entry.path) {
                 continue;
             }
-            if names_agree(&normalize_name(&child_name(&entry.path)), &norm)
-                || names_agree(&file_stem_norm(&entry.path), &norm)
-            {
+            let name_hit = child_name_norm(&entry.path).is_some_and(|n| names_agree(&n, &norm));
+            let stem_hit = file_stem_norm(&entry.path).is_some_and(|n| names_agree(&n, &norm));
+            if name_hit || stem_hit {
                 return ExecutableAssociation {
                     status: ExecutableStatus::Candidate,
                     path: entry.path.clone(),
@@ -385,24 +387,18 @@ pub fn associate_executable(
     }
 }
 
-fn file_stem_norm(p: &Path) -> String {
-    normalize_name(
-        &p.file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    )
+fn file_stem_norm(p: &Path) -> Option<String> {
+    file_stem_str(p).map(normalize_name)
 }
 
 fn looks_executable(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            matches!(
-                e.to_ascii_lowercase().as_str(),
-                "exe" | "com" | "bat" | "cmd" | "app" | "bin" | "sh"
-            )
-        })
-        .unwrap_or(false)
+    extension_is_ascii(p, b"exe")
+        || extension_is_ascii(p, b"com")
+        || extension_is_ascii(p, b"bat")
+        || extension_is_ascii(p, b"cmd")
+        || extension_is_ascii(p, b"app")
+        || extension_is_ascii(p, b"bin")
+        || extension_is_ascii(p, b"sh")
 }
 
 /// Convenience: program roots discovered for the current host's standard
@@ -735,6 +731,40 @@ mod tests {
             Path::new("C:/Program Files/App"),
             Path::new("C:/Program Files")
         ));
+    }
+
+    #[test]
+    fn non_utf8_names_never_match_through_replacement_characters() {
+        // Two DISTINCT non-UTF-8 names must not agree with each other (or
+        // with anything) just because a lossy rendering would collapse both
+        // to replacement characters.
+        use std::ffi::OsString;
+        // Two valid WTF-8 encodings of different unpaired surrogates are
+        // non-UTF-8 and valid as native encoded bytes on Windows; on Unix
+        // they remain arbitrary non-UTF-8 path bytes.
+        let raw_a = b"C:/Program Files/\xed\xa0\x80".to_vec();
+        let raw_b = b"C:/Program Files/\xed\xa0\x81".to_vec();
+        let a = PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(raw_a.to_vec()) });
+        let b = PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(raw_b.to_vec()) });
+        assert!(std::str::from_utf8(&raw_a).is_err());
+        assert!(std::str::from_utf8(&raw_b).is_err());
+        assert_eq!(child_name_norm(&a), None);
+        assert_eq!(child_name_norm(&b), None);
+        // Bundle-shape matching is byte-exact on the ASCII constants.
+        assert_eq!(
+            bundle_root_of(Path::new("/x.app/Contents/MacOS/e")),
+            Some(PathBuf::from("/x.app"))
+        );
+        assert_eq!(bundle_root_of(Path::new("/x/macos/contents/e")), None);
+        // ... while ordinary ASCII shapes still resolve byte-exactly.
+        assert_eq!(
+            bundle_root_of(Path::new("/Applications/X.app/Contents/MacOS/x")),
+            Some(PathBuf::from("/Applications/X.app"))
+        );
+        assert!(extension_is_ascii(Path::new("/a/tool.EXE"), b"exe"));
+        let raw_ext = b"/a/tool.e\xed\xa0\x80".to_vec();
+        let ext_path = PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(raw_ext) });
+        assert!(!extension_is_ascii(&ext_path, b"exe"));
     }
 
     #[test]

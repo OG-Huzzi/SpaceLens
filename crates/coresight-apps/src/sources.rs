@@ -35,6 +35,7 @@ use crate::domain::{
 };
 use crate::footprint::PathProber;
 use crate::observe::ProbedKind;
+use crate::pathmatch::{extension_is_ascii, file_stem_str};
 
 /// Metadata read from an application bundle's `Info.plist`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,6 +46,10 @@ pub struct BundleMetadata {
     pub short_version: Option<String>,
     pub executable: Option<String>,
     pub publisher: Option<String>,
+    /// `true` when at least one plist value could not be decoded as UTF-8
+    /// and was dropped instead of becoming replacement characters. The
+    /// caller counts this as truncated knowledge.
+    pub encoding_invalid: bool,
 }
 
 impl BundleMetadata {
@@ -99,14 +104,16 @@ fn tag_end(bytes: &[u8], tag_start: usize) -> Option<usize> {
 }
 
 /// Extract the text of the element starting at `from` (just past a `<`).
-/// Returns the inner text and the index just past the closing tag.
-fn element_at(bytes: &[u8], from: usize) -> Option<(String, usize)> {
+/// Returns the inner text and the index just past the closing tag. The inner
+/// text is `None` when the value bytes are not valid UTF-8 (strict: a
+/// malformed value is absent, never replacement characters).
+fn element_at(bytes: &[u8], from: usize) -> Option<(Option<String>, usize)> {
     let rest = &bytes[from..];
     let gt = rest.iter().position(|b| *b == b'>')?;
     let tag_bytes = &rest[..gt];
     if tag_bytes.ends_with(b"/") {
         // Self-closing element: no text.
-        return Some((String::new(), from + gt + 1));
+        return Some((Some(String::new()), from + gt + 1));
     }
     let name_end = tag_bytes
         .iter()
@@ -130,13 +137,17 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Decode the five predefined XML entities ONLY. No DTD, no external
 /// entities, no numeric character references beyond a bounded decimal/hex
 /// form. Unknown entities are left literal (never silently dropped).
-fn decode_entities(bytes: &[u8]) -> String {
-    let raw = String::from_utf8_lossy(bytes);
+///
+/// STRICT about encoding: `None` when the value bytes are not valid UTF-8.
+/// A malformed value becomes absent (counted by the caller), never a
+/// replacement-character string that could pass as an application identity.
+fn decode_entities(bytes: &[u8]) -> Option<String> {
+    let raw = std::str::from_utf8(bytes).ok()?;
     if !raw.contains('&') {
-        return raw.into_owned();
+        return Some(raw.to_owned());
     }
     let mut out = String::with_capacity(raw.len());
-    let mut rest = raw.as_ref();
+    let mut rest: &str = raw;
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let tail = &rest[amp..];
@@ -166,7 +177,7 @@ fn decode_entities(bytes: &[u8]) -> String {
         }
     }
     out.push_str(rest);
-    out
+    Some(out)
 }
 
 /// Parse the flat `key`/value pairs of an XML `Info.plist`.
@@ -223,6 +234,14 @@ pub fn parse_info_plist(bytes: &[u8]) -> BundleMetadata {
         let Some((text, next)) = element_at(bytes, tag_start) else {
             break;
         };
+        // A value that is not valid UTF-8 is absent knowledge, counted
+        // exactly — it must never become a plausible-looking identity.
+        let Some(text) = text else {
+            meta.encoding_invalid = true;
+            pending = None;
+            i = next.max(i + 1);
+            continue;
+        };
         let is_key = tag_name(bytes, tag_start) == b"key";
         if is_key {
             pending = Some(classify_key(text.trim()));
@@ -257,15 +276,19 @@ fn is_container_tag(bytes: &[u8], tag_start: usize) -> bool {
 /// Build an [`ApplicationRecord`] from bundle metadata and a bundle path.
 /// `None` when the metadata carries no usable application identity.
 pub fn record_from_bundle(bundle: &Path, meta: &BundleMetadata) -> Option<ApplicationRecord> {
+    if meta.encoding_invalid {
+        return None;
+    }
     let name = meta
         .name
         .clone()
         .or_else(|| meta.bundle_identifier.clone())
         .or_else(|| {
-            bundle
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
+            // Strict: a non-UTF-8 bundle directory name yields no identity
+            // rather than a replacement-character name.
+            file_stem_str(bundle)
                 .filter(|s| !s.is_empty())
+                .map(str::to_owned)
         })?;
     let publisher = meta.publisher.clone();
     let executable_path = meta
@@ -377,6 +400,12 @@ impl BundlePlistProvider<'_> {
                     out.metadata_truncated += 1;
                 }
                 let meta = parse_info_plist(&observed.bytes);
+                if meta.encoding_invalid {
+                    // Malformed text encoding is truncated knowledge: the
+                    // values that survived are usable, but the parse was
+                    // not whole.
+                    out.metadata_truncated += 1;
+                }
                 if let Some(record) = record_from_bundle(&entry.path, &meta) {
                     out.records.push(record);
                 }
@@ -404,10 +433,7 @@ impl BundlePlistProvider<'_> {
 }
 
 fn is_bundle(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("app"))
-        .unwrap_or(false)
+    extension_is_ascii(p, b"app")
 }
 
 impl ApplicationProvider for BundlePlistProvider<'_> {
@@ -483,37 +509,54 @@ pub struct DesktopEntryMetadata {
     pub exec_path: Option<PathBuf>,
     pub try_exec_path: Option<PathBuf>,
     pub entry_type: Option<String>,
+    /// `true` when at least one entry value could not be decoded as UTF-8
+    /// and was dropped instead of becoming replacement characters.
+    pub encoding_invalid: bool,
 }
 
 /// Parse a desktop entry. Only the `[Desktop Entry]` group is considered;
 /// localized keys (`Name[de]`) are ignored so identity stays stable.
 ///
+/// STRICT about encoding: the file is UTF-8 by spec, and any value that is
+/// not valid UTF-8 becomes absent (counted via
+/// [`DesktopEntryMetadata::encoding_invalid` on the result), never a
+/// replacement-character string that could pass as an application identity.
+///
 /// Bounded by the input slice; no escaping beyond the `\`-escapes the spec
 /// defines for keys.
 pub fn parse_desktop_entry(bytes: &[u8]) -> DesktopEntryMetadata {
-    let text = String::from_utf8_lossy(bytes);
     let mut meta = DesktopEntryMetadata::default();
     let mut in_group = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for raw_line in bytes.split(|b| *b == b'\n') {
+        let line = trim_ascii(raw_line);
+        if line.is_empty() || line.starts_with(b"#") {
             continue;
         }
-        if line.starts_with('[') {
-            in_group = line == "[Desktop Entry]";
+        if line.starts_with(b"[") {
+            in_group = line == b"[Desktop Entry]";
             continue;
         }
         if !in_group {
             continue;
         }
-        let Some((raw_key, raw_value)) = line.split_once('=') else {
+        let Some(eq) = line.iter().position(|b| *b == b'=') else {
             continue;
         };
-        let key = raw_key.trim();
-        let value = raw_value.trim();
-        if value.is_empty() || key.contains('[') {
+        let (raw_key, raw_value) = (&line[..eq], &line[eq + 1..]);
+        let key = trim_ascii(raw_key);
+        let value = trim_ascii(raw_value);
+        if value.is_empty() || key.contains(&b'[') {
             continue;
         }
+        // Keys are ASCII by spec; a non-ASCII key is not one we define.
+        let Ok(key) = std::str::from_utf8(key) else {
+            continue;
+        };
+        // Values become application identity: strict UTF-8 or absent.
+        let Ok(value) = std::str::from_utf8(value) else {
+            meta.encoding_invalid = true;
+            continue;
+        };
         match key {
             "Name" => {
                 if meta.name.is_none() {
@@ -531,6 +574,29 @@ pub fn parse_desktop_entry(bytes: &[u8]) -> DesktopEntryMetadata {
         }
     }
     meta
+}
+
+/// ASCII whitespace trim on raw bytes (the desktop-entry file is parsed
+/// structurally before any UTF-8 decoding, so line structure never depends
+/// on decoded text).
+fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
+    loop {
+        match bytes.split_first() {
+            Some((&first, rest)) if first == b' ' || first == b'\t' || first == b'\r' => {
+                bytes = rest;
+            }
+            _ => break,
+        }
+    }
+    loop {
+        match bytes.split_last() {
+            Some((&last, rest)) if last == b' ' || last == b'\t' || last == b'\r' => {
+                bytes = rest;
+            }
+            _ => break,
+        }
+    }
+    bytes
 }
 
 /// The absolute path of an `Exec`/`TryExec` value: the first field when it
@@ -558,11 +624,15 @@ pub fn record_from_desktop_entry(
     entry_path: &Path,
     meta: &DesktopEntryMetadata,
 ) -> Option<ApplicationRecord> {
+    if meta.encoding_invalid {
+        return None;
+    }
     let name = meta.name.clone().or_else(|| {
-        entry_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
+        // Strict: a non-UTF-8 entry file name yields no identity rather
+        // than a replacement-character name.
+        file_stem_str(entry_path)
             .filter(|s| !s.is_empty())
+            .map(str::to_owned)
     })?;
     let executable_path = meta
         .exec_path
@@ -647,6 +717,9 @@ impl DesktopEntryProvider<'_> {
                     out.metadata_truncated += 1;
                 }
                 let meta = parse_desktop_entry(&observed.bytes);
+                if meta.encoding_invalid {
+                    out.metadata_truncated += 1;
+                }
                 // Only real application entries: a `Type=Link` entry is not
                 // an installed application.
                 if let Some(t) = &meta.entry_type {
@@ -681,10 +754,7 @@ impl DesktopEntryProvider<'_> {
 }
 
 fn is_desktop_entry(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("desktop"))
-        .unwrap_or(false)
+    extension_is_ascii(p, b"desktop")
 }
 
 impl ApplicationProvider for DesktopEntryProvider<'_> {
@@ -851,6 +921,47 @@ mod tests {
         assert!(parse_info_plist(b"not a plist at all").is_empty());
         assert!(parse_info_plist(b"<dict><key>CFBundleName").is_empty());
         assert!(parse_info_plist(b"").is_empty());
+    }
+
+    #[test]
+    fn plist_with_malformed_encoding_never_becomes_an_identity() {
+        // A name value that is not valid UTF-8 is absent knowledge, flagged
+        // exactly — it must never surface as replacement characters that
+        // could pass as a plausible application name.
+        let mut bytes =
+            b"<dict><key>CFBundleName</key><string>Ex\xff\xfeample</string></dict>".to_vec();
+        let meta = parse_info_plist(&bytes);
+        assert!(meta.name.is_none());
+        assert!(meta.encoding_invalid);
+        assert!(meta.is_empty());
+        // And a fully malformed buffer is empty AND flagged.
+        bytes = vec![0xff, 0xfe, b'<', b'k', b'>'];
+        let meta = parse_info_plist(&bytes);
+        assert!(meta.is_empty());
+
+        // Desktop entries: same strictness.
+        let entry = b"[Desktop Entry]\nName=Ex\xffample\nExec=/usr/bin/x\n";
+        let meta = parse_desktop_entry(entry);
+        assert!(meta.name.is_none(), "no replacement-character identity");
+        assert!(meta.encoding_invalid);
+        assert_eq!(meta.exec_path, Some(PathBuf::from("/usr/bin/x")));
+
+        // A different valid field must not let a partially malformed source
+        // produce a plausible record through the public projection helper.
+        let mixed_plist = b"<dict><key>CFBundleName</key><string>Valid</string><key>CFBundleExecutable</key><string>Bad\xff</string></dict>";
+        let bundle_meta = parse_info_plist(mixed_plist);
+        assert_eq!(bundle_meta.name.as_deref(), Some("Valid"));
+        assert!(bundle_meta.encoding_invalid);
+        assert!(record_from_bundle(Path::new("/Applications/Valid.app"), &bundle_meta).is_none());
+
+        let mixed_entry = b"[Desktop Entry]\nName=Valid\nExec=/usr/bin/bad\xff\n";
+        let entry_meta = parse_desktop_entry(mixed_entry);
+        assert_eq!(entry_meta.name.as_deref(), Some("Valid"));
+        assert!(entry_meta.encoding_invalid);
+        assert!(
+            record_from_desktop_entry(Path::new("/applications/valid.desktop"), &entry_meta)
+                .is_none()
+        );
     }
 
     #[test]

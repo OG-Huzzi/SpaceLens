@@ -78,6 +78,14 @@ impl<K: Ord + Clone, V> BoundedTopK<K, V> {
         self.items.get(key)
     }
 
+    /// Mutable access to a retained value. Used to merge into an already
+    /// admitted entry without changing the retained key set (the merge
+    /// itself must be the caller's commutative operation, so determinism
+    /// is preserved).
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.items.get_mut(key)
+    }
+
     /// Offer `value` under `key`. When the key is already held,
     /// `prefer_new(new, existing)` decides canonically (never by arrival)
     /// whether the new value replaces the held one.

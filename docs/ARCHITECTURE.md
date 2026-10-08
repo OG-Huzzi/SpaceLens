@@ -121,18 +121,30 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   honest access states, and `Unsupported` reporting on non-macOS hosts
   (`crates/coresight-macos`; never modifies anything, never bypasses TCC).
   See docs/MACOS_ARCHITECTURE.md.
-- `system-model` — the Phase 6.3 unified, in-memory system model. A pure,
-  deterministic, bounded correlation of filesystem observations, canonical
-  object identity, classification (copied, never re-derived), identity
-  relationships, Phase 6.2 application intelligence, capability state
-  (reported verbatim, never upgraded), and caller-projected history
-  context — into one immutable artifact/application graph with typed edges
+- `system-model` — the Phase 6.3 unified, in-memory system model, currently
+  in independent hardening/re-verification (not yet the final VERIFIED gate).
+  A pure, deterministic, bounded correlation
+  of filesystem observations, canonical object identity, classification
+  (copied, never re-derived), identity relationships, Phase 6.2 application
+  intelligence, capability state (reported verbatim, never upgraded), and
+  caller-projected history context — into one immutable artifact/application
+  graph with private canonical storage and read-only accessors; typed edges
   (`Contains`, `LocatedUnder`, install-root/executable/data/cache/log/
   config, `OwnedBy`, `AssociatedWith`, `SharedBy`, `DuplicateOf`,
-  `HardLinkAliasOf`, `HistoricalAliasOf`, `HistoricalMoveOf`), structured
-  evidence with Phase 6.2 correlation ceilings that survive module
-  boundaries, preserved conflicts, bounded typed queries, descriptive
-  insights, and inert candidates. No history inference, no executor, no
+  `HardLinkAliasOf`); node-attached historical assertions (`SameObjectObserved`
+  / `ObjectReplaced` / `IdentityUnproven` — history is quoted context, never
+  a graph edge and never a self-loop); structured evidence with Phase 6.2
+  correlation ceilings that survive module boundaries; proof-validated
+  relationship joins (wrong identity/digest, same-object-as-duplicate, and
+  missing proofs are rejected with exact accounting); preserved conflicts
+  (duplicate applications resolve by a total-order precedence, duplicate
+  history rows are both preserved); truncation-aware association status
+  (`AssociationTruncated`: claim truncated ≠ no claim — a bound can never
+  manufacture `Unassociated`/`Orphan`); bounded typed queries with honest
+  per-query complexity; descriptive insights; and inert candidates. Indexes
+  are derived implementation details — rebuilt on every construction route
+  (including deserialization, which validates canonical structure first) and
+  never trusted from input. No history inference, no executor, no
   subprocess, no network, no persistence (`crates/coresight-system-model`).
   See docs/SYSTEM_MODEL.md.
 - `relationships` — the Phase 4 relationship-intelligence layer: typed

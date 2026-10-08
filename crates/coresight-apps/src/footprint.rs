@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{ApplicationId, ApplicationRecord, DiscoveryLimits};
 use crate::evidence::{AssociationScope, Confidence, EvidenceKind, FootprintEvidence};
 use crate::observe::{DirectoryObservation, FileObservation, PathObservation};
+use crate::pathmatch::{extension_is_ascii, file_name_str};
 
 /// What kind of footprint a candidate path represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -192,13 +193,11 @@ pub fn normalize_name(name: &str) -> String {
     out.trim().to_string()
 }
 
-fn child_name(p: &Path) -> String {
-    // Matching key only: a non-UTF-8 name stays a NAME (lossy), it never
-    // vanishes into an empty string — it simply will not match an app's
-    // name unless it really does.
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+/// Normalized comparison key for a child path, or `None` when the final
+/// component is not UTF-8 ("cannot interpret": never matches, never
+/// fabricates agreement through replacement characters).
+fn child_name_norm(p: &Path) -> Option<String> {
+    file_name_str(p).map(normalize_name)
 }
 
 fn names_match(a: &str, b: &str) -> bool {
@@ -221,11 +220,11 @@ fn looks_like_temp(n: &str) -> bool {
 }
 
 fn file_stem_match(entry: &Path, norm: &str) -> bool {
-    let name = entry
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    names_match(&normalize_name(&name), norm)
+    // Strict decoding: a non-UTF-8 name never matches.
+    let Some(name) = child_name_norm(entry) else {
+        return false;
+    };
+    names_match(&name, norm)
 }
 
 /// Bounded listing straight from the prober: the examined subset is the
@@ -392,7 +391,9 @@ pub fn discover_footprints(
                 limits.max_children_per_root,
                 &mut children_truncated,
             ) {
-                let child_norm = normalize_name(&child_name(&child));
+                let Some(child_norm) = child_name_norm(&child) else {
+                    continue;
+                };
                 if child_norm.is_empty() {
                     continue;
                 }
@@ -410,40 +411,42 @@ pub fn discover_footprints(
                         limits.max_children_per_root,
                         &mut children_truncated,
                     ) {
-                        let grand_norm = normalize_name(&child_name(&grand));
-                        if names_match(&grand_norm, &norm) {
-                            admit_candidate(
-                    &mut admitted,
-                    limits,
-                    &mut candidates_truncated,
-                    &mut evidence_truncated,
-                    FootprintCandidate {
-                                path: grand,
-                                app: app.id.clone(),
-                                kind: FootprintKind::UserData,
-                                // Both evidence items below derive from the SAME
-                                // normalized-name signal (correlated), so they
-                                // cannot be summed into a stronger claim: the
-                                // candidate is capped at `Probable`
-                                // (docs/APPLICATIONS.md, correlation ceiling).
-                                confidence: Confidence::Probable,
-                                evidence: vec![
-                                    FootprintEvidence::new(
-                                        EvidenceKind::PublisherDirectory,
-                                        Confidence::Probable,
-                                        "footprint-scan",
-                                        scope,
-                                        "parent directory matches the application's publisher",
-                                    ),
-                                    FootprintEvidence::new(
-                                        EvidenceKind::KnownApplicationDirectory,
-                                        Confidence::Probable,
-                                        "footprint-scan",
-                                        scope,
-                                        "directory name matches the installed application name under the publisher directory",
-                                    ),
-                                ],
-                            });
+                        if let Some(grand_norm) = child_name_norm(&grand) {
+                            if names_match(&grand_norm, &norm) {
+                                admit_candidate(
+                                    &mut admitted,
+                                    limits,
+                                    &mut candidates_truncated,
+                                    &mut evidence_truncated,
+                                    FootprintCandidate {
+                                        path: grand,
+                                        app: app.id.clone(),
+                                        kind: FootprintKind::UserData,
+                                        // Both evidence items below derive from the SAME
+                                        // normalized-name signal (correlated), so they
+                                        // cannot be summed into a stronger claim: the
+                                        // candidate is capped at `Probable`
+                                        // (docs/APPLICATIONS.md, correlation ceiling).
+                                        confidence: Confidence::Probable,
+                                        evidence: vec![
+                                            FootprintEvidence::new(
+                                                EvidenceKind::PublisherDirectory,
+                                                Confidence::Probable,
+                                                "footprint-scan",
+                                                scope,
+                                                "parent directory matches the application's publisher",
+                                            ),
+                                            FootprintEvidence::new(
+                                                EvidenceKind::KnownApplicationDirectory,
+                                                Confidence::Probable,
+                                                "footprint-scan",
+                                                scope,
+                                                "directory name matches the installed application name under the publisher directory",
+                                            ),
+                                        ],
+                                    },
+                                );
+                            }
                         }
                     }
                 } else if names_match(&child_norm, &norm) {
@@ -485,9 +488,7 @@ pub fn discover_footprints(
                 limits.max_children_per_root,
                 &mut children_truncated,
             ) {
-                if entry.extension().and_then(|e| e.to_str()) == Some("lnk")
-                    && file_stem_match(&entry, &norm)
-                {
+                if extension_is_ascii(&entry, b"lnk") && file_stem_match(&entry, &norm) {
                     admit_candidate(
                         &mut admitted,
                         limits,
@@ -549,9 +550,7 @@ pub fn discover_footprints(
                 limits.max_children_per_root,
                 &mut children_truncated,
             ) {
-                if entry.extension().and_then(|e| e.to_str()) == Some("lnk")
-                    && file_stem_match(&entry, &norm)
-                {
+                if extension_is_ascii(&entry, b"lnk") && file_stem_match(&entry, &norm) {
                     admit_candidate(
                         &mut admitted,
                         limits,

@@ -57,9 +57,9 @@ use coresight_identity::ObjectIdentity;
 
 use crate::model::{
     ApplicationNode, ApplicationState, ApplicationStateReason, ArtifactApplicationStatus,
-    ArtifactNode, CapabilityState, HistoricalContext, ModelTruncation, ObservationSummary,
-    ProvenanceState, SourceStateSummary, SystemEdge, SystemEdgeKind, SystemModel,
-    SystemModelLimits,
+    ArtifactNode, CapabilityState, HistoricalAssertion, HistoricalContext, HistoricalRelation,
+    ModelTruncation, ObservationSummary, ProvenanceState, SourceStateSummary, SystemEdge,
+    SystemEdgeKind, SystemModel, SystemModelLimits,
 };
 use crate::pathkey::ArtifactKey;
 
@@ -123,9 +123,14 @@ pub enum RelationshipFactKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationFact {
     pub record: ApplicationRecord,
-    /// Install roots derived by the Phase 6.2 root detector.
+    /// Candidate scopes derived by the Phase 6.2 root detector. This builder
+    /// only promotes a byte-exact match to a source-recorded install location
+    /// (except the desktop-entry Exec parent, which is derived) to observed;
+    /// all other roots stay weak structural scope.
     pub install_roots: Vec<PathBuf>,
-    /// The executable path the (app, path) evidence already established.
+    /// An executable path surfaced by Phase 6.2 association. It is exact only
+    /// when it equals `record.executable_path`; otherwise this builder keeps it
+    /// candidate-level and weak rather than upgrading it to an observed fact.
     pub executable: Option<PathBuf>,
     /// Per-(application, path) ownership evidence from Phase 6.2.
     pub associations: Vec<(PathBuf, OwnershipEvidence)>,
@@ -160,14 +165,56 @@ pub struct SystemModelInput {
 /// Evidence is kept through Phase 6.2's bounded, correlation-aware
 /// accumulator; descriptive roles are collected independently from
 /// ownership evidence.
+///
+/// The accumulator itself is O(`max_evidence_per_edge`) memory; the STORE
+/// holding these is a [`BoundedTopK`] capped at `max_edges` pairs (a pair
+/// that can never publish an edge needs no appraisal), so working memory
+/// is a function of [`SystemModelLimits`], never of input cardinality.
 struct ClaimFacts {
     evidence: EvidenceAccumulator,
     /// True only when every offered evidence item was structural
     /// containment. Such a claim may produce `AssociatedWith` but never
     /// `OwnedBy` and never counts as credible ownership.
     structural_only: bool,
-    /// Classifier/application roles and how they were derived.
-    roles: BTreeMap<SystemEdgeKind, ProvenanceState>,
+    /// Role-specific bounded evidence prevents an unrelated strong ownership
+    /// claim from upgrading a weak executable/root role.
+    roles: BTreeMap<SystemEdgeKind, RoleFacts>,
+    evidence_limit: usize,
+}
+
+struct RoleFacts {
+    evidence: EvidenceAccumulator,
+    structural_only: bool,
+    provenance: ProvenanceState,
+}
+
+impl RoleFacts {
+    fn new(limit: usize, provenance: ProvenanceState) -> Self {
+        RoleFacts {
+            evidence: EvidenceAccumulator::new(limit),
+            structural_only: true,
+            provenance,
+        }
+    }
+
+    fn offer(
+        &mut self,
+        evidence: OwnershipEvidence,
+        structural: bool,
+        provenance: ProvenanceState,
+    ) {
+        self.evidence.offer(evidence);
+        self.structural_only &= structural;
+        self.provenance = self.provenance.min(provenance);
+    }
+
+    fn assessment(&self) -> OwnershipAssessment {
+        if self.structural_only {
+            OwnershipAssessment::Weak
+        } else {
+            self.evidence.assessment()
+        }
+    }
 }
 
 impl ClaimFacts {
@@ -176,6 +223,7 @@ impl ClaimFacts {
             evidence: EvidenceAccumulator::new(limit),
             structural_only: true,
             roles: BTreeMap::new(),
+            evidence_limit: limit,
         }
     }
 
@@ -185,25 +233,44 @@ impl ClaimFacts {
         structural: bool,
         role: Option<(SystemEdgeKind, ProvenanceState)>,
     ) {
-        self.evidence.offer(evidence);
-        self.structural_only &= structural;
         if let Some((kind, provenance)) = role {
             self.roles
                 .entry(kind)
-                .and_modify(|old| *old = (*old).min(provenance))
-                .or_insert(provenance);
+                .or_insert_with(|| RoleFacts::new(self.evidence_limit, provenance))
+                .offer(evidence.clone(), structural, provenance);
         }
+        self.evidence.offer(evidence);
+        self.structural_only &= structural;
     }
 
     fn assessment(&self) -> OwnershipAssessment {
-        if self.structural_only {
-            // Containment may be a strong fact about structure, but it is
-            // intentionally below the ownership-credibility line.
+        if self.structural_only || self.evidence.retained_len() == 0 {
+            // Structural evidence and evidence entirely omitted by a zero
+            // retention bound cannot support a credible published claim.
             OwnershipAssessment::Weak
         } else {
             self.evidence.assessment()
         }
     }
+}
+
+/// Maximum participants whose complete pairwise relationship can fit under
+/// the global edge limit. The integer binary search avoids overflow and caps
+/// subsequent clique generation to O(max_edges) pairs.
+fn max_relationship_members(max_edges: usize) -> usize {
+    let mut low = 0usize;
+    let mut high = max_edges.saturating_add(2);
+    while low < high {
+        let span = high - low;
+        let mid = low + span / 2 + span % 2;
+        let pairs = (mid as u128) * (mid.saturating_sub(1) as u128) / 2;
+        if pairs <= max_edges as u128 {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
 }
 
 /// Build the unified system model. Pure, deterministic, bounded.
@@ -231,14 +298,37 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
         .map(|(i, a)| (a.key.clone(), i))
         .collect();
 
+    // ---- 1b. Precomputed artifact structure (bounded, deterministic) ----
+    // Built ONCE here so per-application state resolution never rescans the
+    // artifact list: exact-key lookup, parent→children grouping, and
+    // install-root→descendant grouping. All three are O(A) memory.
+    let artifact_structure = ArtifactStructure::build(&artifacts);
+
     // ---- 2. Application admission (bounded, canonical id order) -------
+    // Duplicate records under one id merge commutatively: the total-order
+    // winner supplies every field EXCEPT provenance, which unions across
+    // all duplicates (canonically ordered, deduplicated). The merged result
+    // is a pure function of the duplicate SET — never of arrival order.
     let mut app_admitted: BoundedTopK<String, ApplicationNode> =
         BoundedTopK::new(limits.max_applications);
     for fact in &input.applications {
-        let node = application_node(fact, &artifacts, &artifact_index);
+        let mut node = application_node(fact, &artifacts, &artifact_structure);
+        node.provenance.sort();
+        node.provenance.dedup();
         app_admitted.offer(fact.record.id.0.clone(), node, |n, e| {
-            n.state_reasons.len() > e.state_reasons.len()
+            prefer_application(n, e)
         });
+        // Union provenance across duplicates commutatively: whatever the
+        // winner was, the retained node carries every observed source.
+        if let Some(held) = app_admitted.get_mut(&fact.record.id.0) {
+            for source in &fact.record.provenance {
+                if !held.provenance.contains(source) {
+                    held.provenance.push(source.clone());
+                }
+            }
+            held.provenance.sort();
+            held.provenance.dedup();
+        }
     }
     let (app_items, apps_overflow) = app_admitted.into_sorted();
     truncation.applications_truncated = apps_overflow;
@@ -259,6 +349,7 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
             if artifact_by_key.contains_key(&ancestor_key) {
                 offer_edge(
                     &mut edges,
+                    &mut truncation.edges_truncated,
                     &mut evidence_truncated,
                     limits,
                     SystemEdge {
@@ -273,6 +364,7 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                 );
                 offer_edge(
                     &mut edges,
+                    &mut truncation.edges_truncated,
                     &mut evidence_truncated,
                     limits,
                     SystemEdge {
@@ -290,82 +382,189 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
     }
 
     // 3b. One bounded, correlation-aware accumulator per (application,
-    // artifact). The map is bounded by the artifact and edge limits: a pair
-    // is admitted only when the corresponding artifact node exists, and
-    // the global edge admission below caps published pairs. Feeding every
-    // evidence item for one pair through the accumulator preserves Phase
-    // 6.2's ceilings across module boundaries: the same underlying signal,
-    // forwarded as several items, still counts once.
-    let mut claim_evidence: BTreeMap<(String, String), ClaimFacts> = BTreeMap::new();
-    let claim_for = |map: &mut BTreeMap<(String, String), ClaimFacts>,
+    // artifact), held in a BoundedTopK capped at `max_edges` pairs: a pair
+    // that can never publish an edge needs no appraisal, so working memory
+    // is O(max_edges × max_evidence_per_edge) — a function of the limits,
+    // never of input cardinality. Dropped pairs are counted exactly in
+    // `claims_truncated`, and their artifacts are remembered (one flag per
+    // artifact, O(max_artifacts)) so truncation can never surface as
+    // "no claim".
+    //
+    // Claim loops below consider every input application fact: a claim
+    // offered for a retained artifact is an observed claim even when the
+    // application node itself did not survive the application bound
+    // (truncation memory). Facts naming artifacts the model does not hold
+    // seed nothing. Edges that survive still require both endpoints to
+    // exist (see 3b-bis), so dropped applications can never smuggle
+    // phantom claims into the published graph.
+    //
+    // ORDER MATTERS for truncation honesty: input applications stream in
+    // canonical id order (sorted once, O(N log N)), so the bounded claim
+    // store deterministically retains the canonically-smallest pairs no
+    // matter how the caller ordered its facts.
+    let mut claim_evidence: BoundedTopK<(String, String), ClaimFacts> =
+        BoundedTopK::new(limits.max_edges.max(1));
+    // Artifact keys for which ANY claim pair was observed (retained or
+    // dropped). Bounded by the retained artifact count.
+    let mut association_seen: BTreeSet<String> = BTreeSet::new();
+    let claim_for = |map: &mut BoundedTopK<(String, String), ClaimFacts>,
+                     seen: &mut BTreeSet<String>,
+                     truncated: &mut u64,
                      app: &str,
                      artifact_key: &str,
                      evidence: OwnershipEvidence,
                      structural: bool,
                      role: Option<(SystemEdgeKind, ProvenanceState)>| {
-        map.entry((app.to_string(), artifact_key.to_string()))
-            .or_insert_with(|| ClaimFacts::new(limits.max_evidence_per_edge))
-            .offer(evidence, structural, role);
+        seen.insert(artifact_key.to_string());
+        let key = (app.to_string(), artifact_key.to_string());
+        if let Some(held) = map.get_mut(&key) {
+            held.offer(evidence, structural, role);
+            return;
+        }
+        let mut facts = ClaimFacts::new(limits.max_evidence_per_edge);
+        facts.offer(evidence, structural, role);
+        if matches!(map.offer(key, facts, |_, _| false), Admission::Refused) {
+            *truncated += 1;
+        }
     };
+    // Stream the caller's application facts directly. Every accumulator below
+    // uses canonical keys and a commutative merge, so no sort/copy of the full
+    // input list is needed to make the result order-independent.
     for fact in &input.applications {
         let app_id = &fact.record.id;
-        // Install-root edges.
-        for root in &fact.install_roots {
+        // A root emitted by the detector is only a scope unless it is the
+        // exact install location recorded in the application metadata. Do
+        // not promote a name/layout-derived root to direct, observed
+        // ownership merely because it crossed this module boundary.
+        for root in fact
+            .install_roots
+            .iter()
+            .chain(fact.record.install_location.iter())
+        {
             let key = ArtifactKey::of(root).to_string();
             if !artifact_index.contains_key(&key) {
                 continue;
             }
-            let edge_evidence = OwnershipEvidence::new(
-                EvidenceKind::InstallLocation,
-                EvidenceSource::for_application_source(&fact.record.source),
-                EvidenceStrength::Direct,
-                CorrelationGroup::SourceRecord(fact.record.source.clone()),
-                coresight_apps::AssociationScope::ThisMachine,
-                root.clone(),
-                MatchedAttribute::InstallLocation,
-                Some(fact.record.name.clone()),
-            )
+            let recorded = fact.record.source != coresight_apps::ApplicationSource::DesktopEntry
+                && fact
+                    .record
+                    .install_location
+                    .as_ref()
+                    .is_some_and(|recorded| same_artifact_path(recorded, root));
+            let edge_evidence = if recorded {
+                OwnershipEvidence::new(
+                    EvidenceKind::InstallLocation,
+                    EvidenceSource::for_application_source(&fact.record.source),
+                    EvidenceStrength::Direct,
+                    CorrelationGroup::SourceRecord(fact.record.source.clone()),
+                    coresight_apps::AssociationScope::ThisMachine,
+                    root.clone(),
+                    MatchedAttribute::InstallLocation,
+                    Some(fact.record.name.clone()),
+                )
+            } else {
+                OwnershipEvidence::new(
+                    EvidenceKind::InstallRootContainment,
+                    EvidenceSource::FilesystemObservation,
+                    EvidenceStrength::Weak,
+                    CorrelationGroup::InstallRootStructure,
+                    coresight_apps::AssociationScope::ThisMachine,
+                    root.clone(),
+                    MatchedAttribute::InstallRoot,
+                    None,
+                )
+            }
             .with_matched_path(root.clone());
-            offer_edge(
-                &mut edges,
-                &mut evidence_truncated,
-                limits,
-                SystemEdge {
-                    kind: SystemEdgeKind::ApplicationInstallRoot,
-                    domain: SystemEdgeKind::ApplicationInstallRoot.domain(),
-                    from: app_id.0.clone(),
-                    to: key.clone(),
-                    assessment: OwnershipAssessment::Direct,
-                    provenance: ProvenanceState::Observed,
-                    evidence: vec![edge_evidence.clone()],
-                },
-            );
+            let provenance = if recorded {
+                ProvenanceState::Observed
+            } else {
+                ProvenanceState::Inferred
+            };
+            if limits.max_evidence_per_edge > 0 {
+                offer_edge(
+                    &mut edges,
+                    &mut truncation.edges_truncated,
+                    &mut evidence_truncated,
+                    limits,
+                    SystemEdge {
+                        kind: SystemEdgeKind::ApplicationInstallRoot,
+                        domain: SystemEdgeKind::ApplicationInstallRoot.domain(),
+                        from: app_id.0.clone(),
+                        to: key.clone(),
+                        assessment: if recorded {
+                            OwnershipAssessment::Direct
+                        } else {
+                            OwnershipAssessment::Weak
+                        },
+                        provenance,
+                        evidence: vec![edge_evidence.clone()],
+                    },
+                );
+            }
             claim_for(
                 &mut claim_evidence,
+                &mut association_seen,
+                &mut truncation.claims_truncated,
                 &app_id.0,
                 &key,
                 edge_evidence,
-                false,
-                None,
+                !recorded,
+                Some((SystemEdgeKind::ApplicationInstallRoot, provenance)),
             );
         }
-        // Recorded executable.
-        if let Some(exe) = &fact.executable {
+        // Exact executable metadata may be Observed; a separate path
+        // candidate without that exact record is only weak, candidate-level
+        // evidence. Never upgrade an inferred/name-matched path merely because
+        // it was projected into this input struct.
+        for exe in fact
+            .record
+            .executable_path
+            .iter()
+            .chain(fact.executable.iter())
+        {
             let key = ArtifactKey::of(exe).to_string();
-            if artifact_index.contains_key(&key) {
-                let edge_evidence = OwnershipEvidence::new(
+            if !artifact_index.contains_key(&key) {
+                continue;
+            }
+            let recorded = fact
+                .record
+                .executable_path
+                .as_ref()
+                .is_some_and(|recorded| same_artifact_path(recorded, exe));
+            let (kind, source, strength, group, provenance, assessment) = if recorded {
+                (
                     EvidenceKind::ExactExecutablePath,
                     EvidenceSource::ExecutableMetadata,
                     EvidenceStrength::Strong,
                     CorrelationGroup::SourceRecord(fact.record.source.clone()),
-                    coresight_apps::AssociationScope::ThisMachine,
-                    exe.clone(),
-                    MatchedAttribute::ExecutablePath,
-                    Some(fact.record.name.clone()),
+                    ProvenanceState::Observed,
+                    OwnershipAssessment::Strong,
                 )
-                .with_matched_path(exe.clone());
+            } else {
+                (
+                    EvidenceKind::FilenameSimilarity,
+                    EvidenceSource::FilesystemPathHeuristic,
+                    EvidenceStrength::Weak,
+                    CorrelationGroup::NameDerived,
+                    ProvenanceState::Candidate,
+                    OwnershipAssessment::Weak,
+                )
+            };
+            let edge_evidence = OwnershipEvidence::new(
+                kind,
+                source,
+                strength,
+                group,
+                coresight_apps::AssociationScope::ThisMachine,
+                exe.clone(),
+                MatchedAttribute::ExecutablePath,
+                Some(fact.record.name.clone()),
+            )
+            .with_matched_path(exe.clone());
+            if limits.max_evidence_per_edge > 0 {
                 offer_edge(
                     &mut edges,
+                    &mut truncation.edges_truncated,
                     &mut evidence_truncated,
                     limits,
                     SystemEdge {
@@ -373,23 +572,22 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                         domain: SystemEdgeKind::ApplicationExecutable.domain(),
                         from: app_id.0.clone(),
                         to: key.clone(),
-                        assessment: OwnershipAssessment::Strong,
-                        provenance: ProvenanceState::Observed,
+                        assessment,
+                        provenance,
                         evidence: vec![edge_evidence.clone()],
                     },
                 );
-                claim_for(
-                    &mut claim_evidence,
-                    &app_id.0,
-                    &key,
-                    edge_evidence,
-                    false,
-                    Some((
-                        SystemEdgeKind::ApplicationExecutable,
-                        ProvenanceState::Observed,
-                    )),
-                );
             }
+            claim_for(
+                &mut claim_evidence,
+                &mut association_seen,
+                &mut truncation.claims_truncated,
+                &app_id.0,
+                &key,
+                edge_evidence,
+                false,
+                Some((SystemEdgeKind::ApplicationExecutable, provenance)),
+            );
         }
         // Per-path association evidence from Phase 6.2 is COLLECTED here and
         // published once per (application, artifact) below, so one
@@ -416,6 +614,8 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
             };
             claim_for(
                 &mut claim_evidence,
+                &mut association_seen,
+                &mut truncation.claims_truncated,
                 &app_id.0,
                 &key,
                 evidence.clone(),
@@ -435,33 +635,66 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
     // "owned" and never inflates a claimant count.
     //
     // Cost: one ancestor walk per artifact (bounded by path depth), never an
-    // `applications × artifacts` scan.
+    // applications × artifacts full scan. Both root groups and each root's
+    // owner set have explicit admission limits. If either bound drops facts,
+    // affected knowledge remains incomplete (never absence).
     {
-        // install root key → (application key, root path)
-        let mut roots_by_key: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
+        // install root key → bounded (application key → root path) set.
+        // The product of these limits bounds this secondary index.
+        let mut roots_by_key: BoundedTopK<String, BoundedTopK<String, PathBuf>> =
+            BoundedTopK::new(limits.max_edges.max(1));
         for fact in &input.applications {
             let app_key = fact.record.id.0.clone();
-            let mut roots: Vec<PathBuf> = fact.install_roots.clone();
-            if let Some(loc) = &fact.record.install_location {
-                roots.push(loc.clone());
-            }
-            for root in roots {
-                roots_by_key
-                    .entry(ArtifactKey::of(&root).to_string())
-                    .or_default()
-                    .push((app_key.clone(), root));
+            for root in fact
+                .install_roots
+                .iter()
+                .chain(fact.record.install_location.iter())
+            {
+                let key = ArtifactKey::of(root).to_string();
+                if let Some(owners) = roots_by_key.get_mut(&key) {
+                    owners.offer(app_key.clone(), root.clone(), |_, _| false);
+                } else {
+                    let mut owners = BoundedTopK::new(limits.max_applications);
+                    owners.offer(app_key.clone(), root.clone(), |_, _| false);
+                    roots_by_key.offer(key, owners, |_, _| false);
+                }
             }
         }
-        if !roots_by_key.is_empty() {
+        let dropped_root_groups = roots_by_key.overflow();
+        truncation.roots_truncated += dropped_root_groups;
+        let dropped_root_owners: u64 = roots_by_key
+            .iter()
+            .map(|(_, owners)| owners.overflow())
+            .sum();
+        truncation.claims_truncated += dropped_root_owners;
+
+        // A dropped root key cannot be retained in a side set without
+        // reintroducing input-cardinality memory. Conservatively mark every
+        // retained artifact as having incomplete association knowledge when
+        // any root group was dropped; this can overstate uncertainty, never
+        // invent absence.
+        if dropped_root_groups > 0 {
+            association_seen.extend(artifacts.iter().map(|node| node.key.clone()));
+        }
+
+        if roots_by_key.is_empty() {
+            // No retained roots: nothing structural to derive.
+        } else {
             for node in &artifacts {
                 for ancestor_key in ancestor_keys(&node.path) {
                     let Some(owners) = roots_by_key.get(&ancestor_key) else {
                         continue;
                     };
-                    for (app_key, root) in owners {
+                    if owners.overflow() > 0 {
+                        association_seen.insert(node.key.clone());
+                    }
+                    for (app_key, root) in owners.iter() {
                         // Do not restate a claim the caller already supplied
                         // explicitly for this (app, artifact) pair.
-                        if claim_evidence.contains_key(&(app_key.clone(), node.key.clone())) {
+                        if claim_evidence
+                            .get(&(app_key.clone(), node.key.clone()))
+                            .is_some()
+                        {
                             continue;
                         }
                         let evidence = OwnershipEvidence::new(
@@ -476,7 +709,16 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                         )
                         .with_matched_path(root.clone());
                         let key = node.key.clone();
-                        claim_for(&mut claim_evidence, app_key, &key, evidence, true, None);
+                        claim_for(
+                            &mut claim_evidence,
+                            &mut association_seen,
+                            &mut truncation.claims_truncated,
+                            app_key,
+                            &key,
+                            evidence,
+                            true,
+                            None,
+                        );
                     }
                     break; // the deepest containing root is enough
                 }
@@ -496,9 +738,21 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
     // collected during offering are published alongside; the fallback
     // `AssociatedWith` role is skipped because the ownership edge already
     // says exactly that, and publishing both would restate one fact twice.
-    let mut published_claims: BTreeMap<String, Vec<(String, OwnershipAssessment)>> =
-        BTreeMap::new();
-    for ((app_key, artifact_key), claim) in &claim_evidence {
+    //
+    // Pairs stream in canonical (app, artifact) order, so a full claim
+    // store deterministically evicts the largest pairs first.
+    //
+    // Both endpoints must exist as published NODES: a claim whose
+    // application did not survive the application bound publishes no edge
+    // (no phantom claims), but the artifact keeps its truncation memory
+    // via `association_seen` (see step 7).
+    let published_app_ids: BTreeSet<&str> = applications.iter().map(|a| a.id.0.as_str()).collect();
+    let (claim_items, claim_overflow) = claim_evidence.into_sorted();
+    truncation.claims_truncated += claim_overflow;
+    for ((app_key, artifact_key), claim) in &claim_items {
+        if !published_app_ids.contains(app_key.as_str()) {
+            continue;
+        }
         let (evidence, evidence_overflow) = claim.evidence.clone().into_parts();
         evidence_truncated += evidence_overflow;
         let assessment = claim.assessment();
@@ -510,6 +764,7 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
         };
         offer_edge(
             &mut edges,
+            &mut truncation.edges_truncated,
             &mut evidence_truncated,
             limits,
             SystemEdge {
@@ -522,12 +777,18 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                 evidence: evidence.clone(),
             },
         );
-        for (role, role_provenance) in &claim.roles {
+        for (role, role_facts) in &claim.roles {
             if !credible && *role == SystemEdgeKind::OwnedBy {
+                continue;
+            }
+            let (role_evidence, role_overflow) = role_facts.evidence.clone().into_parts();
+            evidence_truncated += role_overflow;
+            if role_evidence.is_empty() {
                 continue;
             }
             offer_edge(
                 &mut edges,
+                &mut truncation.edges_truncated,
                 &mut evidence_truncated,
                 limits,
                 SystemEdge {
@@ -535,26 +796,105 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                     domain: role.domain(),
                     from: app_key.clone(),
                     to: artifact_key.clone(),
-                    assessment,
-                    provenance: *role_provenance,
-                    evidence: evidence.clone(),
+                    assessment: role_facts.assessment(),
+                    provenance: role_facts.provenance,
+                    evidence: role_evidence,
                 },
             );
         }
-        published_claims
-            .entry(app_key.clone())
-            .or_default()
-            .push((artifact_key.clone(), assessment));
     }
 
-    // 3c. Identity-engine relationships.
+    // 3c. Identity-engine relationships, VALIDATED against the canonical
+    // artifact facts. A relationship fact is a caller projection, not graph
+    // truth: every endpoint must be a retained artifact node, and the fact's
+    // proofs must agree with what those nodes carry.
+    //
+    // * `HardLinkAlias`: every endpoint node must prove an object identity,
+    //   all proven identities must be equal under FULL comparison (volume,
+    //   file id, AND high bits — never narrowed), and a fact-level `object`
+    //   proof, when supplied, must equal them too. Missing or disagreeing
+    //   proof → rejected with exact accounting.
+    // * `ContentDuplicate`: every endpoint node must carry the proven
+    //   digest; a fact-level `content_sha256`, when supplied, must equal it.
+    //   Missing digests or a disagreeing fact digest → rejected. When all
+    //   endpoint identities are known and any two agree, the fact describes
+    //   an alias, not a duplicate → rejected (never silently recast).
+    //   Every identity must be known and distinct before the model can assert
+    //   `DuplicateOf`; an unknown identity is insufficient proof.
+    let relationship_member_limit = max_relationship_members(limits.max_edges);
     for rel in &input.relationships {
-        let keys: Vec<String> = rel
-            .paths
-            .iter()
-            .map(|p| ArtifactKey::of(p).to_string())
-            .filter(|k| artifact_index.contains_key(k))
-            .collect();
+        // Resolve endpoints into a bounded, canonical set. A relationship
+        // with any unknown endpoint or too many participants is rejected as
+        // a whole; silently dropping a participant could turn an invalid
+        // proof into a smaller, plausible-looking relationship. The member
+        // limit also caps clique generation to O(max_edges) candidate pairs.
+        let mut member_map: BTreeMap<String, &ArtifactNode> = BTreeMap::new();
+        let mut invalid_endpoint = false;
+        let mut too_many_members = false;
+        for path in &rel.paths {
+            let key = ArtifactKey::of(path).to_string();
+            if member_map.contains_key(&key) {
+                continue;
+            }
+            let Some(node) = artifact_by_key.get(&key).copied() else {
+                invalid_endpoint = true;
+                break;
+            };
+            if member_map.len() >= relationship_member_limit {
+                too_many_members = true;
+                break;
+            }
+            member_map.insert(key, node);
+        }
+        if invalid_endpoint || too_many_members || member_map.len() < 2 {
+            truncation.relationships_rejected += 1;
+            continue;
+        }
+        let members: Vec<&ArtifactNode> = member_map.into_values().collect();
+        let valid = match rel.kind {
+            RelationshipFactKind::HardLinkAlias => {
+                // Every member must prove an identity, all equal, full
+                // comparison (high bits included — never narrowed).
+                let mut identities = members.iter().map(|m| m.identity);
+                let first = match identities.next() {
+                    Some(Some(id)) => id,
+                    _ => {
+                        truncation.relationships_rejected += 1;
+                        continue;
+                    }
+                };
+                identities.all(|id| id == Some(first)) && rel.object.is_none_or(|o| o == first)
+            }
+            RelationshipFactKind::ContentDuplicate => {
+                // Every member must carry one shared digest; the fact's own
+                // digest, when supplied, must be that digest.
+                let mut digests = members.iter().map(|m| m.content_sha256.as_deref());
+                let first = match digests.next() {
+                    Some(Some(d)) => d,
+                    _ => {
+                        truncation.relationships_rejected += 1;
+                        continue;
+                    }
+                };
+                let agreed = digests.all(|d| d == Some(first))
+                    && rel.content_sha256.as_deref().is_none_or(|d| d == first);
+                // "Distinct objects" requires complete, pairwise-distinct
+                // identities. Missing identity is insufficient proof; known
+                // equality proves an alias and contradicts this relationship.
+                let distinct = {
+                    let mut seen: BTreeSet<ObjectIdentity> = BTreeSet::new();
+                    members
+                        .iter()
+                        .all(|m| m.identity.is_some_and(|id| seen.insert(id)))
+                };
+                agreed && distinct
+            }
+        };
+        if !valid {
+            truncation.relationships_rejected += 1;
+            continue;
+        }
+        let keys: Vec<String> = members.iter().map(|m| m.key.clone()).collect();
         let kind = match rel.kind {
             RelationshipFactKind::ContentDuplicate => SystemEdgeKind::DuplicateOf,
             RelationshipFactKind::HardLinkAlias => SystemEdgeKind::HardLinkAliasOf,
@@ -594,6 +934,7 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                 )];
                 offer_edge(
                     &mut edges,
+                    &mut truncation.edges_truncated,
                     &mut evidence_truncated,
                     limits,
                     SystemEdge {
@@ -614,7 +955,12 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
     }
 
     // ---- 4. Historical context (only from supplied history facts) -----
-    let mut history_admitted: BoundedTopK<(String, String), HistoricalContext> =
+    // Duplicate (run, path) facts are a caller projection, never arrival
+    // truth: identical payloads collapse, contradictory payloads are BOTH
+    // preserved under distinct canonical keys (conflict preservation — the
+    // model never picks a historical winner by arrival order). Bounded by
+    // `max_historical_context` with exact overflow accounting.
+    let mut history_admitted: BoundedTopK<(String, String, HistoryPayloadRank), HistoricalContext> =
         BoundedTopK::new(limits.max_historical_context);
     for fact in &input.history {
         let key = ArtifactKey::of(&fact.path).to_string();
@@ -625,12 +971,21 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
             category: fact.category.clone(),
             provenance: ProvenanceState::Observed,
         };
-        history_admitted.offer((fact.run_id.clone(), key), ctx, |_, _| false);
+        history_admitted.offer(
+            (
+                fact.run_id.clone(),
+                key,
+                HistoryPayloadRank::of(fact.identity, fact.category.as_deref()),
+            ),
+            ctx,
+            |_, _| false,
+        );
     }
     let (history_items, history_overflow) = history_admitted.into_sorted();
     truncation.historical_context_truncated = history_overflow;
     let mut historical_context: Vec<HistoricalContext> =
         history_items.into_iter().map(|(_, c)| c).collect();
+    // Non-decreasing (run, path): conflicting rows share one key by design.
     historical_context.sort_by(|a, b| {
         a.run_id.cmp(&b.run_id).then(
             a.path
@@ -639,23 +994,31 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                 .cmp(b.path.as_os_str().as_encoded_bytes()),
         )
     });
-    // Historical edges join to artifacts that the CURRENT model also holds.
-    // A caller-supplied context record for an artifact the model does not
-    // hold is still published as data, but it cannot anchor an edge: an
-    // edge needs both endpoints. This keeps "no invented facts" literal.
-    let mut hist_edges: Vec<SystemEdge> = Vec::new();
+    // Historical assertions join context rows to artifacts that the CURRENT
+    // model also holds. A caller-supplied context record for an artifact the
+    // model does not hold is still published as data, but it anchors no
+    // assertion: an assertion is ABOUT a node, and there is no node. This
+    // keeps "no invented facts" literal.
+    //
+    // Assertions are node-attached context, never graph edges: a stored
+    // "move" is quoted as what it is ("history proves this path previously
+    // referred to a different object"), not as a self-loop that suggests a
+    // relationship between two nodes. Nothing is inferred from current
+    // state — the recorded identity is quoted from the caller's fact.
+    let mut historical_assertions: Vec<HistoricalAssertion> = Vec::new();
     for ctx in &historical_context {
         let key = ArtifactKey::of(&ctx.path).to_string();
         let Some(node) = artifact_by_key.get(&key) else {
             continue;
         };
-        // A stored identity that differs from the current one is a proven
-        // move; an equal one is a proven alias observation. Both come from
-        // real history, never from current state.
-        let kind = match (ctx.identity, node.identity) {
-            (Some(hist), Some(now)) if hist != now => SystemEdgeKind::HistoricalMoveOf,
-            (Some(_), Some(_)) => SystemEdgeKind::HistoricalAliasOf,
-            _ => SystemEdgeKind::HistoricalAliasOf,
+        // Same proven identity on both sides: alias observed. Different
+        // proven identities: the path previously referred to another
+        // object. Anything unproven on either side: honestly unproven —
+        // NEVER asserted as sameness without proof.
+        let relation = match (ctx.identity, node.identity) {
+            (Some(hist), Some(now)) if hist != now => HistoricalRelation::ObjectReplaced,
+            (Some(_), Some(_)) => HistoricalRelation::SameObjectObserved,
+            _ => HistoricalRelation::IdentityUnproven,
         };
         let evidence = vec![OwnershipEvidence::new(
             EvidenceKind::HistoricalObservation,
@@ -667,26 +1030,26 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
             MatchedAttribute::ObjectIdentity,
             Some(ctx.run_id.clone()),
         )];
-        // The edge points at the artifact node itself: source and target are
-        // the same key, so the edge is indexed exactly once per node even
-        // though it touches two conceptual roles.
-        hist_edges.push(SystemEdge {
-            kind,
-            domain: kind.domain(),
-            from: key.clone(),
-            to: key,
-            assessment: OwnershipAssessment::Strong,
+        historical_assertions.push(HistoricalAssertion {
+            artifact_key: key,
+            run_id: ctx.run_id.clone(),
+            path: ctx.path.clone(),
+            recorded_identity: ctx.identity,
+            current_identity: node.identity,
+            relation,
+            category: ctx.category.clone(),
             provenance: ProvenanceState::Observed,
             evidence,
         });
     }
-    for edge in hist_edges {
-        offer_edge(&mut edges, &mut evidence_truncated, limits, edge);
-    }
+    historical_assertions.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
 
     // ---- 5. Publish edges canonically ---------------------------------
+    // The global edge store already counted its own refusals into
+    // `edges_truncated` at admission; `into_sorted` only reports the final
+    // overflow (evictions during admission), which is added, not assigned.
     let (edge_items, edges_overflow) = edges.into_sorted();
-    truncation.edges_truncated = edges_overflow;
+    truncation.edges_truncated += edges_overflow;
     truncation.evidence_truncated = evidence_truncated;
     let mut edge_list: Vec<SystemEdge> = edge_items.into_iter().map(|(_, e)| e).collect();
     edge_list.sort_by_key(|a| a.order_key());
@@ -696,6 +1059,12 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
     truncation.edges_per_node_truncated = per_node_overflow;
 
     // ---- 7. Derive artifact application status from the FINAL edges ----
+    // ...but with truncation memory: `association_seen` records every
+    // artifact key for which a claim pair was EVER observed (retained or
+    // dropped). An artifact with no surviving claim edge that WAS seen with
+    // a claim is AssociationTruncated — incomplete knowledge, never
+    // absence. Only an artifact never seen with any claim may become
+    // genuinely Unassociated.
     let mut claims_by_artifact: BTreeMap<String, Vec<(String, OwnershipAssessment)>> =
         BTreeMap::new();
     for e in &edge_list {
@@ -731,6 +1100,9 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
             ArtifactApplicationStatus::Associated
         } else if claims.map(|c| !c.is_empty()).unwrap_or(false) {
             ArtifactApplicationStatus::Uncertain
+        } else if association_seen.contains(&node.key) {
+            // Claims existed but no claim edge survived the bounds.
+            ArtifactApplicationStatus::AssociationTruncated
         } else {
             match app_source_status {
                 SourceUsability::Usable => ArtifactApplicationStatus::Unassociated,
@@ -741,8 +1113,12 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
         };
     }
     // SharedBy edges: publish the explicit sharing fact once per artifact
-    // that several applications relate to.
-    let mut shared_edges: Vec<SystemEdge> = Vec::new();
+    // that several applications relate to. The app pairs fan out
+    // quadratically in the claimant count, so they are admitted through a
+    // BoundedTopK (never materialized unbounded): canonically-smallest
+    // pairs win, the rest count exactly into `edges_truncated`.
+    let mut shared_top: BoundedTopK<(String, String), SystemEdge> =
+        BoundedTopK::new(limits.max_edges);
     for node in &artifacts {
         if !matches!(
             node.application_status,
@@ -762,21 +1138,29 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
                 } else {
                     (apps[j].0.clone(), apps[i].0.clone())
                 };
-                shared_edges.push(SystemEdge {
+                let edge = SystemEdge {
                     kind: SystemEdgeKind::SharedBy,
                     domain: SystemEdgeKind::SharedBy.domain(),
-                    from,
-                    to,
+                    from: from.clone(),
+                    to: to.clone(),
                     assessment: OwnershipAssessment::Moderate,
                     provenance: ProvenanceState::Inferred,
                     evidence: Vec::new(),
-                });
+                };
+                if matches!(
+                    shared_top.offer((from, to), edge, |_, _| false),
+                    Admission::Refused
+                ) {
+                    truncation.edges_truncated += 1;
+                }
             }
         }
     }
+    let (shared_items, shared_overflow) = shared_top.into_sorted();
+    truncation.edges_truncated += shared_overflow;
     let (mut edge_list, extra_overflow) = {
         let mut all = edge_list;
-        all.extend(shared_edges);
+        all.extend(shared_items.into_iter().map(|(_, e)| e));
         let (bounded, over) = bound_edges_per_node(all, limits);
         (bounded, over)
     };
@@ -792,24 +1176,31 @@ pub fn build_system_model(input: &SystemModelInput, limits: &SystemModelLimits) 
     edge_list.dedup_by(|a, b| a.fact_key() == b.fact_key());
 
     // ---- 8. Insights and candidates -----------------------------------
-    let (insights, candidates, insight_overflow, candidate_overflow) = crate::insight::derive(
+    let derived = crate::insight::derive(
         &artifacts,
         &applications,
         &edge_list,
+        &historical_assertions,
         &input.source_coverage,
         limits,
     );
-    truncation.insights_truncated = insight_overflow;
-    truncation.candidates_truncated = candidate_overflow;
+    truncation.insights_truncated = derived.insights_truncated;
+    truncation.candidates_truncated = derived.candidates_truncated;
+    truncation.evidence_truncated += derived.evidence_truncated;
+    let insights = derived.insights;
+    let candidates = derived.candidates;
 
     // ---- 9. Observation summary ---------------------------------------
-    let observations = observation_summary(&artifacts, &input.source_coverage);
+    let (observations, source_states_truncated) =
+        observation_summary(&artifacts, &input.source_coverage, limits.max_source_states);
+    truncation.source_states_truncated = source_states_truncated;
 
     SystemModel::finalize(crate::model::FinalizeInput {
         artifacts,
         applications,
         edges: edge_list,
         historical_context,
+        historical_assertions,
         insights,
         candidates,
         observations,
@@ -883,6 +1274,95 @@ fn artifact_node(key: &str, fact: &ArtifactFact) -> ArtifactNode {
     }
 }
 
+/// Canonical rank of one history payload: identical (run, path) facts with
+/// contradictory payloads are preserved as DISTINCT rows (conflict
+/// preservation — never an arrival-order winner), and identical payloads
+/// collapse to one row. The rank is a total order over the payload so the
+/// preserved set is deterministic.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HistoryPayloadRank {
+    /// `None` sorts before `Some`: proven identities outrank absent ones in
+    /// canonical order (order only — never a truth verdict).
+    identity: Option<ObjectIdentity>,
+    category: Option<HistoryCategoryRank>,
+}
+
+/// Canonical rank of a history category string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HistoryCategoryRank(String);
+
+impl HistoryPayloadRank {
+    fn of(identity: Option<ObjectIdentity>, category: Option<&str>) -> Self {
+        HistoryPayloadRank {
+            identity,
+            category: category.map(|c| HistoryCategoryRank(c.to_string())),
+        }
+    }
+}
+
+/// Precomputed artifact structure, built ONCE per model build so
+/// per-application state resolution never rescans the artifact list.
+///
+/// * `by_key`: artifact position by exact node key — O(1) exact lookup.
+/// * `executable_children_by_parent`: parent key → number of direct observed
+///   executable candidates, so a shared install root is summarized once.
+/// * `access_by_root`: ancestor key → readable/inaccessible descendant flags;
+///   application resolution never rescans all descendants for every app.
+///
+/// Memory is O(A · depth) worst case (each artifact registers a compact
+/// summary under every ancestor key); depth is bounded by each path, and
+/// lookups are O(log A). Build cost is O(A · depth) ancestor walks.
+struct ArtifactStructure {
+    by_key: BTreeMap<String, usize>,
+    executable_children_by_parent: BTreeMap<String, usize>,
+    access_by_root: BTreeMap<String, RootAccessSummary>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RootAccessSummary {
+    readable_descendant: bool,
+    inaccessible_descendant: bool,
+}
+
+impl ArtifactStructure {
+    fn build(artifacts: &[ArtifactNode]) -> Self {
+        let mut by_key: BTreeMap<String, usize> = BTreeMap::new();
+        let mut executable_children_by_parent: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, node) in artifacts.iter().enumerate() {
+            by_key.insert(node.key.clone(), i);
+            if let Some(parent) = node.path.parent() {
+                let parent_key = ArtifactKey::of(parent).to_string();
+                if matches!(node.observed_kind, ProbedKind::File)
+                    && is_executable_candidate(&node.path)
+                {
+                    *executable_children_by_parent.entry(parent_key).or_default() += 1;
+                }
+            }
+        }
+        // Compact descendant summaries: every artifact updates each proper
+        // ancestor once; application state performs one map lookup per root.
+        let mut access_by_root: BTreeMap<String, RootAccessSummary> = BTreeMap::new();
+        for node in artifacts {
+            for ancestor in ancestor_keys(&node.path) {
+                let summary = access_by_root.entry(ancestor).or_default();
+                summary.readable_descendant |= node.access.is_read();
+                summary.inaccessible_descendant |=
+                    node.access == AccessState::ExistsButInaccessible;
+            }
+        }
+        ArtifactStructure {
+            by_key,
+            executable_children_by_parent,
+            access_by_root,
+        }
+    }
+
+    fn lookup<'a>(&self, artifacts: &'a [ArtifactNode], path: &Path) -> Option<&'a ArtifactNode> {
+        let key = ArtifactKey::of(path).to_string();
+        self.by_key.get(&key).map(|i| &artifacts[*i])
+    }
+}
+
 /// Which node should represent a path when the same path arrives twice:
 /// the one with more proven facts (identity, content, classification).
 fn prefer_artifact(new: &ArtifactNode, existing: &ArtifactNode) -> bool {
@@ -898,13 +1378,32 @@ fn artifact_fact_rank(a: &ArtifactNode) -> (bool, bool, bool, Option<u64>) {
     )
 }
 
+/// The shared model recognizes executable candidates only by ASCII-defined
+/// suffixes and byte-level comparisons; arbitrary paths are never decoded.
+fn is_executable_candidate(path: &Path) -> bool {
+    [
+        b"exe".as_slice(),
+        b"com",
+        b"bat",
+        b"cmd",
+        b"bin",
+        b"sh",
+        b"app",
+    ]
+    .iter()
+    .any(|extension| coresight_apps::extension_is_ascii(path, extension))
+}
+
 /// Choose the role edge from the CLASSIFIER's verdict. Classification is
 /// descriptive and is never rewritten by ownership.
 fn claim_edge_kind(node: &ArtifactNode) -> SystemEdgeKind {
     match node.category {
         Some(Category::Cache) => SystemEdgeKind::ApplicationCache,
         Some(Category::Logs) => SystemEdgeKind::ApplicationLog,
-        Some(Category::Applications) => SystemEdgeKind::ApplicationExecutable,
+        // Classification as an application artifact is not proof that the
+        // path itself is an executable. The executable role requires an
+        // explicit recorded/candidate executable path below.
+        Some(Category::Applications) => SystemEdgeKind::AssociatedWith,
         Some(Category::ApplicationData) | Some(Category::SystemData) => {
             SystemEdgeKind::ApplicationData
         }
@@ -912,45 +1411,151 @@ fn claim_edge_kind(node: &ArtifactNode) -> SystemEdgeKind {
     }
 }
 
+/// Canonical precedence between two application nodes admitted under one
+/// id: a TOTAL order over every semantically relevant field, so
+/// `choose(a, b) == choose(b, a)` always holds and duplicate records
+/// resolve identically under any arrival order.
+///
+/// Primary: resolution state (better-resolved wins). Then: the full reason
+/// set, field values (name, publisher, bundle identifier, install
+/// location, executable path bytes), and provenance. (The admission key —
+/// the application id — is equal for both candidates by construction.)
+fn prefer_application(new: &ApplicationNode, existing: &ApplicationNode) -> bool {
+    application_rank(new) > application_rank(existing)
+}
+
+/// Total-order rank tuple for one application node. Compared
+/// lexicographically; every field of the node participates (except the id,
+/// which is the admission key and therefore equal for both candidates).
+fn application_rank(node: &ApplicationNode) -> impl Ord + use<> {
+    fn state_rank(state: ApplicationState) -> u8 {
+        match state {
+            ApplicationState::Resolved => 3,
+            ApplicationState::PartiallyResolved => 2,
+            ApplicationState::Unresolved => 1,
+            ApplicationState::Unknown => 0,
+        }
+    }
+    fn path_bytes(p: &Option<PathBuf>) -> Option<Vec<u8>> {
+        p.as_ref()
+            .map(|p| p.as_os_str().as_encoded_bytes().to_vec())
+    }
+    (
+        state_rank(node.state),
+        node.state_reasons.clone(),
+        node.name.clone(),
+        node.publisher.clone(),
+        node.bundle_identifier.clone(),
+        path_bytes(&node.install_location),
+        path_bytes(&node.executable_path),
+        node.provenance.clone(),
+    )
+}
+
+fn same_artifact_path(left: &Path, right: &Path) -> bool {
+    ArtifactKey::of(left) == ArtifactKey::of(right)
+}
+
 /// Determine an application's resolution state from observed artifacts.
+///
+/// Exact state semantics (all lookups are indexed — never full scans):
+///
+/// ```text
+/// install root read / executable read  → resolved_any
+/// root recorded, node missing/absent   → InstallRootMissing/Unobserved
+/// root recorded, descendants observed  → DescendantObserved
+/// resolved_any + any gap               → PartiallyResolved
+/// resolved_any + no gap                → Resolved
+/// expected (root/exe recorded) + descendant observed, root itself
+///   unavailable                        → PartiallyResolved (a partial
+///   footprint is evidence, not absence)
+/// expected + nothing observed          → Unresolved
+/// expected root/executable inaccessible → Unknown (not absence)
+/// candidate executable observed         → PartiallyResolved, never Resolved
+/// nothing recorded at all              → Unknown
+/// ```
+///
+/// A descendant observed under an unavailable root is a partial footprint:
+/// it must never collapse to `Unresolved` merely because the exact root
+/// node is absent.
 fn application_node(
     fact: &ApplicationFact,
     artifacts: &[ArtifactNode],
-    artifact_index: &BTreeMap<String, usize>,
+    structure: &ArtifactStructure,
 ) -> ApplicationNode {
     let mut reasons: BTreeSet<ApplicationStateReason> = BTreeSet::new();
     let mut resolved_any = false;
     let mut expected_any = false;
+    let mut descendant_observed = false;
+    let mut inaccessible = false;
 
-    let lookup = |p: &Path| -> Option<&ArtifactNode> {
-        let key = ArtifactKey::of(p).to_string();
-        artifact_index.get(&key).map(|i| &artifacts[*i])
-    };
+    let lookup = |p: &Path| -> Option<&ArtifactNode> { structure.lookup(artifacts, p) };
+    // Desktop-entry install locations are derived from Exec's parent and are
+    // not trusted as install roots. Its broad directory scope cannot make
+    // unrelated children look like a partial application footprint.
+    let install_roots_are_authoritative =
+        fact.record.source != coresight_apps::ApplicationSource::DesktopEntry;
 
-    if let Some(loc) = &fact.record.install_location {
-        expected_any = true;
-        match lookup(loc) {
-            Some(node) if node.access.is_read() => {
-                resolved_any = true;
-                reasons.insert(ApplicationStateReason::InstallRootObserved);
+    if install_roots_are_authoritative {
+        if let Some(loc) = &fact.record.install_location {
+            expected_any = true;
+            match lookup(loc) {
+                Some(node) if node.access.is_read() => {
+                    resolved_any = true;
+                    reasons.insert(ApplicationStateReason::InstallRootObserved);
+                }
+                Some(node) if node.access == AccessState::DoesNotExist => {
+                    reasons.insert(ApplicationStateReason::InstallRootMissing);
+                }
+                Some(node) if node.access == AccessState::ExistsButInaccessible => {
+                    reasons.insert(ApplicationStateReason::InstallRootUnobserved);
+                    reasons.insert(ApplicationStateReason::ExpectedDataInaccessible);
+                    inaccessible = true;
+                }
+                Some(_) => {
+                    reasons.insert(ApplicationStateReason::InstallRootUnobserved);
+                }
+                None => {
+                    reasons.insert(ApplicationStateReason::InstallRootUnobserved);
+                }
             }
-            Some(node) if node.access == AccessState::DoesNotExist => {
-                reasons.insert(ApplicationStateReason::InstallRootMissing);
-            }
-            Some(_) => {
-                reasons.insert(ApplicationStateReason::InstallRootUnobserved);
-            }
-            None => {
-                reasons.insert(ApplicationStateReason::InstallRootUnobserved);
+            // Descendant evidence via the precomputed compact root-access
+            // summary: a readable retained artifact under the exact recorded
+            // root counts even when the root node itself was not observed.
+            let root_key = ArtifactKey::of(loc).to_string();
+            descendant_observed |= structure
+                .access_by_root
+                .get(&root_key)
+                .is_some_and(|summary| summary.readable_descendant);
+        }
+        // Detector roots can contribute partial evidence for sources whose
+        // install-location field is authoritative, but never resolve by
+        // themselves.
+        for seed in &fact.install_roots {
+            let root_key = ArtifactKey::of(seed).to_string();
+            if structure
+                .access_by_root
+                .get(&root_key)
+                .is_some_and(|summary| summary.readable_descendant)
+            {
+                descendant_observed = true;
+                break;
             }
         }
     }
-    if let Some(exe) = &fact.executable {
+    if let Some(exe) = &fact.record.executable_path {
+        // Only the exact path recorded in source metadata can resolve the
+        // executable expectation.
         expected_any = true;
         match lookup(exe) {
             Some(node) if node.access.is_read() => {
                 resolved_any = true;
                 reasons.insert(ApplicationStateReason::ExecutableObserved);
+            }
+            Some(node) if node.access == AccessState::ExistsButInaccessible => {
+                reasons.insert(ApplicationStateReason::ExecutableUnobserved);
+                reasons.insert(ApplicationStateReason::ExpectedDataInaccessible);
+                inaccessible = true;
             }
             _ => {
                 reasons.insert(ApplicationStateReason::ExecutableUnobserved);
@@ -959,48 +1564,63 @@ fn application_node(
     } else {
         reasons.insert(ApplicationStateReason::ExecutableNotRecorded);
     }
-    // Duplicate executable candidates among the application's install roots.
-    let exe_candidates = fact
-        .install_roots
-        .iter()
-        .filter_map(|root| lookup(root))
-        .flat_map(|root| {
-            artifacts
-                .iter()
-                .filter(move |a| a.path.parent() == Some(root.path.as_path()))
-                .filter(|a| matches!(a.observed_kind, ProbedKind::File))
-        })
-        .filter(|a| {
-            a.path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| {
-                    matches!(
-                        e.to_ascii_lowercase().as_str(),
-                        "exe" | "com" | "bat" | "cmd" | "bin" | "sh" | "app"
-                    )
-                })
-                .unwrap_or(false)
-        })
-        .count();
+    // A separate executable path with no exact source-recorded counterpart is
+    // candidate evidence. If observed, it contributes to a partial footprint,
+    // never a fully resolved state.
+    if let Some(candidate) = &fact.executable {
+        if !fact
+            .record
+            .executable_path
+            .as_ref()
+            .is_some_and(|recorded| same_artifact_path(recorded, candidate))
+            && lookup(candidate).is_some_and(|node| node.access.is_read())
+        {
+            descendant_observed = true;
+        }
+    }
+    // Duplicate executable candidates are summarized once per direct parent
+    // during the artifact pass. A per-app set de-duplicates repeated roots;
+    // its size is bounded by the number of artifact parent keys.
+    let mut seen_executable_roots = BTreeSet::new();
+    let exe_candidates: usize = if install_roots_are_authoritative {
+        fact.install_roots
+            .iter()
+            .filter_map(|root| {
+                let key = ArtifactKey::of(root).to_string();
+                let count = structure.executable_children_by_parent.get(&key)?;
+                seen_executable_roots.insert(key).then_some(*count)
+            })
+            .sum()
+    } else {
+        0
+    };
     if exe_candidates > 1 {
         reasons.insert(ApplicationStateReason::DuplicateExecutableCandidates);
     }
-    // Inaccessible expected data under the application's roots.
-    let inaccessible = fact
-        .install_roots
-        .iter()
-        .filter_map(|root| lookup(root))
-        .any(|root| {
-            artifacts.iter().any(|a| {
-                a.path.starts_with(&root.path) && a.access == AccessState::ExistsButInaccessible
-            })
-        });
+    // Inaccessible expected data is summarized per root during the artifact
+    // pass; this is O(number of declared roots), not roots × artifacts.
+    let inaccessible = inaccessible
+        || (install_roots_are_authoritative
+            && fact
+                .record
+                .install_location
+                .iter()
+                .chain(fact.install_roots.iter())
+                .any(|root| {
+                    structure
+                        .access_by_root
+                        .get(&ArtifactKey::of(root).to_string())
+                        .is_some_and(|summary| summary.inaccessible_descendant)
+                }));
     if inaccessible {
         reasons.insert(ApplicationStateReason::ExpectedDataInaccessible);
     }
+    if descendant_observed {
+        reasons.insert(ApplicationStateReason::DescendantObserved);
+    }
     let state = if resolved_any {
         if reasons.contains(&ApplicationStateReason::InstallRootMissing)
+            || reasons.contains(&ApplicationStateReason::InstallRootUnobserved)
             || reasons.contains(&ApplicationStateReason::ExecutableUnobserved)
             || inaccessible
             || exe_candidates > 1
@@ -1009,8 +1629,18 @@ fn application_node(
         } else {
             ApplicationState::Resolved
         }
-    } else if expected_any {
-        ApplicationState::Unresolved
+    } else if expected_any || descendant_observed {
+        if descendant_observed {
+            // Observed descendants (even when they came from a candidate path)
+            // make this a partial footprint, never "nothing observed".
+            ApplicationState::PartiallyResolved
+        } else if inaccessible {
+            // Inaccessible expected data is unknown, not proof that the
+            // application footprint is absent or unresolved.
+            ApplicationState::Unknown
+        } else {
+            ApplicationState::Unresolved
+        }
     } else {
         ApplicationState::Unknown
     };
@@ -1022,7 +1652,18 @@ fn application_node(
         bundle_identifier: fact.record.bundle_identifier.clone(),
         install_location: fact.record.install_location.clone(),
         executable_path: fact.record.executable_path.clone(),
-        provenance: fact.record.provenance.clone(),
+        // Source provenance is a finite enum set. Collecting into a set
+        // deduplicates during admission, so even a caller-supplied vector with
+        // many repeated source values never creates an unbounded retained
+        // provenance collection. The caller unions duplicates commutatively.
+        provenance: fact
+            .record
+            .provenance
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         state,
         state_reasons: reasons.into_iter().collect(),
     }
@@ -1030,9 +1671,13 @@ fn application_node(
 
 /// Offer one edge into the bounded admission set, applying the per-edge
 /// evidence bound. Deduplication is by fact key with a content-based
-/// preference, so arrival order never decides which fact survives.
+/// preference, so arrival order never decides which fact survives. A
+/// refused edge is a dropped edge: it counts into `edges_truncated` here
+/// so truncation memory survives even when the edge never reaches any
+/// list. (The per-node bound counts its own drops separately.)
 fn offer_edge(
     edges: &mut BoundedTopK<(u8, String, String), SystemEdge>,
+    edges_truncated: &mut u64,
     evidence_truncated: &mut u64,
     limits: &SystemModelLimits,
     mut edge: SystemEdge,
@@ -1043,7 +1688,12 @@ fn offer_edge(
         *evidence_truncated += (edge.evidence.len() - limits.max_evidence_per_edge) as u64;
         edge.evidence.truncate(limits.max_evidence_per_edge);
     }
-    edges.offer(edge.fact_key(), edge, |new, old| new.rank() > old.rank());
+    if matches!(
+        edges.offer(edge.fact_key(), edge, |new, old| new.rank() > old.rank()),
+        Admission::Refused
+    ) {
+        *edges_truncated += 1;
+    }
 }
 
 /// Bound the number of edges attached to any single node. Retains the
@@ -1094,7 +1744,8 @@ fn ancestor_keys(path: &Path) -> Vec<String> {
 fn observation_summary(
     artifacts: &[ArtifactNode],
     coverage: &[coresight_apps::SourceCoverage],
-) -> ObservationSummary {
+    max_source_states: usize,
+) -> (ObservationSummary, u64) {
     let mut inaccessible_artifacts = 0u64;
     let mut unsupported_artifacts = 0u64;
     let mut failed_artifacts = 0u64;
@@ -1106,21 +1757,27 @@ fn observation_summary(
             _ => {}
         }
     }
-    let mut source_states: Vec<SourceStateSummary> = coverage
-        .iter()
-        .map(|c| SourceStateSummary {
-            source: c.source.clone(),
-            status: c.status,
-            note: c.note.clone(),
-        })
+    let mut source_state_top: BoundedTopK<
+        (String, SourceStatus, Option<String>),
+        SourceStateSummary,
+    > = BoundedTopK::new(max_source_states);
+    for coverage in coverage {
+        let state = SourceStateSummary {
+            source: coverage.source.clone(),
+            status: coverage.status,
+            note: coverage.note.clone(),
+        };
+        source_state_top.offer(
+            (state.source.clone(), state.status, state.note.clone()),
+            state,
+            |_, _| false,
+        );
+    }
+    let (source_state_items, source_states_truncated) = source_state_top.into_sorted();
+    let source_states = source_state_items
+        .into_iter()
+        .map(|(_, state)| state)
         .collect();
-    source_states.sort_by(|a, b| {
-        a.source
-            .cmp(&b.source)
-            .then(a.status.cmp(&b.status))
-            .then(a.note.cmp(&b.note))
-    });
-    source_states.dedup();
 
     // Capability state is read verbatim from the Phase 6.1 registry: the
     // model never upgrades a partial capability to "fully supported".
@@ -1143,17 +1800,23 @@ fn observation_summary(
         })
         .collect();
 
-    ObservationSummary {
-        source_states,
-        capabilities,
-        inaccessible_artifacts,
-        unsupported_artifacts,
-        failed_artifacts,
-    }
+    (
+        ObservationSummary {
+            source_states,
+            capabilities,
+            inaccessible_artifacts,
+            unsupported_artifacts,
+            failed_artifacts,
+        },
+        source_states_truncated,
+    )
 }
 
 /// Descriptive blockers recorded from the capability's own honest status. The
-/// model reports what the capability says; it never invents support.
+/// model reports what the capability says; it never invents support — and
+/// it never invents platform-specific requirements either. Shared code
+/// carries no platform conditionals: blocker text is platform-neutral, and
+/// platform details belong to platform-specific observations.
 fn capability_blockers(id: CapabilityId, status: CapabilityStatus) -> Vec<String> {
     let mut out = Vec::new();
     if matches!(
@@ -1167,7 +1830,10 @@ fn capability_blockers(id: CapabilityId, status: CapabilityStatus) -> Vec<String
     }
     match id {
         CapabilityId::ApplicationFootprint => {
-            out.push("macOS protected locations require Full Disk Access".to_string());
+            out.push(
+                "footprint enumeration is partial on this host; protected locations may be unreadable"
+                    .to_string(),
+            );
         }
         CapabilityId::SoftwareManagement => {
             out.push("no execution exists in this build (analysis only)".to_string());
