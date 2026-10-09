@@ -102,10 +102,13 @@ dependencies = [
 name = "coresight-history"
 version = "0.0.0"
 dependencies = [
+ "coresight-apps",
+ "coresight-capabilities",
  "coresight-classifier",
  "coresight-core",
  "coresight-engine",
  "coresight-identity",
+ "coresight-system-model",
  "rusqlite",
  "serde",
  "serde_json",

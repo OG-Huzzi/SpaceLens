@@ -4,7 +4,9 @@ Status: implemented and verified. This document describes the
 implementation as it exists — every claim is backed by a test, every
 limitation is stated. **Phase 5 provides trustworthy historical evidence
 only: no recommendations, no cleanup ranking, no destructive operations**
-(those belong to the next intelligence layer).
+(those belong to the next intelligence layer). Phase 6.4 extended this
+crate with the application/system snapshot tables (schema v5) described
+under "Persistence" below and in docs/DATABASE.md.
 
 ## The identity stack, extended
 
@@ -122,10 +124,11 @@ Objective 8), but consumers read them against the respective configs.
   connection and the forward-only `schema_version` migrations. History
   adds migration **v2** (`scan_runs`, `observations`,
   `relationship_obs`, `relationship_members`), **v3** (Phase 5.1:
-  `file_id_hi` identity columns + lossless tagged path storage), and
-  **v4** (persisted relationship-report status/truncation) to the same
-  database. No second database abstraction; no DB access in observation
-  code.
+  `file_id_hi` identity columns + lossless tagged path storage), **v4**
+  (persisted relationship-report status/truncation), and **v5**
+  (Phase 6.4: the normalized `app_snapshot_*` application/system
+  snapshot tables) to the same database. No second database abstraction;
+  no DB access in observation code.
 - **Version safety**: a store whose `schema_version` is NEWER than the
   build is refused (`StoreError::SchemaTooNew`) without modification —
   forward-only means an older binary never partially interprets a newer
@@ -143,6 +146,14 @@ Objective 8), but consumers read them against the respective configs.
   never ran the relationship layer reloads with no report at all (the
   pre-audit behavior fabricated `Completed` on reload, which could
   produce false relationship-added/removed events in comparisons).
+- **Application/system snapshots are stored facts** (v5, Phase 6.4): the
+  canonical `SystemModelInput` fact set plus footprint candidates and
+  truncation counters persist per run, and reload feeds the SAME
+  `build_system_model` path, so a reloaded model is byte-identical in
+  canonical semantics to the freshly built one. Derived model state
+  (indexes, edges, claims, resolution states, insights, candidates) is
+  never stored — only reconstructed. See docs/DATABASE.md for the table
+  contract and docs/SYSTEM_MODEL.md §16 for the boundary.
 - WAL journal + foreign keys (inherited from core's open).
 - Events are **not persisted**: they are pure derivations of stored
   snapshots (recomputable, deterministic), keeping one source of truth
@@ -208,3 +219,15 @@ are indexed; no pairwise comparison exists anywhere in the phase.
 6. **Relationship member detail** derives from Phase 4's capped reports
    (≤64 member paths per relationship); relationship history counts are
    exact, per-member lists may be truncated exactly as upstream.
+7. **Phase 6.4 snapshots inherit the store's retention.** A snapshot is
+   pruned with its run (foreign-key cascade), so historical application
+   facts share the run-retention policy rather than having their own.
+   Snapshot loads are per-run and bounded by `QueryLimits`; there is no
+   cross-run "latest snapshot for an application" query yet — callers
+   list runs and load the one they need.
+8. **A stored `u64` that exceeds `i64::MAX` cannot round-trip** through
+   the signed `INTEGER` columns (the repository-wide convention). Such a
+   value fails loudly as corruption rather than silently narrowing;
+   object-identity components are unaffected because they persist as
+   bit-patterns. This is a theoretical ceiling documented rather than a
+   practical one.

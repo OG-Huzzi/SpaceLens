@@ -119,6 +119,15 @@ pub struct ConfigFingerprint {
     /// against them degrade to Unknown wherever the old format dropped
     /// proven components.
     pub history_schema: u32,
+    /// Application/system snapshot schema version (Phase 6.4). 0 = the run
+    /// predates snapshot persistence (no snapshot rows exist for it — the
+    /// ABSENCE of rows is the fact, never an empty snapshot); 1 = the
+    /// Phase 6.4 normalized snapshot tables. `#[serde(default)]` keeps
+    /// every pre-6.4 persisted fingerprint decodable: a missing component
+    /// honestly means "no snapshot facts were recorded", exactly like the
+    /// v4 `rel_status` NULL convention.
+    #[serde(default)]
+    pub app_snapshot_schema: u32,
 }
 
 impl ConfigFingerprint {
@@ -132,6 +141,7 @@ impl ConfigFingerprint {
             hash_algorithm: HashAlgorithm::Sha256.tag().to_string(),
             relationship_schema: 1,
             history_schema: 2,
+            app_snapshot_schema: 1,
         }
     }
 

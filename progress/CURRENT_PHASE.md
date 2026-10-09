@@ -1,40 +1,117 @@
 # CoreSight — Current State
 
-- **Current phase:** PHASE 6.3 — Independent Verification & Hardening (final
-  gate before Phase 6.4).
-- **Status:** VERIFIED for the Phase 6.3 hardening source commit. Commit
-  `df2e24c55807032f1bb5f61c088c660fb6587ebd` is pushed to `main`; its exact-SHA
-  CI run is green on all four jobs (run 37797444920, attempt 2). The final
-  verification-record change is documentation-only.
-- **Implementation base:** `0676223be40ace103f0c9ba2fa831c7df484a3e4`.
-  Starting `main` HEAD: `d6ee4226487d33e321c434adc531f3d7c1ccaeca`.
-- **Baseline CI:** run [37650663398](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37650663398)
-  succeeded on the starting HEAD with frontend, Windows, macOS, and Ubuntu
-  jobs all green. This predates the current hardening edits and is not their
-  verification.
-- **Audit findings being hardened:** source-specific root provenance (including
-  desktop-entry Exec-parent scope), candidate executable confidence and
-  application state, evidence ceilings at public aggregation/deserialization
-  boundaries, lossless path comparison, and safe history path decoding.
-- **Local gate status:** strict workspace clippy with all targets/features and
-  `-D warnings`, plus workspace tests with and without all features, are green.
-  The frontend audit advisory was patched (`source-map-js` 1.2.1 → 1.2.2);
-  clean `npm ci`, `npm audit --audit-level=high` (zero vulnerabilities), and
-  `npm run build` are green. All established ignored performance suites are
-  green. Cross-target `cargo check --all-targets` is green for Apple Darwin,
-  Linux GNU, and Windows GNU; native Windows MSVC workspace tests are green.
-  Hardening commit `df2e24c55807032f1bb5f61c088c660fb6587ebd` is pushed to
-  `main`. Exact-SHA CI run [37797444920](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37797444920)
-  attempt 2 completed successfully with frontend, Ubuntu, Windows, and macOS
-  all green. The first macOS attempt was canceled before runner acquisition due
-  to provider capacity; the targeted retry succeeded without source changes.
-- **Phase 6.4:** NOT STARTED; do not begin it during this gate.
+- **Current phase:** PHASE 6.4 — Persistent Application Intelligence +
+  System-Model Snapshot Integration.
+- **Status:** IMPLEMENTED; local gate green; exact-SHA CI verification in
+  progress. Not yet VERIFIED (see the gate record below).
+- **Verified baseline:** `2e7999251fb4df24b1fa6f638be34228d6b1ebde`
+  ("docs: record Phase 6.3 verification"); Phase 6.3 is COMPLETE and
+  VERIFIED.
+- **Phase 6.3 (historical):** hardening source commit
+  `df2e24c55807032f1bb5f61c088c660fb6587ebd`; exact-SHA CI run
+  37797444920, attempt 2, all four jobs green. Its verification-record
+  change was documentation-only.
 - **Product direction (binding):** CoreSight is a **macOS system
   intelligence + power-tools application** — NOT a "Mac cleaner". macOS is
   the primary implementation and launch platform; Windows/Linux remain
   architectural targets with their abstractions intact. Storage is one
   pillar of seven (docs/MACOS_ARCHITECTURE.md).
 - **Last updated:** 2026-10-08.
+
+## Phase 6.4 — what was implemented
+
+**Objective:** durable storage of canonical application-intelligence facts
+and persisted system-model snapshot inputs, with deterministic rehydration
+into the same validated system model.
+
+- **Schema v5 (forward-only, transactional).** One migration
+  `v4 → v5` in `coresight-history`, applied with its version bump inside a
+  single transaction. `HISTORY_SCHEMA_VERSION` 4 → 5. Twelve new
+  normalized `app_snapshot_*` tables; the existing v2–v4 migrations and
+  their SQL are untouched.
+- **Normalized persistence, no blob.** Artifact facts, the full
+  `ApplicationRecord`, unioned provenance, raw views, install roots,
+  structured ownership evidence, footprint candidates + evidence, source
+  coverage, identity-relationship facts, quoted historical context, and
+  the inventory/footprint truncation counters each persist as their own
+  columns/rows. There is no `system_model_json` table.
+- **Per-run association.** Every row carries `run_id` with
+  `ON DELETE CASCADE` to `scan_runs`, so snapshots live in the existing
+  history timeline and are pruned with their run. A run with no snapshot
+  reloads as *absent* (`None`), never as an empty snapshot.
+- **One canonical construction path.** The persistence layer returns
+  validated `SystemModelInput` facts; both a fresh build and a reload end
+  at `build_system_model` → `finalize` → `check_invariants`. Derived
+  state (indexes, edges, claims, resolution states, insights, candidates)
+  is never stored.
+- **Ceilings survive the database.** Reload re-clamps every stored
+  evidence strength through `OwnershipEvidence::new`
+  (`min(requested, kind ceiling, group ceiling)`); a tampered over-claim
+  returns weakened. Application ids are re-verified against normalized
+  `(name, publisher)`, so no second identity definition can enter.
+- **Honesty preserved.** `AccessState` (7 states), source
+  `Unsupported`/`Unavailable`/`Failed`/`Partial`, full-width
+  `ObjectIdentity`, lossless `u:/e:/l:` paths, and every truncation
+  counter round-trip verbatim. Incomplete knowledge never reloads as
+  `Unassociated`, `Orphan`, `Complete`, `Resolved`, or `Safe`.
+- **Corruption fails closed.** Strict typed decoding for unknown enums,
+  malformed paths, half/impossible identities, negative sizes and counts,
+  partial classifications, impossible flags, malformed correlation-group
+  shapes, orphaned foreign keys, and impossible application identity —
+  each surfaced as `StoreError::Corrupt` / a SQLite constraint failure
+  with table + column context, never a defaulted value.
+- **Bounded, deterministic IO.** Loads are `WHERE run_id = ?` with an
+  explicit canonical `ORDER BY` and a `QueryLimits` cap per section;
+  commits use prepared statements in one transaction with ordinals
+  assigned after a canonical sort. Insertion order, row order, and ordinal
+  values are never semantic (proven by a permutation test).
+- **System-model crate untouched.** `coresight-system-model` gained no
+  dependency and no persistence code; it remains pure, platform-neutral,
+  and database-independent, still guarded by its source-scan test.
+- **No execution, ever.** No GUI, no IPC, no destructive or subprocess
+  capability, no network, no cleanup/uninstall/kill. Persisting a snapshot
+  can never manufacture authorization: `can_authorize_execution` and
+  `candidate_is_authorized` still return `false` for every reloaded model
+  and candidate, asserted by test.
+
+## Verification (local, 2026-10-08, Windows 11 GNU)
+
+- `cargo fmt --all --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  — clean.
+- `cargo test --workspace` and `cargo test --workspace --all-features` —
+  **801 passed, 0 failed** (baseline was 661; +140, including 49 new
+  Phase 6.4 persistence tests: 40 integration + 9 codec).
+- `cargo test --workspace -- --ignored` — all established performance
+  suites green.
+- `npm ci` (0 vulnerabilities) + `npm run build` — green.
+- `git diff --check` — clean.
+
+## Phase 6.4 limitations (honest)
+
+- **Snapshots inherit run retention.** A snapshot is pruned with its run
+  (FK cascade); there is no separate snapshot-retention policy, and no
+  cross-run "latest snapshot for an application" query yet — callers list
+  runs and load the one they need.
+- **`i64::MAX` ceiling on stored counts/sizes.** The store's `INTEGER`
+  columns are signed (the repository-wide convention). A `u64` above
+  `i64::MAX` fails loudly as corruption instead of narrowing. Object
+  identity is unaffected: it persists as bit-patterns, so `u64::MAX`
+  components round-trip.
+- **Evidence is re-clamped, not rejected, when only the strength is
+  over-claimed.** A tampered strength returns at its legitimate ceiling
+  (matching in-memory transport behavior); malformed *shape* (unknown
+  enum, bad group, malformed path) is rejected outright.
+- **Snapshot loads are per-section bounded.** `QueryLimits` caps each of
+  artifacts/applications/evidence/relationships/history independently, so
+  a snapshot larger than the limit loads truncated rather than failing —
+  the repository's existing bounded-query convention.
+- **No runtime platform validation beyond CI.** Phase 6.4 is
+  platform-neutral Rust with synthetic fixtures; real-world macOS/Windows/
+  Linux runtime evidence comes only from the CI jobs.
+- **Destructive execution remains unimplemented.** No GUI, no IPC, no
+  cleanup/uninstall/delete/kill, no subprocess, no network, no package
+  manager. Persisted candidates stay inert and unauthorized.
 
 ## Historical record: Phase 6.1 (2026-10-07)
 

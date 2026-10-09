@@ -26,6 +26,13 @@
 //! - **Bounded, deterministic retention** with the latest baseline kept.
 //! - **Privacy**: historical paths stay in the local store; no network,
 //!   no telemetry, no AI; nothing logs paths.
+//! - **Phase 6.4 snapshot persistence**: canonical application-
+//!   intelligence facts and system-model snapshot *inputs* persist
+//!   normalized per run (schema v5, forward-only, transactional),
+//!   reload strictly (typed corruption, ceiling-clamped evidence,
+//!   lossless paths, full-width identity), and rehydrate through the
+//!   SAME `build_system_model` path — derived indexes/edges/insights/
+//!   candidates are never stored, always rebuilt.
 //!
 //! This layer reports facts and evidence only — no recommendations, no
 //! cleanup, no destructive operations (later phases, per the master plan).
@@ -36,6 +43,8 @@
 pub mod compare;
 pub mod model;
 pub mod path_encoding;
+pub mod snapshot;
+pub mod snapshot_codec;
 pub mod store;
 
 pub use compare::{
@@ -47,6 +56,7 @@ pub use model::{
     ObservedEntry, ObservedKind, RunCounts, RunId, RunRecord, RunStatus, Snapshot, SnapshotBuilder,
 };
 pub use path_encoding::{decode as decode_path, encode as encode_path, PathDecodeError};
+pub use snapshot::{AppSnapshotFact, SnapshotSummary, SystemSnapshotInput};
 pub use store::{
     HistoryStore, PathHistoryPoint, QueryLimits, RetentionPolicy, RetentionReport, StoreError,
 };

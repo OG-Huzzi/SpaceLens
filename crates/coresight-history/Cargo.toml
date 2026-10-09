@@ -18,6 +18,15 @@ coresight-core = { path = "../coresight-core" }
 coresight-engine = { path = "../coresight-engine" }
 coresight-classifier = { path = "../coresight-classifier" }
 coresight-identity = { path = "../coresight-identity" }
+# Phase 6.4: the snapshot boundary persists application-intelligence facts
+# (coresight-apps / coresight-capabilities types) and reconstructs
+# coresight-system-model inputs. Dependency direction stays acyclic: none of
+# those crates depends on coresight-history. coresight-system-model itself
+# gains NO new dependency and stays database-independent (guarded by its own
+# source-scan test).
+coresight-apps = { path = "../coresight-apps" }
+coresight-capabilities = { path = "../coresight-capabilities" }
+coresight-system-model = { path = "../coresight-system-model" }
 
 [dev-dependencies]
 tempfile = "3"

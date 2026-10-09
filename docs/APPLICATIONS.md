@@ -1,9 +1,11 @@
 # Application Intelligence (Phase 6.2)
 
-Status: implemented as an **in-memory**, read-only intelligence layer over the
-Phase 6.1 application foundation. No persistence, no executor, no network, no
-subprocess. This document records the contracts the code actually enforces;
-where a source is only compile-verified on a platform, it says so.
+Status: implemented as a read-only intelligence layer over the Phase 6.1
+application foundation, with Phase 6.4 durable snapshot persistence added
+at the history boundary. This crate remains pure: no I/O, no executor, no
+network, no subprocess, no database code. This document records the
+contracts the code actually enforces; where a source is only
+compile-verified on a platform, it says so.
 
 ```text
 Application
@@ -296,13 +298,18 @@ yields no identity rather than a lossy name.
 
 ## 19. Explicit non-scope
 
-* Application persistence, database tables, snapshots, and migrations:
-  **NOT STARTED**. The model is in-memory only. No schema was changed.
+* Application persistence: **IMPLEMENTED in Phase 6.4** as the normalized
+  `app_snapshot_*` schema (v5) owned by `coresight-history` — see
+  docs/DATABASE.md. This crate itself still performs no I/O and holds no
+  database code; the persistence adapter lives at the history boundary,
+  which serializes the canonical facts this layer produces and reloads
+  them through the same validation. No global "current application"
+  table exists: every application row is scoped to a committed run.
 * GUI work: none added.
 * Phase 6.3: in-memory system model hardening is verified on source commit
   `df2e24c55807032f1bb5f61c088c660fb6587ebd`; all CI jobs passed on run
   [37797444920](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37797444920),
-  attempt 2. Phase 6.4 has NOT STARTED.
+  attempt 2.
 
 ## 20. Cross-target verification performed
 

@@ -154,12 +154,40 @@ phases and are covered by engine tests.
 ## Unified system model (Phase 6.3; internal only)
 
 `coresight-system-model` is a Rust in-memory correlation API, not a `v1`
-command/event or frontend wire contract. Phase 6.3 adds no IPC surface, DB
-schema, or persistence. Its serde form is internal canonical graph data:
+command/event or frontend wire contract. Phase 6.3 adds no IPC surface.
+Its serde form is internal canonical graph data:
 derived indexes are skipped/rebuilt, malformed graph/evidence semantics are
 rejected, and candidate actions are always inert and unauthorized. Paths and
 evidence remain lossless and provenance-bounded; source-specific resolution
 semantics are documented in `docs/SYSTEM_MODEL.md`.
+
+## Application/system snapshots (Phase 6.4; internal only)
+
+Persistence for the system model is a **Rust-side, engine-internal API**
+(`coresight-history`), not a `v1` command/event: still no IPC surface, no
+frontend access, and the frontend never opens the DB (docs/DATABASE.md).
+
+The API is typed and bounded, and returns domain facts — never SQLite
+rows:
+
+```text
+commit_system_snapshot(run_id, input, app_facts, inventory, footprint)
+has_system_snapshot(run_id) -> bool
+list_system_snapshots(limits) -> [SnapshotSummary]
+load_system_snapshot(run_id, limits) -> Option<SystemSnapshotInput>
+load_snapshot_applications(run_id, limits) -> Option<[ApplicationRecord]>
+rebuild_system_model(run_id, limits, model_limits) -> Option<SystemModel>
+```
+
+Semantics: `None` means no snapshot was recorded for that run — absence,
+never an empty snapshot. Every load is per-run and capped by
+`QueryLimits`; commit is one transaction and re-committing a run is
+idempotent. Stored evidence is re-clamped to the Phase 6.2 ceilings on
+reload, application ids are re-verified against normalized
+`(name, publisher)`, and the rebuilt model passes the same
+`check_invariants` as a fresh build. Errors are `StoreError`
+(`Corrupt { table, column, run_id, detail }`, `SchemaTooNew`,
+`UnknownRun`, …) — never a defaulted value.
 
 ## Rules for evolution
 

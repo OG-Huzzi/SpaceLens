@@ -78,15 +78,21 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   hash time), and a scan→open mtime bracket.
 - `history` — the Phase 5 system-memory layer: persisted run records +
   normalized snapshots (SQLite via the existing core schema, forward-only
-  migrations v1–v4: history tables, full 128-bit object identity +
-  lossless tagged paths, persisted relationship-report status), a PURE
+  migrations v1–v5: history tables, full 128-bit object identity +
+  lossless tagged paths, persisted relationship-report status, and the
+  Phase 6.4 `app_snapshot_*` application/system snapshot tables), a PURE
   comparison engine deriving typed evidence-backed change events
   (incomplete-scan safe: partial runs never fake deletions; scope
   boundaries enforced; configuration fingerprints preserved; event ids
   content-addressed over LOSSLESS path encodings), a query API
-  (path/object/content/relationship history) with strict corruption
+  (path/object/content/relationship history plus per-run snapshot
+  commit/load/list/rebuild) with strict corruption
   rejection and newer-schema refusal, deterministic bounded retention,
   and crash recovery (`crates/coresight-history`, docs/HISTORY.md).
+  Phase 6.4's persistence boundary is explicit: canonical facts are
+  stored as normalized columns, derived model state is never stored, and
+  reload rehydrates through the same `build_system_model` path
+  (docs/DATABASE.md, docs/SYSTEM_MODEL.md §16).
 - `applications` — the Phase 6 application-intelligence layer, deepened in
   Phase 6.2. A platform-neutral application domain (stable content-derived
   `ApplicationId` over normalized `(name, publisher)` — source is provenance,
@@ -122,7 +128,9 @@ SQLite (rusqlite, WAL; scans, entries, hashes, snapshots, ops log)
   (`crates/coresight-macos`; never modifies anything, never bypasses TCC).
   See docs/MACOS_ARCHITECTURE.md.
 - `system-model` — the Phase 6.3 unified, in-memory system model, independently
-  hardened and verified on commit `df2e24c`; Phase 6.4 has not started.
+  hardened and verified on commit `df2e24c`. Phase 6.4 made its **snapshot
+  inputs durable** without touching the crate: persistence lives at the
+  history boundary (schema v5), and reload feeds the same builder.
   A pure, deterministic, bounded correlation
   of filesystem observations, canonical object identity, classification
   (copied, never re-derived), identity relationships, Phase 6.2 application

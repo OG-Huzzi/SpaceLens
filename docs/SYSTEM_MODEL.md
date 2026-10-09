@@ -1,15 +1,27 @@
-# CoreSight System Model (Phase 6.3, hardened)
+# CoreSight System Model (Phase 6.3 hardened; Phase 6.4 persistent)
 
-Status: implemented as an **in-memory, read-only** correlation layer over
-the Phase 6.1/6.2 subsystems. Independent hardening is in progress; this is
-not yet the final VERIFIED gate. Current hardening includes private canonical
-storage, canonical-only deserialization, bidirectional index invariants,
-bounded correlation and source summaries, truncation-aware association
-status, validated relationship proofs, deterministic duplicate resolution,
-node-attached history, source-specific install-root/executable provenance,
-evidence ceilings at aggregation and deserialization, strict lossless path
-handling, and candidate-level executable confidence. No executor,
-network, persistence, subprocess, or filesystem mutation.
+Status: implemented as a **pure, deterministic, bounded, read-only**
+correlation layer over the Phase 6.1/6.2 subsystems, with Phase 6.4
+**durable snapshot persistence** layered OUTSIDE the crate. Phase 6.3
+hardening is VERIFIED (source commit `df2e24c`, exact-SHA CI run
+37797444920, all four jobs green). The verified hardening includes
+private canonical storage, canonical-only deserialization, bidirectional
+index invariants, bounded correlation and source summaries,
+truncation-aware association status, validated relationship proofs,
+deterministic duplicate resolution, node-attached history, source-specific
+install-root/executable provenance, evidence ceilings at aggregation and
+deserialization, strict lossless path handling, and candidate-level
+executable confidence.
+
+Phase 6.4 adds **no line of persistence code to this crate**: it stays
+pure, platform-neutral, and database-independent (§16, §17). Storage of
+canonical application-intelligence facts and system-model snapshot
+*inputs* lives in the persistence boundary
+(`coresight-history`, schema v5 — see docs/DATABASE.md and
+docs/HISTORY.md), and reload feeds the SAME `build_system_model` /
+`finalize` / `check_invariants` path as a fresh build. No executor,
+network, subprocess, or filesystem mutation exists anywhere in this
+crate.
 
 ```text
 Observation
@@ -338,21 +350,89 @@ anywhere in the crate.
 ## 16. Persistence boundary
 
 ```text
-Application persistence NOT STARTED
-System-model persistence NOT STARTED
-Database schema NOT changed
+Application/system snapshot persistence  IMPLEMENTED (Phase 6.4, schema v5)
+Owned by                                 coresight-history (NOT this crate)
+This crate's database dependency         NONE (guarded by source-scan test)
 ```
 
-The model is `Serialize`/`Deserialize`-capable for testing/transport only.
-The wire form carries canonical data ONLY: indexes are `#[serde(skip)]`
-(never serialized) and never read back — deserialization validates
-canonical ordering and structural invariants (ordering, key uniqueness,
-edge-endpoint existence, assertion targets) and then REBUILDS every index
-through the same `finalize` route, running the full bidirectional
-`check_invariants` before returning. A legacy `indexes` section in an older
-payload is ignored: two payloads differing only in derived indexes
-reconstruct the identical canonical index set, and malformed indexes can
-never poison the model. Nothing is persisted.
+The model is `Serialize`/`Deserialize`-capable. The wire form carries
+canonical data ONLY: indexes are `#[serde(skip)]` (never serialized) and
+never read back — deserialization validates canonical ordering and
+structural invariants (ordering, key uniqueness, edge-endpoint existence,
+assertion targets) and then REBUILDS every index through the same
+`finalize` route, running the full bidirectional `check_invariants`
+before returning. A legacy `indexes` section in an older payload is
+ignored: two payloads differing only in derived indexes reconstruct the
+identical canonical index set, and malformed indexes can never poison the
+model.
+
+### What Phase 6.4 persists (canonical facts only)
+
+```text
+artifact facts      path (lossless), kind, object identity (full width),
+                    verified digest, size, access state, classification
+application facts   the full ApplicationRecord (id, name, publisher,
+                    version, install location, install date, size,
+                    uninstall/modify strings, source, kind,
+                    system-component flag, bundle identifier,
+                    executable path), unioned provenance, raw views
+install roots       per application, canonically ordered
+ownership evidence  kind, source, strength, correlation group, scope,
+                    observed path, matched attribute/value/path
+footprint           candidate path/kind/confidence + footprint evidence
+relationship facts  kind, proven object identity, proven digest, members
+history facts       (run, path, identity, category) as QUOTED CONTEXT
+source coverage     per-source status + note (honest, never an empty
+                    success)
+truncation          inventory/footprint counters, preserved exactly
+```
+
+Every row carries its `run_id`, so snapshot knowledge is per-run history —
+never globally mutable "current" state.
+
+### What is NOT persisted (rebuilt or never stored)
+
+```text
+derived           node/edge collections, every index (artifact→key,
+                  key→object/content/category, application→artifacts,
+                  edge adjacency), claim assessments, application
+                  resolution states, insights, candidates, query results
+ephemeral         UI state, process handles, in-flight jobs, scan
+                  progress, executor state (none exists)
+inert             candidate authorization, "safe to delete" readings,
+                  safety-gate verdicts — none of these exist in the crate,
+                  and persisting a snapshot can never create one
+```
+
+### Reconstruction path (one canonical route)
+
+```text
+app_snapshot_* rows
+   ↓  strict decode: lossless paths, full-width identity,
+      ceiling-clamped evidence, id re-verified against (name, publisher)
+validated SystemModelInput
+   ↓  the SAME pure builder
+build_system_model() → finalize() → check_invariants()
+```
+
+There is deliberately **no `load_from_db()` inside this crate**, and no
+second construction route anywhere: the persistence layer returns
+*inputs*, and both a fresh build and a database reload end at the same
+builder. Round-trip equality is asserted over observable canonical
+semantics (artifacts, applications, edges, evidence, provenance,
+relationships, historical context/assertions, truncation, insights,
+candidate facts, ordering) — never over private index internals.
+
+### Evidence and identity cannot be inflated by the database
+
+A stored strength is re-clamped through `OwnershipEvidence::new` on
+reload, so a tampered `DIRECT` claim on a weak-kind/weak-group item
+returns as `Weak`; an application id that no longer matches normalized
+`(name, publisher)` is a typed corruption error, not a second identity.
+Truncation, source-unsupported/unavailable/failed, and access-state
+distinctions survive verbatim — persistence can never turn incomplete
+knowledge into `Unassociated`, `Orphan`, `Complete`, `Resolved`, or
+`Safe`. See docs/DATABASE.md §"Phase 6.4" for the full storage contract.
 
 ## 17. Platform support
 

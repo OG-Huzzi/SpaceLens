@@ -136,8 +136,11 @@ impl From<crate::model::BuildError> for StoreError {
 /// (Phase 5.1) widens object identity with `file_id_hi` and tags every
 /// persisted path with its storage encoding; v4 persists each run's
 /// relationship-report status/truncation so a reloaded run can never
-/// claim a relationship completeness it never had.
-pub const HISTORY_SCHEMA_VERSION: u32 = 4;
+/// claim a relationship completeness it never had; v5 (Phase 6.4) adds
+/// the normalized application/system snapshot tables
+/// (`app_snapshot_*`) so canonical application-intelligence facts and
+/// system-model inputs survive a reload deterministically.
+pub const HISTORY_SCHEMA_VERSION: u32 = 5;
 
 /// Forward-only migration: v1 (core bootstrap) → v2 (history tables).
 const MIGRATION_V2: &str = "
@@ -245,10 +248,200 @@ ALTER TABLE scan_runs ADD COLUMN rel_status TEXT;
 ALTER TABLE scan_runs ADD COLUMN rel_truncated INTEGER;
 ";
 
+/// Forward-only migration: v4 → v5 (Phase 6.4). Adds the normalized
+/// application/system snapshot tables (`app_snapshot_*`).
+///
+/// Design notes (see [`crate::snapshot`] for the persistence boundary):
+///
+/// - Every snapshot row carries its `run_id`: snapshot knowledge is
+///   per-run history, never globally mutable "current" state. All child
+///   rows reference `scan_runs(run_id) ON DELETE CASCADE`, so retention
+///   prunes snapshots together with their runs — one coherent memory.
+/// - No JSON blobs: every domain fact (application fields, provenance,
+///   install roots, evidence columns, coverage, relationships, footprints)
+///   is its own column, individually queryable and strictly decodable.
+/// - Ordinal columns (`fact_ord`, `artifact_ord`, …) are stable row join
+///   keys, never semantics: the builder's inputs are MULTISETS (duplicate
+///   facts merge commutatively), so verbatim facts — including duplicates
+///   — persist under ordinals assigned after a canonical sort. Reload
+///   re-sorts canonically, so ordinal VALUES never affect the model.
+/// - No derived state: edges, indexes, insights, candidates, and
+///   authorization are NOT stored — they are rebuilt by the canonical
+///   builder on reload.
+/// - `CREATE TABLE IF NOT EXISTS` matches the existing migration
+///   convention (safe re-entry within the gating transaction).
+const MIGRATION_V5: &str = "
+CREATE TABLE IF NOT EXISTS app_snapshot_meta (
+    run_id TEXT PRIMARY KEY REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    records_truncated INTEGER NOT NULL,
+    records_rejected INTEGER NOT NULL,
+    fp_candidates_truncated INTEGER NOT NULL,
+    fp_children_truncated INTEGER NOT NULL,
+    fp_apps_truncated INTEGER NOT NULL,
+    fp_evidence_truncated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_artifacts (
+    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    artifact_ord INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    size INTEGER,
+    device INTEGER,
+    inode INTEGER,
+    file_id_hi INTEGER,
+    content_sha256 TEXT,
+    access TEXT NOT NULL,
+    category TEXT,
+    subcategory TEXT,
+    confidence TEXT,
+    PRIMARY KEY (run_id, artifact_ord)
+);
+CREATE INDEX IF NOT EXISTS idx_app_snap_artifacts_path ON app_snapshot_artifacts(run_id, path);
+CREATE TABLE IF NOT EXISTS app_snapshot_apps (
+    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL,
+    fact_ord INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT,
+    publisher TEXT,
+    install_location TEXT,
+    install_date TEXT,
+    estimated_size INTEGER,
+    uninstall_string TEXT,
+    quiet_uninstall_string TEXT,
+    modify_path TEXT,
+    install_source TEXT,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    system_component INTEGER NOT NULL,
+    bundle_identifier TEXT,
+    executable_path TEXT,
+    executable_candidate TEXT,
+    PRIMARY KEY (run_id, app_id, fact_ord)
+);
+CREATE INDEX IF NOT EXISTS idx_app_snap_apps_id ON app_snapshot_apps(run_id, app_id);
+CREATE TABLE IF NOT EXISTS app_snapshot_provenance (
+    run_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    fact_ord INTEGER NOT NULL,
+    prov_ord INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (run_id, app_id, fact_ord, prov_ord),
+    FOREIGN KEY (run_id, app_id, fact_ord)
+        REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_views (
+    run_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    fact_ord INTEGER NOT NULL,
+    view_ord INTEGER NOT NULL,
+    view TEXT NOT NULL,
+    PRIMARY KEY (run_id, app_id, fact_ord, view_ord),
+    FOREIGN KEY (run_id, app_id, fact_ord)
+        REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_roots (
+    run_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    fact_ord INTEGER NOT NULL,
+    root_ord INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    PRIMARY KEY (run_id, app_id, fact_ord, root_ord),
+    FOREIGN KEY (run_id, app_id, fact_ord)
+        REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_evidence (
+    run_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    fact_ord INTEGER NOT NULL,
+    artifact_path TEXT NOT NULL,
+    evidence_ord INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    strength TEXT NOT NULL,
+    group_tag TEXT NOT NULL,
+    group_source TEXT,
+    scope TEXT NOT NULL,
+    observed_path TEXT NOT NULL,
+    matched_attribute TEXT NOT NULL,
+    matched_value TEXT,
+    matched_path TEXT,
+    PRIMARY KEY (run_id, app_id, fact_ord, artifact_path, evidence_ord),
+    FOREIGN KEY (run_id, app_id, fact_ord)
+        REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_coverage (
+    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    coverage_ord INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY (run_id, coverage_ord)
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_relationships (
+    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    rel_ord INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    object_device INTEGER,
+    object_inode INTEGER,
+    object_hi INTEGER,
+    content_sha256 TEXT,
+    PRIMARY KEY (run_id, rel_ord)
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_rel_members (
+    run_id TEXT NOT NULL,
+    rel_ord INTEGER NOT NULL,
+    member_ord INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    PRIMARY KEY (run_id, rel_ord, member_ord),
+    FOREIGN KEY (run_id, rel_ord)
+        REFERENCES app_snapshot_relationships(run_id, rel_ord) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_history (
+    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    hist_ord INTEGER NOT NULL,
+    hist_run_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    device INTEGER,
+    inode INTEGER,
+    file_id_hi INTEGER,
+    category TEXT,
+    PRIMARY KEY (run_id, hist_ord)
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_footprints (
+    run_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    fact_ord INTEGER NOT NULL,
+    footprint_ord INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    PRIMARY KEY (run_id, app_id, fact_ord, footprint_ord),
+    FOREIGN KEY (run_id, app_id, fact_ord)
+        REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS app_snapshot_footprint_evidence (
+    run_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    fact_ord INTEGER NOT NULL,
+    footprint_ord INTEGER NOT NULL,
+    evidence_ord INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    source TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    why TEXT NOT NULL,
+    PRIMARY KEY (run_id, app_id, fact_ord, footprint_ord, evidence_ord),
+    FOREIGN KEY (run_id, app_id, fact_ord, footprint_ord)
+        REFERENCES app_snapshot_footprints(run_id, app_id, fact_ord, footprint_ord)
+        ON DELETE CASCADE
+);
+";
+
 /// A live history store. Wraps the rusqlite connection; all mutating
 /// operations are transactional.
 pub struct HistoryStore {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl HistoryStore {
@@ -310,6 +503,12 @@ impl HistoryStore {
             let tx = conn.transaction()?;
             tx.execute_batch(MIGRATION_V4)?;
             tx.execute("UPDATE schema_version SET version = 4", params![])?;
+            tx.commit()?;
+        }
+        if current < 5 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATION_V5)?;
+            tx.execute("UPDATE schema_version SET version = 5", params![])?;
             tx.commit()?;
         }
         let store = HistoryStore { conn };
