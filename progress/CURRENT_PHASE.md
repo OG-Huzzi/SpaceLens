@@ -146,12 +146,20 @@ the branch:
 | `aaff0a3bb16701f9c0b19327911fa358ade08a77` | Phase 6.4 implementation | [37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329) | all 4 jobs success |
 | `5b18ef32b59d426bb18914e2ae081c4944b4db60` | parallel-facts contract | [37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961) | all 4 jobs success |
 | `1725465f48dac322a490c2905c557cbf9d1710fd` | verification record | [37939190779](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37939190779) | all 4 jobs success |
-| `c8223d5fe2d3fbb98ac371175412c033fbc4a59a` | bounded-load honesty + perf suite (**final**) | [37953360824](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37953360824) | all 4 jobs success |
+| `c8223d5fe2d3fbb98ac371175412c033fbc4a59a` | bounded-load honesty + persistence perf suite (**code frozen here**) | [37953360824](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37953360824) | all 4 jobs success |
+| `61b3ad8de4af5fa84085129226c152f8f8eb4d6f` | verification record | [37955117327](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37955117327) | all 4 jobs success |
+| `6f1f1d3ca8729b6fe42816aa2d95fa67690beadf` | capability-state note (docs) | [37956977056](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37956977056) | all 4 jobs success |
 
 Every run reported `frontend`, `rust (ubuntu-latest)`,
 `rust (windows-latest)`, and `rust (macos-latest)` as **success** on
 attempt 1. No runner-infrastructure failure occurred, so no retry was
 needed and no source change was ever made to work around a failure.
+
+**Phase 6.4's code is frozen at `c8223d5fe2d3fbb98ac371175412c033fbc4a59a`.**
+Every later commit in this phase is documentation-only, and each was still
+run through the full CI gate on its own SHA (rows above). A documentation-
+only commit made after this record is covered by the same statement: it
+contains no code, and the gate it must pass is unchanged.
 
 ## Phase 6.4 limitations (honest)
 
