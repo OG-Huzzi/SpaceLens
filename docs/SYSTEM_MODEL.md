@@ -396,7 +396,12 @@ never globally mutable "current" state.
 derived           node/edge collections, every index (artifact→key,
                   key→object/content/category, application→artifacts,
                   edge adjacency), claim assessments, application
-                  resolution states, insights, candidates, query results
+                  resolution states, insights, candidates, query results,
+                  and capability state — the capability table is re-read
+                  verbatim from the pinned `CONTRACTS` registry on every
+                  build, so no `Observation<T>` payload is ever stored and
+                  an unsupported/unavailable/failed capability can never
+                  come back as an observed empty one
 ephemeral         UI state, process handles, in-flight jobs, scan
                   progress, executor state (none exists)
 inert             candidate authorization, "safe to delete" readings,
