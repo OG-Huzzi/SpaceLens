@@ -134,27 +134,27 @@ impl HistoryStore {
         inventory: &Inventory,
         footprint: &FootprintReport,
     ) -> Result<(), StoreError> {
-        // Fail closed on internal inconsistency: app facts must reference
-        // the same logical set the input carries (same multiset of
-        // record-ids). The input is what the model builds; the app facts
-        // carry the same records plus footprints.
-        {
-            let mut a: Vec<&str> = input
+        // Fail closed on internal inconsistency: the two vectors must be
+        // PARALLEL — same length, and the same logical application at each
+        // index. The model is built from `input` (which carries the
+        // evidence the model consumes); `app_facts` carries the same
+        // records plus the footprint candidates. Anything else would let a
+        // footprint attach to the wrong application, so it is rejected
+        // before the transaction opens.
+        if input.applications.len() != app_facts.len()
+            || input
                 .applications
                 .iter()
-                .map(|f| f.record.id.0.as_str())
-                .collect();
-            let mut b: Vec<&str> = app_facts.iter().map(|f| f.record.id.0.as_str()).collect();
-            a.sort();
-            b.sort();
-            if a != b {
-                return Err(StoreError::Corrupt {
-                    table: "app_snapshot_apps",
-                    column: "app_id",
-                    run_id: Some(run_id.0.clone()),
-                    detail: "application facts do not match the committed model input".to_string(),
-                });
-            }
+                .zip(app_facts.iter())
+                .any(|(i, f)| i.record.id.0 != f.record.id.0)
+        {
+            return Err(StoreError::Corrupt {
+                table: "app_snapshot_apps",
+                column: "app_id",
+                run_id: Some(run_id.0.clone()),
+                detail: "application facts are not parallel to the committed model input"
+                    .to_string(),
+            });
         }
         let conn = &mut self.conn;
         let tx = conn.transaction()?;

@@ -2025,6 +2025,67 @@ fn persisted_direct_claim_cannot_exceed_its_group_ceiling() {
 }
 
 // ---------------------------------------------------------------------------
+// commit contract: parallel application facts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_parallel_application_facts_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("non-parallel.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    let snap = rich_snapshot();
+    let record = run_record("non-parallel-run", 1);
+    store.begin_run(&record).unwrap();
+
+    // Same fact SET, but the two vectors disagree at index 0, so a
+    // footprint would attach to the wrong application. The commit must
+    // fail closed rather than persisting a mis-attributed snapshot.
+    let mut swapped = snap.app_facts.clone();
+    swapped.swap(0, 1);
+    let err = store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &swapped,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .expect_err("non-parallel application facts must be rejected");
+    assert_corrupt(&err, "app_snapshot_apps", "app_id");
+
+    // Nothing was written: the rejected commit left no partial snapshot.
+    assert!(!store.has_system_snapshot(&record.run_id).unwrap());
+
+    // A length mismatch is likewise refused.
+    let mut short = snap.app_facts.clone();
+    short.pop();
+    let err = store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &short,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .expect_err("a length mismatch must be rejected");
+    assert_corrupt(&err, "app_snapshot_apps", "app_id");
+    assert!(!store.has_system_snapshot(&record.run_id).unwrap());
+
+    // The correct pairing still commits.
+    store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &snap.app_facts,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .unwrap();
+    assert!(store.has_system_snapshot(&record.run_id).unwrap());
+}
+
+// ---------------------------------------------------------------------------
 // boundedness tests
 // ---------------------------------------------------------------------------
 
