@@ -182,12 +182,16 @@ rebuild_system_model(run_id, limits, model_limits) -> Option<SystemModel>
 Semantics: `None` means no snapshot was recorded for that run — absence,
 never an empty snapshot. Every load is per-run and capped by
 `QueryLimits`; commit is one transaction and re-committing a run is
-idempotent. Stored evidence is re-clamped to the Phase 6.2 ceilings on
+idempotent. A capped load is REPORTED
+(`is_load_truncated()` / `load_truncated_sections`), and
+`rebuild_system_model` fails closed with `StoreError::SnapshotBounded`
+rather than building a model from a prefix of the stored facts. Stored
+evidence is re-clamped to the Phase 6.2 ceilings on
 reload, application ids are re-verified against normalized
 `(name, publisher)`, and the rebuilt model passes the same
 `check_invariants` as a fresh build. Errors are `StoreError`
-(`Corrupt { table, column, run_id, detail }`, `SchemaTooNew`,
-`UnknownRun`, …) — never a defaulted value.
+(`Corrupt { table, column, run_id, detail }`, `SnapshotBounded`,
+`SchemaTooNew`, `UnknownRun`, …) — never a defaulted value.
 
 ## Rules for evolution
 

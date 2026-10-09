@@ -100,6 +100,20 @@ pub struct SystemSnapshotInput {
     pub records_truncated: u64,
     pub records_rejected: u64,
     pub footprint: FootprintReport,
+    /// Section names whose load hit the caller's `QueryLimits` cap. A
+    /// NON-EMPTY list means the returned facts are a bounded PREFIX, not
+    /// the whole snapshot — so the input must never be mistaken for
+    /// complete, and [`HistoryStore::rebuild_system_model`] refuses it.
+    pub load_truncated_sections: Vec<&'static str>,
+}
+
+impl SystemSnapshotInput {
+    /// True when the caller's bound cut the fact set short. Bounded
+    /// knowledge is never complete knowledge: a caller that sees this
+    /// must raise its limit or report incompleteness.
+    pub fn is_load_truncated(&self) -> bool {
+        !self.load_truncated_sections.is_empty()
+    }
 }
 
 /// The per-run snapshot presence: `None` = no snapshot was committed
@@ -695,15 +709,18 @@ impl HistoryStore {
         )?;
 
         // ---- Artifacts. ----
-        let artifacts = self.load_snapshot_artifacts(run_id, limits, &run_tag)?;
+        let mut caps = LoadCaps::default();
+        let artifacts = self.load_snapshot_artifacts(run_id, limits, &run_tag, &mut caps)?;
         // ---- Applications (+ children grouped by (app_id, fact_ord)). ----
-        let (app_facts, applications) = self.load_snapshot_apps(run_id, limits, &run_tag)?;
+        let (app_facts, applications) =
+            self.load_snapshot_apps(run_id, limits, &run_tag, &mut caps)?;
         // ---- Coverage. ----
-        let source_coverage = self.load_snapshot_coverage(run_id, limits, &run_tag)?;
+        let source_coverage = self.load_snapshot_coverage(run_id, limits, &run_tag, &mut caps)?;
         // ---- Relationships. ----
-        let relationships = self.load_snapshot_relationships(run_id, limits, &run_tag)?;
+        let relationships =
+            self.load_snapshot_relationships(run_id, limits, &run_tag, &mut caps)?;
         // ---- History. ----
-        let history = self.load_snapshot_history(run_id, limits, &run_tag)?;
+        let history = self.load_snapshot_history(run_id, limits, &run_tag, &mut caps)?;
 
         let footprint_candidates = flatten_footprints(&app_facts);
         Ok(Some(SystemSnapshotInput {
@@ -724,6 +741,7 @@ impl HistoryStore {
                 apps_truncated: fp_apps_truncated,
                 evidence_truncated: fp_evidence_truncated,
             },
+            load_truncated_sections: caps.into_sections(),
         }))
     }
 
@@ -756,6 +774,19 @@ impl HistoryStore {
         let Some(loaded) = self.load_system_snapshot(run_id, limits)? else {
             return Ok(None);
         };
+        // Fail closed on a bounded load: a model built from a PREFIX of the
+        // stored facts would understate what the run observed — it could
+        // drop claimants, edges and history context and then present the
+        // remainder as the whole truth. Incomplete knowledge must never be
+        // silently upgraded to a complete-looking model, so the caller is
+        // told to raise its limit instead.
+        if loaded.is_load_truncated() {
+            return Err(StoreError::SnapshotBounded {
+                run_id: run_id.0.clone(),
+                sections: loaded.load_truncated_sections,
+                limit: limits.max_results,
+            });
+        }
         let model = coresight_system_model::build_system_model(&loaded.input, model_limits);
         model
             .check_invariants()
@@ -775,6 +806,7 @@ impl HistoryStore {
         run_id: &RunId,
         limits: &QueryLimits,
         run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<Vec<ArtifactFact>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT path, kind, size, device, inode, file_id_hi, content_sha256,
@@ -782,7 +814,7 @@ impl HistoryStore {
              FROM app_snapshot_artifacts WHERE run_id = ?1
              ORDER BY artifact_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, limits.max_results as i64], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -864,7 +896,7 @@ impl HistoryStore {
                 classification,
             });
         }
-        Ok(out)
+        Ok(enforce_cap("artifacts", limits.max_results, out, caps))
     }
 
     #[allow(clippy::type_complexity)]
@@ -873,6 +905,7 @@ impl HistoryStore {
         run_id: &RunId,
         limits: &QueryLimits,
         run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<(Vec<AppSnapshotFact>, Vec<ApplicationFact>), StoreError> {
         // App rows in canonical commit order (fact_ord), capped.
         let mut stmt = self.conn.prepare(
@@ -883,7 +916,7 @@ impl HistoryStore {
              FROM app_snapshot_apps WHERE run_id = ?1
              ORDER BY fact_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, limits.max_results as i64], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
             Ok(AppRow {
                 app_id: r.get(0)?,
                 fact_ord: r.get(1)?,
@@ -988,9 +1021,15 @@ impl HistoryStore {
                 })
                 .transpose()?;
             let associations =
-                self.load_snapshot_evidence(run_id, &record.id.0, fact_ord, limits, run_tag)?;
-            let footprints =
-                self.load_snapshot_footprints(run_id, &record.id.0, fact_ord, limits, run_tag)?;
+                self.load_snapshot_evidence(run_id, &record.id.0, fact_ord, limits, run_tag, caps)?;
+            let footprints = self.load_snapshot_footprints(
+                run_id,
+                &record.id.0,
+                fact_ord,
+                limits,
+                run_tag,
+                caps,
+            )?;
             // Provenance union across duplicate records under one id is a
             // BUILDER rule (commutative merge); reloaded facts keep their
             // per-fact provenance verbatim — the builder reunites them.
@@ -1008,7 +1047,10 @@ impl HistoryStore {
                 associations,
             });
         }
-        Ok((app_facts, applications))
+        Ok((
+            enforce_cap("applications", limits.max_results, app_facts, caps),
+            enforce_cap("applications", limits.max_results, applications, caps),
+        ))
     }
 
     /// Ordered child strings of one application fact, read from a
@@ -1039,7 +1081,7 @@ impl HistoryStore {
             .map_err(|e| corrupt(table, column, run_tag, format!("query failed: {e}")))?;
         let rows = stmt
             .query_map(
-                params![run_id.0, app_id, fact_ord, limits.max_results as i64],
+                params![run_id.0, app_id, fact_ord, probe_limit(limits)],
                 |r| r.get::<_, String>(0),
             )
             .map_err(|e| corrupt(table, column, run_tag, format!("query failed: {e}")))?;
@@ -1061,6 +1103,7 @@ impl HistoryStore {
         fact_ord: i64,
         limits: &QueryLimits,
         run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<Vec<(PathBuf, OwnershipEvidence)>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT artifact_path, evidence_ord, kind, source, strength, group_tag,
@@ -1084,7 +1127,7 @@ impl HistoryStore {
             matched_path: Option<String>,
         }
         let rows = stmt.query_map(
-            params![run_id.0, app_id, fact_ord, limits.max_results as i64],
+            params![run_id.0, app_id, fact_ord, probe_limit(limits)],
             |r| {
                 // Column order must match the SELECT list exactly:
                 // artifact_path, evidence_ord, kind, source, strength,
@@ -1169,7 +1212,7 @@ impl HistoryStore {
             }
             out.push((artifact_path, evidence));
         }
-        Ok(out)
+        Ok(enforce_cap("evidence", limits.max_results, out, caps))
     }
 
     fn load_snapshot_footprints(
@@ -1179,6 +1222,7 @@ impl HistoryStore {
         fact_ord: i64,
         limits: &QueryLimits,
         run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<Vec<FootprintCandidate>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT footprint_ord, path, kind, confidence
@@ -1187,7 +1231,7 @@ impl HistoryStore {
              ORDER BY footprint_ord LIMIT ?4",
         )?;
         let rows = stmt.query_map(
-            params![run_id.0, app_id, fact_ord, limits.max_results as i64],
+            params![run_id.0, app_id, fact_ord, probe_limit(limits)],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -1218,13 +1262,7 @@ impl HistoryStore {
                  ORDER BY evidence_ord LIMIT ?5",
             )?;
             let ev_rows = ev_stmt.query_map(
-                params![
-                    run_id.0,
-                    app_id,
-                    fact_ord,
-                    fp_ord,
-                    limits.max_results as i64
-                ],
+                params![run_id.0, app_id, fact_ord, fp_ord, probe_limit(limits)],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -1270,6 +1308,7 @@ impl HistoryStore {
                     why,
                 });
             }
+            let evidence = enforce_cap("footprint_evidence", limits.max_results, evidence, caps);
             out.push(FootprintCandidate {
                 path,
                 app: ApplicationId(app_id.to_string()),
@@ -1278,7 +1317,7 @@ impl HistoryStore {
                 evidence,
             });
         }
-        Ok(out)
+        Ok(enforce_cap("footprints", limits.max_results, out, caps))
     }
 
     fn load_snapshot_coverage(
@@ -1286,12 +1325,13 @@ impl HistoryStore {
         run_id: &RunId,
         limits: &QueryLimits,
         run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<Vec<SourceCoverage>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT source, status, note FROM app_snapshot_coverage
              WHERE run_id = ?1 ORDER BY coverage_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, limits.max_results as i64], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1317,7 +1357,12 @@ impl HistoryStore {
                 note,
             });
         }
-        Ok(out)
+        Ok(enforce_cap(
+            "source_coverage",
+            limits.max_results,
+            out,
+            caps,
+        ))
     }
 
     fn load_snapshot_relationships(
@@ -1325,13 +1370,14 @@ impl HistoryStore {
         run_id: &RunId,
         limits: &QueryLimits,
         run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<Vec<RelationshipFact>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT rel_ord, kind, object_device, object_inode, object_hi, content_sha256
              FROM app_snapshot_relationships WHERE run_id = ?1
              ORDER BY rel_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, limits.max_results as i64], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
             Ok(RelationshipRow {
                 rel_ord: r.get(0)?,
                 kind: r.get(1)?,
@@ -1371,7 +1417,7 @@ impl HistoryStore {
                  ORDER BY member_ord LIMIT ?3",
             )?;
             let mem_rows = mem_stmt
-                .query_map(params![run_id.0, rel_ord, limits.max_results as i64], |r| {
+                .query_map(params![run_id.0, rel_ord, probe_limit(limits)], |r| {
                     r.get::<_, String>(0)
                 })?;
             let mut paths = Vec::new();
@@ -1383,6 +1429,7 @@ impl HistoryStore {
                     run_tag,
                 )?);
             }
+            let paths = enforce_cap("relationship_members", limits.max_results, paths, caps);
             out.push(RelationshipFact {
                 kind,
                 paths,
@@ -1390,7 +1437,7 @@ impl HistoryStore {
                 content_sha256: digest,
             });
         }
-        Ok(out)
+        Ok(enforce_cap("relationships", limits.max_results, out, caps))
     }
 
     fn load_snapshot_history(
@@ -1398,13 +1445,14 @@ impl HistoryStore {
         run_id: &RunId,
         limits: &QueryLimits,
         run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<Vec<HistoryFact>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT hist_run_id, path, device, inode, file_id_hi, category
              FROM app_snapshot_history WHERE run_id = ?1
              ORDER BY hist_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, limits.max_results as i64], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1435,7 +1483,7 @@ impl HistoryStore {
                 category,
             });
         }
-        Ok(out)
+        Ok(enforce_cap("history", limits.max_results, out, caps))
     }
 }
 
@@ -1644,6 +1692,48 @@ struct ChildStrings {
     table: &'static str,
     column: &'static str,
     ord_column: &'static str,
+}
+
+/// Names of the snapshot sections whose load hit the caller's cap.
+///
+/// Bounded loading is a *fact about the read*, and it must never be
+/// silent: a capped section means the returned facts are a prefix, and a
+/// model built from a prefix would understate what the run observed. The
+/// loader records every capped section here so callers (and
+/// `rebuild_system_model`) can refuse to treat partial facts as complete.
+#[derive(Debug, Default)]
+struct LoadCaps(Vec<&'static str>);
+
+impl LoadCaps {
+    fn note(&mut self, section: &'static str) {
+        if !self.0.contains(&section) {
+            self.0.push(section);
+        }
+    }
+
+    fn into_sections(self) -> Vec<&'static str> {
+        self.0
+    }
+}
+
+/// Detect (and record) a cap hit: rows are fetched with `LIMIT limit + 1`,
+/// so `len > limit` proves the section was cut short — exact, not guessed.
+fn enforce_cap<T>(
+    section: &'static str,
+    limit: usize,
+    mut rows: Vec<T>,
+    caps: &mut LoadCaps,
+) -> Vec<T> {
+    if rows.len() > limit {
+        rows.truncate(limit);
+        caps.note(section);
+    }
+    rows
+}
+
+/// The `LIMIT` value that makes a cap hit provable.
+fn probe_limit(limits: &QueryLimits) -> i64 {
+    limits.max_results.saturating_add(1) as i64
 }
 
 /// One persisted relationship fact row (the identity-engine proof, as

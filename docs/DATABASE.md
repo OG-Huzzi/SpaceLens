@@ -86,7 +86,17 @@ rejected, so persistence never introduces a second identity definition.
 **Boundedness.** Every load is `WHERE run_id = ?` with an explicit
 canonical `ORDER BY` and a `QueryLimits` cap per section; unrelated runs
 are never materialized. Bulk insert uses prepared statements inside the
-commit transaction.
+commit transaction. A cap hit is **detected exactly** (rows are fetched
+with `LIMIT limit + 1`) and **reported**, never silent: the returned
+`SystemSnapshotInput` names the capped sections
+(`load_truncated_sections`, `is_load_truncated()`), and
+`rebuild_system_model` REFUSES a bounded load with the typed
+`StoreError::SnapshotBounded { run_id, sections, limit }` — because a
+model built from a prefix of the stored facts would understate what the
+run observed (dropping claimants, edges, and history context) and then
+present the remainder as the whole truth. Bounded knowledge is never
+upgraded into a complete-looking model; the caller raises the limit and
+retries.
 
 **Corruption handling.** Every new field decodes strictly: unknown enum
 values, malformed `u:/e:/l:` paths, half and impossible object identities

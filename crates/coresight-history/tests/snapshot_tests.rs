@@ -2125,7 +2125,8 @@ fn loading_one_snapshot_never_materializes_unrelated_runs() {
         .unwrap();
     assert_eq!(capped.len(), 3, "the listing respects its bound");
 
-    // A section bound also caps what a single load materializes.
+    // A section bound also caps what a single load materializes — and it
+    // SAYS so, rather than quietly returning a prefix.
     let tiny = store
         .load_system_snapshot(&ids[0], &QueryLimits { max_results: 1 })
         .unwrap()
@@ -2135,6 +2136,79 @@ fn loading_one_snapshot_never_materializes_unrelated_runs() {
         1,
         "a bounded load must not materialize beyond its limit"
     );
+    assert!(
+        tiny.is_load_truncated(),
+        "a capped load must report itself as incomplete"
+    );
+    assert!(
+        tiny.load_truncated_sections.contains(&"artifacts"),
+        "the capped section must be named (got {:?})",
+        tiny.load_truncated_sections
+    );
+}
+
+#[test]
+fn a_bounded_load_never_becomes_a_model() {
+    // Bounded knowledge is not complete knowledge: a load cut short by the
+    // caller's limit must be reported, and rebuilding must REFUSE rather
+    // than present a prefix of the facts as the whole truth (which could
+    // drop claimants, edges and history context).
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bounded-refusal.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    let snap = rich_snapshot();
+    let run_id = commit_snapshot(&mut store, "bounded-run", 1, &snap);
+    let total_artifacts = snap.input.artifacts.len();
+    assert!(
+        total_artifacts >= 3,
+        "the fixture must have several artifacts"
+    );
+
+    // Too small a limit: the load reports truncation and the rebuild fails
+    // closed with a typed error naming the section and the bound.
+    let too_small = QueryLimits { max_results: 1 };
+    let loaded = store
+        .load_system_snapshot(&run_id, &too_small)
+        .unwrap()
+        .unwrap();
+    assert!(loaded.is_load_truncated());
+    assert!(loaded.input.artifacts.len() < total_artifacts);
+
+    match store.rebuild_system_model(&run_id, &too_small, &SystemModelLimits::default()) {
+        Err(StoreError::SnapshotBounded {
+            run_id: id,
+            sections,
+            limit,
+        }) => {
+            assert_eq!(id, run_id.0);
+            assert_eq!(limit, 1);
+            assert!(
+                sections.contains(&"artifacts"),
+                "the refused section must be named (got {sections:?})"
+            );
+        }
+        other => panic!("a bounded rebuild must fail closed, got {other:?}"),
+    }
+
+    // An adequate limit loads completely and rebuilds successfully.
+    let enough = QueryLimits {
+        max_results: total_artifacts + 16,
+    };
+    let full = store
+        .load_system_snapshot(&run_id, &enough)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !full.is_load_truncated(),
+        "an adequate limit is not truncated"
+    );
+    assert_eq!(full.input.artifacts.len(), total_artifacts);
+    let model = store
+        .rebuild_system_model(&run_id, &enough, &SystemModelLimits::default())
+        .unwrap()
+        .expect("an unbounded load rebuilds");
+    assert_eq!(model.artifact_count(), total_artifacts);
 }
 
 #[test]

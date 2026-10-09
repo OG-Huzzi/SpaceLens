@@ -87,6 +87,16 @@ pub enum StoreError {
         run_id: Option<String>,
         detail: String,
     },
+    /// A snapshot load hit the caller's bound, so the facts returned were
+    /// a PREFIX of what the run stored. This is not corruption — it is an
+    /// honest statement that bounded knowledge is not complete knowledge.
+    /// Callers must raise `QueryLimits` rather than build a model from a
+    /// partial fact set (which would understate the run's observations).
+    SnapshotBounded {
+        run_id: String,
+        sections: Vec<&'static str>,
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -113,6 +123,16 @@ impl std::fmt::Display for StoreError {
                 ),
                 None => write!(f, "corrupt history data in {table}.{column}: {detail}"),
             },
+            StoreError::SnapshotBounded {
+                run_id,
+                sections,
+                limit,
+            } => write!(
+                f,
+                "snapshot load for run {run_id} hit the caller's bound of {limit} rows in \
+                 section(s) {sections:?}; the facts returned are incomplete, so no model was \
+                 built — raise QueryLimits and retry"
+            ),
         }
     }
 }

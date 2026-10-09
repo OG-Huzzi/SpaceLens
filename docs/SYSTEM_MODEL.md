@@ -423,6 +423,13 @@ semantics (artifacts, applications, edges, evidence, provenance,
 relationships, historical context/assertions, truncation, insights,
 candidate facts, ordering) — never over private index internals.
 
+A snapshot read is bounded by the caller's `QueryLimits`, and a bound that
+cuts the fact set short is **reported, never silent**: the load names its
+capped sections and the rebuild fails closed rather than building a model
+from a prefix of the stored facts. A model is therefore only ever rebuilt
+from the complete stored fact set, so "fewer artifacts than the run
+observed" can never be mistaken for "the machine has fewer artifacts".
+
 ### Evidence and identity cannot be inflated by the database
 
 A stored strength is re-clamped through `OwnershipEvidence::new` on

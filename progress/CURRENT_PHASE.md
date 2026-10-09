@@ -88,7 +88,20 @@ into the same validated system model.
   explicit canonical `ORDER BY` and a `QueryLimits` cap per section;
   commits use prepared statements in one transaction with ordinals
   assigned after a canonical sort. Insertion order, row order, and ordinal
-  values are never semantic (proven by a permutation test).
+  values are never semantic (proven by a permutation test). A cap hit is
+  detected exactly (`LIMIT limit + 1`), REPORTED
+  (`is_load_truncated()` / `load_truncated_sections`), and REFUSED by
+  `rebuild_system_model` with `StoreError::SnapshotBounded`: a model is
+  never built from a prefix of the stored facts, so a bounded read can
+  never be mistaken for a complete machine.
+- **Performance coverage.** An ignored persistence suite (run by CI on all
+  three platforms) measures batch insertion, snapshot load,
+  application-heavy and evidence-heavy shapes, per-run load isolation
+  across many stored snapshots, and re-commit stability. Measured locally:
+  10k artifacts commit 144 ms / load 62 ms; 100k artifacts commit 2.0 s /
+  load 0.72 s (linear); application-heavy (2,000 apps) 363 ms / 758 ms;
+  evidence-heavy (3,200 evidence items) 164 ms / 155 ms; a per-run load
+  with 12 stored snapshots 5 ms.
 - **System-model crate untouched.** `coresight-system-model` gained no
   dependency and no persistence code; it remains pure, platform-neutral,
   and database-independent, still guarded by its source-scan test.
@@ -104,8 +117,9 @@ into the same validated system model.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   — clean.
 - `cargo test --workspace` and `cargo test --workspace --all-features` —
-  **802 passed, 0 failed** (baseline was 661; +141, including 50 new
-  Phase 6.4 persistence tests: 41 integration + 9 codec).
+  **803 passed, 0 failed** (baseline was 661; +142, including 51 new
+  Phase 6.4 persistence tests: 42 integration + 9 codec, plus 3 ignored
+  performance tests).
 - `cargo test --workspace -- --ignored` — all established performance
   suites green.
 - `npm ci` (0 vulnerabilities) + `npm run build` — green.
