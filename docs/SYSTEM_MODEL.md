@@ -478,3 +478,32 @@ acquiring a runner; the targeted retry completed successfully. No source
 changes were made between attempts. The final verification-record change is
 documentation-only: implementation, hardening, and verification remain
 distinguished in `progress/CURRENT_PHASE.md`.
+
+### Phase 6.4 (persistence) verification record
+
+Phase 6.4 changed **no code in this crate** — it added the snapshot
+persistence boundary in `coresight-history` (schema v5) and left
+`coresight-system-model` pure and database-independent, guarded by the
+existing source-scan test (which still scans every source file and still
+forbids persistence, subprocess, network, platform, and lossy-path
+tokens).
+
+Implementation commit `aaff0a3bb16701f9c0b19327911fa358ade08a77` — run
+[37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329),
+attempt 1, conclusion **success**; the follow-up commit-contract
+hardening `5b18ef32b59d426bb18914e2ae081c4944b4db60` — run
+[37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961),
+attempt 1, conclusion **success**:
+
+```text
+rust (ubuntu-latest)   success
+rust (windows-latest)  success
+rust (macos-latest)    success
+frontend               success
+```
+
+Local gate for the same commits: `cargo fmt --all --check` clean;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean; `cargo test --workspace` and `--all-features` **802 passed, 0
+failed** (661 at the pre-6.4 baseline); all `--ignored` performance
+suites green; `npm ci` + `npm run build` green; `git diff --check` clean.

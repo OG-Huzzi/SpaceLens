@@ -1,22 +1,46 @@
 # CoreSight — Current State
 
-- **Current phase:** PHASE 6.4 — Persistent Application Intelligence +
-  System-Model Snapshot Integration.
-- **Status:** IMPLEMENTED; local gate green; exact-SHA CI verification in
-  progress. Not yet VERIFIED (see the gate record below).
-- **Verified baseline:** `2e7999251fb4df24b1fa6f638be34228d6b1ebde`
-  ("docs: record Phase 6.3 verification"); Phase 6.3 is COMPLETE and
-  VERIFIED.
-- **Phase 6.3 (historical):** hardening source commit
-  `df2e24c55807032f1bb5f61c088c660fb6587ebd`; exact-SHA CI run
-  37797444920, attempt 2, all four jobs green. Its verification-record
-  change was documentation-only.
+PHASE 6.4 — Persistent Application Intelligence + System-Model Snapshot
+Integration
+
+**Status: VERIFIED**
+
+- **Final verified commit:** `5b18ef32b59d426bb18914e2ae081c4944b4db60`
+  ("fix: require parallel snapshot application facts"), pushed to `main`.
+  Exact-SHA CI run
+  [37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961),
+  attempt 1, conclusion **success**:
+
+  ```text
+  frontend               success
+  rust (ubuntu-latest)   success
+  rust (windows-latest)  success
+  rust (macos-latest)    success
+  ```
+
+- **Implementation commit:** `aaff0a3bb16701f9c0b19327911fa358ade08a77`
+  ("feat: add phase 6.4 persistence and snapshot integration") — also
+  verified green on its exact SHA: CI run
+  [37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329),
+  attempt 1, all four jobs success.
+- **Migration / schema version:** **5** (`HISTORY_SCHEMA_VERSION` 4 → 5),
+  forward-only migration `v4 → v5` in one transaction with its version
+  bump.
+- **Verified baseline (pre-6.4):** `2e7999251fb4df24b1fa6f638be34228d6b1ebde`.
 - **Product direction (binding):** CoreSight is a **macOS system
   intelligence + power-tools application** — NOT a "Mac cleaner". macOS is
   the primary implementation and launch platform; Windows/Linux remain
   architectural targets with their abstractions intact. Storage is one
   pillar of seven (docs/MACOS_ARCHITECTURE.md).
-- **Last updated:** 2026-10-08.
+- **Last updated:** 2026-10-09.
+
+**Destructive execution remains unimplemented.** Phase 6.4 added no GUI,
+no IPC, no frontend surface, no cleanup/uninstall/delete/kill, no
+subprocess, no network, no cloud sync, no licensing, and no package-manager
+execution. Persisted candidates stay inert: `can_authorize_execution` and
+`candidate_is_authorized` return `false` for every reloaded model and
+candidate, asserted by test. Persisting a snapshot can never imply that an
+observation succeeded or that any action is safe.
 
 ## Phase 6.4 — what was implemented
 
@@ -26,7 +50,7 @@ into the same validated system model.
 
 - **Schema v5 (forward-only, transactional).** One migration
   `v4 → v5` in `coresight-history`, applied with its version bump inside a
-  single transaction. `HISTORY_SCHEMA_VERSION` 4 → 5. Twelve new
+  single transaction. `HISTORY_SCHEMA_VERSION` 4 → 5. Thirteen new
   normalized `app_snapshot_*` tables; the existing v2–v4 migrations and
   their SQL are untouched.
 - **Normalized persistence, no blob.** Artifact facts, the full
@@ -74,18 +98,47 @@ into the same validated system model.
   `candidate_is_authorized` still return `false` for every reloaded model
   and candidate, asserted by test.
 
-## Verification (local, 2026-10-08, Windows 11 GNU)
+## Verification (local, 2026-10-09, Windows 11 GNU)
 
 - `cargo fmt --all --check` — clean.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   — clean.
 - `cargo test --workspace` and `cargo test --workspace --all-features` —
-  **801 passed, 0 failed** (baseline was 661; +140, including 49 new
-  Phase 6.4 persistence tests: 40 integration + 9 codec).
+  **802 passed, 0 failed** (baseline was 661; +141, including 50 new
+  Phase 6.4 persistence tests: 41 integration + 9 codec).
 - `cargo test --workspace -- --ignored` — all established performance
   suites green.
 - `npm ci` (0 vulnerabilities) + `npm run build` — green.
 - `git diff --check` — clean.
+
+## CI verification (exact SHA)
+
+Implementation commit `aaff0a3bb16701f9c0b19327911fa358ade08a77` — run
+[37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329),
+attempt 1, **success**:
+
+```text
+frontend               success
+rust (ubuntu-latest)   success
+rust (windows-latest)  success
+rust (macos-latest)    success
+```
+
+Commit-contract hardening `5b18ef32b59d426bb18914e2ae081c4944b4db60` —
+run
+[37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961),
+attempt 1, **success**:
+
+```text
+frontend               success
+rust (ubuntu-latest)   success
+rust (windows-latest)  success
+rust (macos-latest)    success
+```
+
+Both runs verified the exact SHA (not merely the branch); no runner
+infrastructure issues occurred and no source change was made to work
+around a failure. This verification-record change is documentation-only.
 
 ## Phase 6.4 limitations (honest)
 
