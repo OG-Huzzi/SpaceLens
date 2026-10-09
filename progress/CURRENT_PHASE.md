@@ -5,10 +5,10 @@ Integration
 
 **Status: VERIFIED**
 
-- **Final verified commit:** `5b18ef32b59d426bb18914e2ae081c4944b4db60`
-  ("fix: require parallel snapshot application facts"), pushed to `main`.
-  Exact-SHA CI run
-  [37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961),
+- **Final verified commit:** `c8223d5fe2d3fbb98ac371175412c033fbc4a59a`
+  ("fix: report bounded snapshot loads instead of truncating silently"),
+  pushed to `main`. Exact-SHA CI run
+  [37953360824](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37953360824),
   attempt 1, conclusion **success**:
 
   ```text
@@ -18,11 +18,20 @@ Integration
   rust (macos-latest)    success
   ```
 
+  This run also executed the new Phase 6.4 persistence performance suite
+  (`cargo test -p coresight-history -- --ignored`) on all three platforms.
+
 - **Implementation commit:** `aaff0a3bb16701f9c0b19327911fa358ade08a77`
-  ("feat: add phase 6.4 persistence and snapshot integration") — also
-  verified green on its exact SHA: CI run
+  ("feat: add phase 6.4 persistence and snapshot integration") — exact-SHA
+  CI run
   [37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329),
-  attempt 1, all four jobs success.
+  all four jobs success.
+- **Follow-up commits, each exact-SHA verified green:** `5b18ef32b59d426bb18914e2ae081c4944b4db60`
+  ("fix: require parallel snapshot application facts") — run
+  [37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961);
+  `1725465f48dac322a490c2905c557cbf9d1710fd`
+  ("docs: record Phase 6.4 verification") — run
+  [37939190779](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37939190779).
 - **Migration / schema version:** **5** (`HISTORY_SCHEMA_VERSION` 4 → 5),
   forward-only migration `v4 → v5` in one transaction with its version
   bump.
@@ -121,38 +130,28 @@ into the same validated system model.
   Phase 6.4 persistence tests: 42 integration + 9 codec, plus 3 ignored
   performance tests).
 - `cargo test --workspace -- --ignored` — all established performance
-  suites green.
+  suites green, including the new Phase 6.4 persistence suite (batch
+  insertion, snapshot load, application-heavy, evidence-heavy, per-run
+  load isolation, re-commit stability).
 - `npm ci` (0 vulnerabilities) + `npm run build` — green.
 - `git diff --check` — clean.
 
 ## CI verification (exact SHA)
 
-Implementation commit `aaff0a3bb16701f9c0b19327911fa358ade08a77` — run
-[37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329),
-attempt 1, **success**:
+Every commit of this phase was verified on its own SHA — never merely on
+the branch:
 
-```text
-frontend               success
-rust (ubuntu-latest)   success
-rust (windows-latest)  success
-rust (macos-latest)    success
-```
+| Commit | Meaning | CI run | Result |
+|---|---|---|---|
+| `aaff0a3bb16701f9c0b19327911fa358ade08a77` | Phase 6.4 implementation | [37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329) | all 4 jobs success |
+| `5b18ef32b59d426bb18914e2ae081c4944b4db60` | parallel-facts contract | [37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961) | all 4 jobs success |
+| `1725465f48dac322a490c2905c557cbf9d1710fd` | verification record | [37939190779](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37939190779) | all 4 jobs success |
+| `c8223d5fe2d3fbb98ac371175412c033fbc4a59a` | bounded-load honesty + perf suite (**final**) | [37953360824](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37953360824) | all 4 jobs success |
 
-Commit-contract hardening `5b18ef32b59d426bb18914e2ae081c4944b4db60` —
-run
-[37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961),
-attempt 1, **success**:
-
-```text
-frontend               success
-rust (ubuntu-latest)   success
-rust (windows-latest)  success
-rust (macos-latest)    success
-```
-
-Both runs verified the exact SHA (not merely the branch); no runner
-infrastructure issues occurred and no source change was made to work
-around a failure. This verification-record change is documentation-only.
+Every run reported `frontend`, `rust (ubuntu-latest)`,
+`rust (windows-latest)`, and `rust (macos-latest)` as **success** on
+attempt 1. No runner-infrastructure failure occurred, so no retry was
+needed and no source change was ever made to work around a failure.
 
 ## Phase 6.4 limitations (honest)
 
@@ -169,10 +168,14 @@ around a failure. This verification-record change is documentation-only.
   over-claimed.** A tampered strength returns at its legitimate ceiling
   (matching in-memory transport behavior); malformed *shape* (unknown
   enum, bad group, malformed path) is rejected outright.
-- **Snapshot loads are per-section bounded.** `QueryLimits` caps each of
-  artifacts/applications/evidence/relationships/history independently, so
-  a snapshot larger than the limit loads truncated rather than failing —
-  the repository's existing bounded-query convention.
+- **Snapshot loads are per-section bounded, and the bound is reported.**
+  `QueryLimits` caps each of artifacts/applications/evidence/relationships/
+  history/footprints independently. A capped load returns the prefix AND
+  names the capped sections (`is_load_truncated()`), and
+  `rebuild_system_model` refuses it with `StoreError::SnapshotBounded`
+  rather than building a model from partial facts. The only way to obtain
+  a model is a limit large enough for the whole snapshot — so there is no
+  "peek at a partial model" API, by design.
 - **No runtime platform validation beyond CI.** Phase 6.4 is
   platform-neutral Rust with synthetic fixtures; real-world macOS/Windows/
   Linux runtime evidence comes only from the CI jobs.
