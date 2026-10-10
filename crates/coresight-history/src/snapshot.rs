@@ -269,45 +269,10 @@ impl HistoryStore {
                 });
             }
         }
-        let conn = &mut self.conn;
-        let tx = conn.transaction()?;
-        let exists: Option<String> = tx
-            .query_row(
-                "SELECT run_id FROM scan_runs WHERE run_id = ?1",
-                params![run_id.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if exists.is_none() {
-            return Err(StoreError::UnknownRun(run_id.clone()));
-        }
-        // Idempotent re-commit: clear prior snapshot rows first (same
-        // transaction — atomic, never half-cleared).
-        for table in [
-            "app_snapshot_footprint_evidence",
-            "app_snapshot_footprints",
-            "app_snapshot_history",
-            "app_snapshot_rel_members",
-            "app_snapshot_relationships",
-            "app_snapshot_coverage",
-            "app_snapshot_evidence",
-            "app_snapshot_roots",
-            "app_snapshot_views",
-            "app_snapshot_provenance",
-            "app_snapshot_apps",
-            "app_snapshot_artifacts",
-            "app_snapshot_meta",
-        ] {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE run_id = ?1"),
-                params![run_id.0],
-            )?;
-        }
-
-        // Every counter is converted BEFORE the first row is written, so a
-        // value outside the store's signed INTEGER domain rejects the
-        // whole commit rather than narrowing one counter (Workstream C).
         let run_tag = Some(run_id.0.clone());
+        // Every numeric conversion happens BEFORE the snapshot transaction
+        // opens, so a value the store cannot represent rejects the commit
+        // without touching the existing snapshot at all (Workstream C).
         let records_truncated = checked_counter_i64(
             inventory.records_truncated,
             "app_snapshot_meta",
@@ -344,6 +309,67 @@ impl HistoryStore {
             "fp_evidence_truncated",
             &run_tag,
         )?;
+
+        // Per-row numeric pre-pass: every artifact size and every
+        // estimated size is checked BEFORE the transaction opens, so an
+        // unrepresentable value rejects the commit without deleting the
+        // previous snapshot's rows at all.
+        {
+            let mut artifacts = input.artifacts.clone();
+            artifacts.sort_by(|a, b| {
+                path_bytes(&a.path)
+                    .cmp(path_bytes(&b.path))
+                    .then(a.kind.cmp(&b.kind))
+                    .then(a.size.cmp(&b.size))
+                    .then(identity_key(&a.identity).cmp(&identity_key(&b.identity)))
+            });
+            for a in &artifacts {
+                checked_u64_i64(a.size, "app_snapshot_artifacts", "size", &run_tag)?;
+            }
+            for f in app_facts {
+                checked_u64_i64(
+                    f.record.estimated_size_bytes,
+                    "app_snapshot_apps",
+                    "estimated_size",
+                    &run_tag,
+                )?;
+            }
+        }
+
+        let conn = &mut self.conn;
+        let tx = conn.transaction()?;
+        let exists: Option<String> = tx
+            .query_row(
+                "SELECT run_id FROM scan_runs WHERE run_id = ?1",
+                params![run_id.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(StoreError::UnknownRun(run_id.clone()));
+        }
+        // Idempotent re-commit: clear prior snapshot rows first (same
+        // transaction — atomic, never half-cleared).
+        for table in [
+            "app_snapshot_footprint_evidence",
+            "app_snapshot_footprints",
+            "app_snapshot_history",
+            "app_snapshot_rel_members",
+            "app_snapshot_relationships",
+            "app_snapshot_coverage",
+            "app_snapshot_evidence",
+            "app_snapshot_roots",
+            "app_snapshot_views",
+            "app_snapshot_provenance",
+            "app_snapshot_apps",
+            "app_snapshot_artifacts",
+            "app_snapshot_meta",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE run_id = ?1"),
+                params![run_id.0],
+            )?;
+        }
 
         tx.execute(
             "INSERT INTO app_snapshot_meta

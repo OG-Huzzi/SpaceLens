@@ -277,6 +277,38 @@ time); the scaling guard is deliberately loose because these tests run
 concurrently with the other ignored suites and therefore carry scheduler
 noise a solo run does not.
 
+### Second independent audit
+
+After the first green gate the diff was re-audited as if written by
+another engineer. Findings that were confirmed and fixed:
+
+5. **`Inventory::records` was accepted but never validated** — a caller
+   whose inventory disagreed with the committed application facts would
+   have had its truncation counters persisted describing records that
+   were never stored. Now the inventory's records must describe exactly
+   the set of application ids the snapshot stores (a SET comparison,
+   because the inventory is the deduplicated merged result while the
+   model input is a fact multiset — two facts under one id are two
+   records). Regression-tested both ways.
+6. **Numeric conversions happened inside the snapshot transaction** —
+   the values were checked before the first row was WRITTEN, but after
+   the previous snapshot's rows had been DELETED, so a rejection relied
+   on transaction rollback rather than never touching the data. All
+   conversions now run in a pre-pass BEFORE the transaction opens, and a
+   test proves a rejected replacement preserves the previous snapshot
+   byte-for-byte.
+
+Audit points confirmed clean: identity injectivity (property test over
+component boundaries, embedded separators, Unicode, empty components);
+migration child attribution (the legacy-id-conflation fixture proves both
+children follow their own parent); footprint order-independence; numeric
+representability; extreme limits; capped-snapshot rejection; strict
+decode of every persisted field; lossless paths and full-width identity;
+untouched historical migrations; no manufactured evidence or
+authorization; `coresight-system-model` purity (zero diff, no SQLite
+dependency, source-scan guard intact).
+
+
 ### Phase 6.4.1 limitations (honest)
 
 - Same Phase 6.4 limitations above remain in force (no pipeline caller,

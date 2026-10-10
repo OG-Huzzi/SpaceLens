@@ -1797,6 +1797,80 @@ fn an_unrepresentable_estimated_size_is_rejected_before_write() {
 }
 
 #[test]
+fn a_rejected_replacement_preserves_the_previous_snapshot() {
+    // A commit that fails validation must not damage the snapshot already
+    // committed for the same run: the previous facts must still reload
+    // exactly, and the model must still build.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("replace.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    let snap = rich_snapshot();
+    let run_id = commit_snapshot(&mut store, "replace-run", 1, &snap);
+    let before = store
+        .rebuild_system_model(
+            &run_id,
+            &QueryLimits::default(),
+            &SystemModelLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+
+    // A replacement carrying an unrepresentable size is rejected.
+    let mut bad = rich_snapshot();
+    bad.input.artifacts[0].size = Some(u64::MAX);
+    let err = store
+        .commit_system_snapshot(
+            &run_id,
+            &bad.input,
+            &bad.app_facts,
+            &bad.inventory,
+            &bad.footprint,
+        )
+        .expect_err("an unrepresentable size must be rejected");
+    assert_corrupt(&err, "app_snapshot_artifacts", "size");
+
+    // The previous snapshot is untouched: same model, same facts.
+    let after = store
+        .rebuild_system_model(
+            &run_id,
+            &QueryLimits::default(),
+            &SystemModelLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "a rejected commit must preserve the previous snapshot"
+    );
+    assert!(store.has_system_snapshot(&run_id).unwrap());
+
+    // A replacement carrying a parallel-array mismatch is also rejected
+    // and preserves the previous snapshot.
+    let mut mismatch = rich_snapshot();
+    mismatch.app_facts[0].record.version = Some("2.0".to_string());
+    let err = store
+        .commit_system_snapshot(
+            &run_id,
+            &mismatch.input,
+            &mismatch.app_facts,
+            &mismatch.inventory,
+            &mismatch.footprint,
+        )
+        .expect_err("a mismatched replacement must be rejected");
+    assert_corrupt(&err, "app_snapshot_apps", "app_id");
+    let restored = store
+        .rebuild_system_model(
+            &run_id,
+            &QueryLimits::default(),
+            &SystemModelLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(before, restored);
+}
+
+#[test]
 fn zero_values_are_preserved_not_treated_as_absent() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("zeros.db");
