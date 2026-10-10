@@ -7,8 +7,7 @@ PHASE 6.4.1 — Deep Integrity Hardening (application identity, footprint
 fidelity, numeric/query-bound safety, integrated persistence audit)
 
 **Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1 is
-IMPLEMENTED with a green local gate; its exact-SHA CI record follows in
-the Phase 6.4.1 section once that run is confirmed.
+IMPLEMENTED and VERIFIED with its own exact-SHA CI record.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -197,6 +196,37 @@ own SHA.
 Verified against baseline `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
 (the Phase 6.4 record above is preserved unchanged).
 
+**Status: VERIFIED**
+
+- **Implementation commit:** `c6b5ad64fe975a16b57ba7347e443fbec7746dae`
+  ("feat: phase 6.4.1 deep integrity hardening"). Exact-SHA CI run
+  [38054012906](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38054012906),
+  attempt 1, conclusion **success**:
+
+  ```text
+  frontend               success
+  rust (ubuntu-latest)   success
+  rust (windows-latest)  success
+  rust (macos-latest)    success
+  ```
+
+- **Final commit:** `a8d823a89357d64e227ef09204c541b3d5a33845`
+  ("fix: validate inventory records and hoist numeric checks before the
+  transaction"), pushed to `main`. Exact-SHA CI run
+  [38055710246](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38055710246),
+  attempt 1, conclusion **success**:
+
+  ```text
+  frontend               success
+  rust (ubuntu-latest)   success
+  rust (windows-latest)  success
+  rust (macos-latest)    success
+  ```
+
+  Both runs executed the full gate on all three platforms, including the
+  persistence performance suite (`cargo test -p coresight-history --
+  --ignored`).
+
 ### Migration version
 
 **6** (`HISTORY_SCHEMA_VERSION` 5 → 6). Schema v6 exists solely to
@@ -326,6 +356,8 @@ dependency, source-scan guard intact).
   strictly-better one, so a weaker description's DISTINCT evidence is not
   retained separately. That is the documented set semantics (one scope);
   conflicting scopes (different path/app/kind) are never merged.
+
+`PHASE 6.5 — NOT STARTED.`
 
 ## Phase 6.4 limitations (honest)
 
