@@ -5,10 +5,10 @@ Integration
 
 **Status: VERIFIED**
 
-- **Final verified commit:** `c8223d5fe2d3fbb98ac371175412c033fbc4a59a`
-  ("fix: report bounded snapshot loads instead of truncating silently"),
-  pushed to `main`. Exact-SHA CI run
-  [37953360824](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37953360824),
+- **Final verified commit:** `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
+  ("fix: enforce snapshot input consistency and report every capped
+  section"), pushed to `main`. Exact-SHA CI run
+  [38034695355](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38034695355),
   attempt 1, conclusion **success**:
 
   ```text
@@ -18,8 +18,9 @@ Integration
   rust (macos-latest)    success
   ```
 
-  This run also executed the new Phase 6.4 persistence performance suite
-  (`cargo test -p coresight-history -- --ignored`) on all three platforms.
+  This run executed the full gate on all three platforms, including the
+  Phase 6.4 persistence performance suite
+  (`cargo test -p coresight-history -- --ignored`).
 
 - **Implementation commit:** `aaff0a3bb16701f9c0b19327911fa358ade08a77`
   ("feat: add phase 6.4 persistence and snapshot integration") — exact-SHA
@@ -157,20 +158,33 @@ the branch:
 | `aaff0a3bb16701f9c0b19327911fa358ade08a77` | Phase 6.4 implementation | [37934408329](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37934408329) | all 4 jobs success |
 | `5b18ef32b59d426bb18914e2ae081c4944b4db60` | parallel-facts contract | [37936917961](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37936917961) | all 4 jobs success |
 | `1725465f48dac322a490c2905c557cbf9d1710fd` | verification record | [37939190779](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37939190779) | all 4 jobs success |
-| `c8223d5fe2d3fbb98ac371175412c033fbc4a59a` | bounded-load honesty + persistence perf suite (**code frozen here**) | [37953360824](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37953360824) | all 4 jobs success |
+| `c8223d5fe2d3fbb98ac371175412c033fbc4a59a` | bounded-load honesty + persistence perf suite | [37953360824](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37953360824) | all 4 jobs success |
 | `61b3ad8de4af5fa84085129226c152f8f8eb4d6f` | verification record | [37955117327](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37955117327) | all 4 jobs success |
 | `6f1f1d3ca8729b6fe42816aa2d95fa67690beadf` | capability-state note (docs) | [37956977056](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37956977056) | all 4 jobs success |
+| `b209327d99ceeb2b5a2f7bbb4272a5c0f87edd5b` | verification record | [37958800982](https://github.com/OG-Huzzi/SpaceLens/actions/runs/37958800982) | all 4 jobs success |
+| `e05177bb2dca8a60007ba994c3a3acd62ba1edd4` | independent-audit fixes (**final**) | [38034695355](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38034695355) | all 4 jobs success |
 
 Every run reported `frontend`, `rust (ubuntu-latest)`,
 `rust (windows-latest)`, and `rust (macos-latest)` as **success** on
 attempt 1. No runner-infrastructure failure occurred, so no retry was
 needed and no source change was ever made to work around a failure.
 
-**Phase 6.4's code is frozen at `c8223d5fe2d3fbb98ac371175412c033fbc4a59a`.**
-Every later commit in this phase is documentation-only, and each was still
-run through the full CI gate on its own SHA (rows above). A documentation-
-only commit made after this record is covered by the same statement: it
-contains no code, and the gate it must pass is unchanged.
+**Independent audit.** After the phase was first marked verified, a
+read-only adversarial audit of the persistence path was run against the
+frozen code. It confirmed the isolation, evidence-ceiling, determinism,
+and 6.3-regression claims, and found five real gaps that are now FIXED and
+regression-tested in `e05177b`: capped per-application detail reads were
+not reported (a partial load could reach the builder); the commit's
+parallel-input check compared only ids, not records/roots/executable; the
+footprint report's candidates could disagree with the stored per-app
+facts; `load_snapshot_applications` returned a truncated list with no
+signal; and `probe_limit` could overflow to a negative SQLite `LIMIT`
+(silently unbounded). A documentation test-count error was corrected too.
+
+Phase 6.4's implementation code is therefore frozen at
+`e05177bb2dca8a60007ba994c3a3acd62ba1edd4`; any later commit in this
+phase is documentation-only and is still run through the full gate on its
+own SHA.
 
 ## Phase 6.4 limitations (honest)
 
