@@ -51,10 +51,26 @@
 //! - Commit is one transaction: re-commit of the same run replaces its
 //!   snapshot atomically (idempotent, no semantic duplicates, no arrival
 //!   order: facts are canonically sorted before ordinal assignment).
+//! - The application vectors a commit accepts must be PARALLEL and equal
+//!   field-for-field, and the footprint report must describe exactly the
+//!   facts being stored; a divergence is rejected before the transaction
+//!   opens, so what is persisted always describes the model's input.
 //! - Loads are per-run (`WHERE run_id = ?`), canonically ordered, and
 //!   bounded by [`QueryLimits`]; unrelated runs are never materialized.
+//!   A cap hit in ANY section is reported and refuses a rebuild.
 //! - `coresight-system-model` stays database-independent: this crate owns
 //!   the SQL; the model crate only receives its plain input structs.
+//!
+//! ## Normalization (what "round-trip" means per field)
+//!
+//! Values that are SETS in the domain — application `provenance`,
+//! `observed_in_views`, and `install_roots` — are stored and reloaded
+//! canonically ordered and deduplicated (the 6.2 producers already union
+//! them, and the model reads them as sets). Everything else is stored
+//! verbatim, including duplicate and conflicting facts: a repeated
+//! relationship or history row keeps its own row under its own ordinal,
+//! because the model's inputs are multisets and a later input must never
+//! silently overwrite an earlier contradictory one.
 
 use std::path::PathBuf;
 
@@ -116,6 +132,21 @@ impl SystemSnapshotInput {
     }
 }
 
+/// One run's application records together with the sections the caller's
+/// bound cut short — so a partial inventory is never mistaken for the
+/// complete application set.
+#[derive(Debug, Clone)]
+pub struct LoadedApplications {
+    pub records: Vec<ApplicationRecord>,
+    pub load_truncated_sections: Vec<&'static str>,
+}
+
+impl LoadedApplications {
+    pub fn is_load_truncated(&self) -> bool {
+        !self.load_truncated_sections.is_empty()
+    }
+}
+
 /// The per-run snapshot presence: `None` = no snapshot was committed
 /// for this run (absence, never an empty snapshot); `Some` = the row
 /// counts of the committed snapshot (bounded listing support).
@@ -148,27 +179,54 @@ impl HistoryStore {
         inventory: &Inventory,
         footprint: &FootprintReport,
     ) -> Result<(), StoreError> {
-        // Fail closed on internal inconsistency: the two vectors must be
-        // PARALLEL — same length, and the same logical application at each
-        // index. The model is built from `input` (which carries the
-        // evidence the model consumes); `app_facts` carries the same
-        // records plus the footprint candidates. Anything else would let a
-        // footprint attach to the wrong application, so it is rejected
+        // Fail closed on internal inconsistency. The two vectors must be
+        // PARALLEL — same length, and the SAME fact at each index, field
+        // for field. The model is built from `input`; `app_facts` is the
+        // same data plus the footprint candidates, and only `app_facts`
+        // is persisted. Comparing just the ids would let a caller whose
+        // vectors disagree (different record content, install roots, or
+        // executable) silently persist one copy while the model used the
+        // other, so everything the snapshot stores is compared here,
         // before the transaction opens.
-        if input.applications.len() != app_facts.len()
-            || input
-                .applications
-                .iter()
-                .zip(app_facts.iter())
-                .any(|(i, f)| i.record.id.0 != f.record.id.0)
+        if input.applications.len() != app_facts.len() {
+            return Err(parallel_mismatch(run_id, "length"));
+        }
+        for (i, f) in input.applications.iter().zip(app_facts.iter()) {
+            if i.record != f.record {
+                return Err(parallel_mismatch(run_id, "record"));
+            }
+            if i.install_roots != f.install_roots {
+                return Err(parallel_mismatch(run_id, "install_roots"));
+            }
+            if i.executable != f.executable {
+                return Err(parallel_mismatch(run_id, "executable"));
+            }
+            if i.associations != f.associations {
+                return Err(parallel_mismatch(run_id, "associations"));
+            }
+        }
+        // The footprint report's counters AND candidates must describe the
+        // same facts that get persisted. Candidates are stored per
+        // application (the normalized representation), so the report's
+        // list must be exactly their canonical union — otherwise the
+        // stored counters could describe candidates that were never
+        // stored. Canonicalized before comparison: the union rule is
+        // commutative, so a differently-ordered report is not an error.
         {
-            return Err(StoreError::Corrupt {
-                table: "app_snapshot_apps",
-                column: "app_id",
-                run_id: Some(run_id.0.clone()),
-                detail: "application facts are not parallel to the committed model input"
-                    .to_string(),
-            });
+            let mut from_report = footprint.candidates.clone();
+            canonicalize_footprints(&mut from_report);
+            let mut from_facts = flatten_footprints(app_facts);
+            canonicalize_footprints(&mut from_facts);
+            if from_report != from_facts {
+                return Err(StoreError::Corrupt {
+                    table: "app_snapshot_footprints",
+                    column: "footprint_ord",
+                    run_id: Some(run_id.0.clone()),
+                    detail: "footprint report candidates do not match the committed \
+                             application facts"
+                        .to_string(),
+                });
+            }
         }
         let conn = &mut self.conn;
         let tx = conn.transaction()?;
@@ -319,7 +377,6 @@ impl HistoryStore {
         )?;
         for (fact_ord, &fi) in app_order.iter().enumerate() {
             let fact = &app_facts[fi];
-            let input_fact = &input.applications[fi];
             let r = &fact.record;
             app_stmt.execute(params![
                 run_id.0,
@@ -417,30 +474,9 @@ impl HistoryStore {
                 ])?;
                 *ord += 1;
             }
-            // Also persist the input's association view identity check:
-            // input_fact.associations must equal fact.associations as
-            // multisets (same commit call produced both).
-            {
-                let mut x: Vec<(&PathBuf, &OwnershipEvidence)> = input_fact
-                    .associations
-                    .iter()
-                    .map(|(p, e)| (p, e))
-                    .collect();
-                let mut y: Vec<(&PathBuf, &OwnershipEvidence)> =
-                    fact.associations.iter().map(|(p, e)| (p, e)).collect();
-                x.sort_by(|a, b| path_bytes(a.0).cmp(path_bytes(b.0)).then(a.1.cmp(b.1)));
-                y.sort_by(|a, b| path_bytes(a.0).cmp(path_bytes(b.0)).then(a.1.cmp(b.1)));
-                if x != y {
-                    return Err(StoreError::Corrupt {
-                        table: "app_snapshot_evidence",
-                        column: "artifact_path",
-                        run_id: Some(run_id.0.clone()),
-                        detail: "application facts do not match the committed model input"
-                            .to_string(),
-                    });
-                }
-            }
-            // Footprints for this app (canonical order → ordinals).
+            // Footprints for this app (canonical order → ordinals). The
+            // report/`app_facts` agreement was already proven up front, so
+            // these rows are exactly the candidates the caller reported.
             let mut footprints = fact.footprints.clone();
             footprints.sort_by(|a, b| {
                 path_bytes(&a.path)
@@ -603,6 +639,11 @@ impl HistoryStore {
 
     /// Bounded listing of committed system snapshots, newest run first.
     /// Only per-run COUNTS are materialized (never other runs' facts).
+    ///
+    /// The list itself is capped by `limits` and the caller can detect a
+    /// cut short simply: a full `max_results`-length result means there
+    /// may be more (the same convention as every other bounded list query
+    /// in this store — see `QueryLimits`).
     pub fn list_system_snapshots(
         &self,
         limits: &QueryLimits,
@@ -616,7 +657,7 @@ impl HistoryStore {
              FROM app_snapshot_meta m JOIN scan_runs r ON r.run_id = m.run_id
              ORDER BY r.started_at DESC, m.run_id DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limits.max_results as i64], |r| {
+        let rows = stmt.query_map(params![probe_limit(limits)], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, u64>(2)?,
@@ -636,6 +677,9 @@ impl HistoryStore {
                 history_facts,
             });
         }
+        // The probe row (fetched above) proves whether more snapshots
+        // exist; it is never published.
+        out.truncate(limits.max_results);
         Ok(out)
     }
 
@@ -748,17 +792,22 @@ impl HistoryStore {
     /// Load one run's application records in bounded, canonical form
     /// (records only — no evidence/footprints). Used by callers that need
     /// the inventory without rebuilding a full model input.
+    ///
+    /// Returns the records TOGETHER with the sections the caller's bound
+    /// cut short, so a partially loaded inventory is visible as such and
+    /// can never be read as the complete application set.
     pub fn load_snapshot_applications(
         &self,
         run_id: &RunId,
         limits: &QueryLimits,
-    ) -> Result<Option<Vec<ApplicationRecord>>, StoreError> {
+    ) -> Result<Option<LoadedApplications>, StoreError> {
         let Some(loaded) = self.load_system_snapshot(run_id, limits)? else {
             return Ok(None);
         };
-        Ok(Some(
-            loaded.app_facts.into_iter().map(|f| f.record).collect(),
-        ))
+        Ok(Some(LoadedApplications {
+            records: loaded.app_facts.into_iter().map(|f| f.record).collect(),
+            load_truncated_sections: loaded.load_truncated_sections,
+        }))
     }
 
     /// Rebuild the SAME validated system model from a persisted snapshot:
@@ -949,6 +998,11 @@ impl HistoryStore {
             let record = load_snapshot_record(row, run_tag)?;
             let fact_ord = row.fact_ord;
             let app_id = record.id.0.clone();
+            let ctx = ReadCtx {
+                run_id,
+                limits,
+                run_tag,
+            };
             // Provenance: strictly decoded enums, canonically ordered and
             // deduplicated (the same union rule the builder applies). A
             // value this build cannot decode is corruption, never a
@@ -956,15 +1010,15 @@ impl HistoryStore {
             let mut provenance: Vec<ApplicationSource> = Vec::new();
             for raw in self.load_child_strings(
                 ChildStrings {
+                    section: "provenance",
                     table: "app_snapshot_provenance",
                     column: "source",
                     ord_column: "prov_ord",
                 },
-                run_id,
+                ctx,
                 &app_id,
                 fact_ord,
-                limits,
-                run_tag,
+                caps,
             )? {
                 provenance.push(
                     crate::snapshot_codec::decode_application_source(&raw).map_err(|detail| {
@@ -978,15 +1032,15 @@ impl HistoryStore {
             record.provenance = provenance;
             let mut observed_in_views = self.load_child_strings(
                 ChildStrings {
+                    section: "views",
                     table: "app_snapshot_views",
                     column: "view",
                     ord_column: "view_ord",
                 },
-                run_id,
+                ctx,
                 &app_id,
                 fact_ord,
-                limits,
-                run_tag,
+                caps,
             )?;
             observed_in_views.sort();
             observed_in_views.dedup();
@@ -994,15 +1048,15 @@ impl HistoryStore {
             let mut install_roots = Vec::new();
             for raw in self.load_child_strings(
                 ChildStrings {
+                    section: "install_roots",
                     table: "app_snapshot_roots",
                     column: "path",
                     ord_column: "root_ord",
                 },
-                run_id,
+                ctx,
                 &app_id,
                 fact_ord,
-                limits,
-                run_tag,
+                caps,
             )? {
                 install_roots.push(decode_snap_path(
                     &raw,
@@ -1056,20 +1110,30 @@ impl HistoryStore {
     /// Ordered child strings of one application fact, read from a
     /// normalized child table. Bounded by `limits`; ordering comes from
     /// the ordinal column (a row join key, never a semantic tie-breaker).
+    ///
+    /// A cap hit is enforced AND reported like every other section: these
+    /// are model-affecting inputs (install roots drive containment, and
+    /// provenance is part of the application fact), so a silent prefix
+    /// here would let a partial load become a model.
     fn load_child_strings(
         &self,
         src: ChildStrings,
-        run_id: &RunId,
+        ctx: ReadCtx<'_>,
         app_id: &str,
         fact_ord: i64,
-        limits: &QueryLimits,
-        run_tag: &Option<String>,
+        caps: &mut LoadCaps,
     ) -> Result<Vec<String>, StoreError> {
         let ChildStrings {
+            section,
             table,
             column,
             ord_column,
         } = src;
+        let ReadCtx {
+            run_id,
+            limits,
+            run_tag,
+        } = ctx;
         let sql = format!(
             "SELECT {column} FROM {table}
              WHERE run_id = ?1 AND app_id = ?2 AND fact_ord = ?3
@@ -1093,7 +1157,7 @@ impl HistoryStore {
                 })?,
             );
         }
-        Ok(out)
+        Ok(enforce_cap(section, limits.max_results, out, caps))
     }
 
     fn load_snapshot_evidence(
@@ -1593,6 +1657,33 @@ fn corrupt(
     }
 }
 
+/// The two application vectors the commit accepts disagreed. Reported as
+/// corruption because the caller would otherwise get a snapshot that does
+/// not describe the facts the model was built from.
+fn parallel_mismatch(run_id: &RunId, field: &str) -> StoreError {
+    StoreError::Corrupt {
+        table: "app_snapshot_apps",
+        column: "app_id",
+        run_id: Some(run_id.0.clone()),
+        detail: format!(
+            "application facts are not parallel to the committed model input ({field} differs)"
+        ),
+    }
+}
+
+/// Canonical footprint-candidate order (path bytes, application, kind),
+/// with exact duplicates collapsed — the union rule the report and the
+/// per-application facts must agree on.
+fn canonicalize_footprints(candidates: &mut Vec<FootprintCandidate>) {
+    candidates.sort_by(|a, b| {
+        path_bytes(&a.path)
+            .cmp(path_bytes(&b.path))
+            .then(a.app.0.cmp(&b.app.0))
+            .then(a.kind.cmp(&b.kind))
+    });
+    candidates.dedup_by(|a, b| a.path == b.path && a.app == b.app && a.kind == b.kind);
+}
+
 fn decode_snap_path(
     raw: &str,
     table: &'static str,
@@ -1683,12 +1774,14 @@ fn opt_u64(
     }
 }
 
-/// Which normalized child table to read: the table name, its value
-/// column, and its ordinal column. Grouping the three static names keeps
-/// the loader signatures small and makes the table/column pair that owns
-/// any corruption impossible to mix up.
+/// Which normalized child table to read: the section name reported when
+/// the caller's cap cuts this read short, the table name, its value
+/// column, and its ordinal column. Grouping the names keeps the loader
+/// signatures small and makes the table/column pair that owns any
+/// corruption impossible to mix up.
 #[derive(Debug, Clone, Copy)]
 struct ChildStrings {
+    section: &'static str,
     table: &'static str,
     column: &'static str,
     ord_column: &'static str,
@@ -1731,9 +1824,29 @@ fn enforce_cap<T>(
     rows
 }
 
-/// The `LIMIT` value that makes a cap hit provable.
+/// The per-read context threaded through a section loader: which run,
+/// under which bound, and the diagnostic tag for corruption messages.
+/// Bundled (and `Copy`) so the loader signatures stay small and no call
+/// site can pass a mismatched run/limit pair. Cap bookkeeping travels
+/// separately as `&mut LoadCaps`.
+#[derive(Clone, Copy)]
+struct ReadCtx<'a> {
+    run_id: &'a RunId,
+    limits: &'a QueryLimits,
+    run_tag: &'a Option<String>,
+}
+
+/// The `LIMIT` value that makes a cap hit provable: one row beyond the
+/// caller's bound. Saturating at `i64::MAX` (never wrapping) keeps the
+/// value positive, so a huge caller bound can never become a NEGATIVE
+/// SQLite `LIMIT` — which SQLite reads as "unlimited" and would silently
+/// disable both the bound and its detection.
 fn probe_limit(limits: &QueryLimits) -> i64 {
-    limits.max_results.saturating_add(1) as i64
+    match u64::try_from(limits.max_results).map(|n| n.saturating_add(1)) {
+        Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
+        // A bound larger than u64::MAX is impossible on 64-bit; be total.
+        Err(_) => i64::MAX,
+    }
 }
 
 /// One persisted relationship fact row (the identity-engine proof, as
@@ -1833,12 +1946,6 @@ fn flatten_footprints(app_facts: &[AppSnapshotFact]) -> Vec<FootprintCandidate> 
         .iter()
         .flat_map(|f| f.footprints.iter().cloned())
         .collect();
-    out.sort_by(|a, b| {
-        path_bytes(&a.path)
-            .cmp(path_bytes(&b.path))
-            .then(a.app.0.cmp(&b.app.0))
-            .then(a.kind.cmp(&b.kind))
-    });
-    out.dedup_by(|a, b| a.path == b.path && a.app == b.app && a.kind == b.kind);
+    canonicalize_footprints(&mut out);
     out
 }

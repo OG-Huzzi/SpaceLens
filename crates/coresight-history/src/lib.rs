@@ -56,7 +56,7 @@ pub use model::{
     ObservedEntry, ObservedKind, RunCounts, RunId, RunRecord, RunStatus, Snapshot, SnapshotBuilder,
 };
 pub use path_encoding::{decode as decode_path, encode as encode_path, PathDecodeError};
-pub use snapshot::{AppSnapshotFact, SnapshotSummary, SystemSnapshotInput};
+pub use snapshot::{AppSnapshotFact, LoadedApplications, SnapshotSummary, SystemSnapshotInput};
 pub use store::{
     HistoryStore, PathHistoryPoint, QueryLimits, RetentionPolicy, RetentionReport, StoreError,
 };

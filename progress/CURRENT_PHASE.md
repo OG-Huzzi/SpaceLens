@@ -72,6 +72,14 @@ into the same validated system model.
   `ON DELETE CASCADE` to `scan_runs`, so snapshots live in the existing
   history timeline and are pruned with their run. A run with no snapshot
   reloads as *absent* (`None`), never as an empty snapshot.
+- **Commit inputs must describe the same facts being stored.** The two
+  application vectors a commit accepts are verified PARALLEL and equal
+  field-for-field (record, install roots, executable, associations), and
+  the footprint report's candidates must equal the canonical union of the
+  per-application footprints. A divergence is rejected before the
+  transaction opens — only `app_facts` is persisted, so without this a
+  caller could silently store a snapshot that does not describe the facts
+  the model was built from.
 - **One canonical construction path.** The persistence layer returns
   validated `SystemModelInput` facts; both a fresh build and a reload end
   at `build_system_model` → `finalize` → `check_invariants`. Derived
@@ -94,15 +102,17 @@ into the same validated system model.
   each surfaced as `StoreError::Corrupt` / a SQLite constraint failure
   with table + column context, never a defaulted value.
 - **Bounded, deterministic IO.** Loads are `WHERE run_id = ?` with an
-  explicit canonical `ORDER BY` and a `QueryLimits` cap per section;
-  commits use prepared statements in one transaction with ordinals
-  assigned after a canonical sort. Insertion order, row order, and ordinal
-  values are never semantic (proven by a permutation test). A cap hit is
-  detected exactly (`LIMIT limit + 1`), REPORTED
-  (`is_load_truncated()` / `load_truncated_sections`), and REFUSED by
-  `rebuild_system_model` with `StoreError::SnapshotBounded`: a model is
-  never built from a prefix of the stored facts, so a bounded read can
-  never be mistaken for a complete machine.
+  explicit canonical `ORDER BY` and a `QueryLimits` cap; commits use
+  prepared statements in one transaction with ordinals assigned after a
+  canonical sort. Insertion order, row order, and ordinal values are never
+  semantic (proven by a permutation test). A cap hit in ANY section —
+  including the per-application details (provenance, views, install roots,
+  evidence, footprints) — is detected exactly (`LIMIT limit + 1`),
+  REPORTED (`is_load_truncated()` / `load_truncated_sections`), and
+  REFUSED by `rebuild_system_model` with `StoreError::SnapshotBounded`: a
+  model is never built from a prefix of the stored facts, so a bounded
+  read can never be mistaken for a complete machine. The inventory-only
+  read carries the same signal (`LoadedApplications`).
 - **Performance coverage.** An ignored persistence suite (run by CI on all
   three platforms) measures batch insertion, snapshot load,
   application-heavy and evidence-heavy shapes, per-run load isolation
@@ -126,9 +136,10 @@ into the same validated system model.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   — clean.
 - `cargo test --workspace` and `cargo test --workspace --all-features` —
-  **803 passed, 0 failed** (baseline was 661; +142, including 51 new
-  Phase 6.4 persistence tests: 42 integration + 9 codec, plus 3 ignored
-  performance tests).
+  **807 passed, 0 failed** (661 at the pre-6.4 baseline). Phase 6.4 adds
+  **54 test functions**: 47 integration (`tests/snapshot_tests.rs`; 46 run
+  on Windows — one is Unix-gated for non-UTF-8 paths), 4 strict-codec unit
+  tests, and 3 ignored performance tests.
 - `cargo test --workspace -- --ignored` — all established performance
   suites green, including the new Phase 6.4 persistence suite (batch
   insertion, snapshot load, application-heavy, evidence-heavy, per-run
@@ -187,6 +198,16 @@ contains no code, and the gate it must pass is unchanged.
 - **No runtime platform validation beyond CI.** Phase 6.4 is
   platform-neutral Rust with synthetic fixtures; real-world macOS/Windows/
   Linux runtime evidence comes only from the CI jobs.
+- **Not yet wired into a pipeline.** The storage/rehydration API exists and
+  is proven by test, but no scan/analysis pipeline commits or rehydrates a
+  snapshot yet: the workspace has no orchestrator that owns a run
+  end-to-end (the Tauri shell is a config-level contract, not a workspace
+  member, and the GUI/IPC layer is a later phase). Wiring a caller is
+  additive and does not change the persistence contract.
+- **Application-detail reads are bounded per application fact**, not per
+  run: a snapshot with many applications multiplies the per-app limit, so
+  a caller sizing `QueryLimits` for a huge inventory should account for
+  that (the cap is still reported exactly).
 - **Destructive execution remains unimplemented.** No GUI, no IPC, no
   cleanup/uninstall/delete/kill, no subprocess, no network, no package
   manager. Persisted candidates stay inert and unauthorized.

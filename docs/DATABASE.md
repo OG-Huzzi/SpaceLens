@@ -84,19 +84,32 @@ An application id that does not match normalized `(name, publisher)` is
 rejected, so persistence never introduces a second identity definition.
 
 **Boundedness.** Every load is `WHERE run_id = ?` with an explicit
-canonical `ORDER BY` and a `QueryLimits` cap per section; unrelated runs
-are never materialized. Bulk insert uses prepared statements inside the
-commit transaction. A cap hit is **detected exactly** (rows are fetched
-with `LIMIT limit + 1`) and **reported**, never silent: the returned
-`SystemSnapshotInput` names the capped sections
-(`load_truncated_sections`, `is_load_truncated()`), and
-`rebuild_system_model` REFUSES a bounded load with the typed
+canonical `ORDER BY`. `QueryLimits` caps the top-level sections
+(artifacts, applications, source coverage, relationships, history) and
+each per-application detail read (provenance, views, install roots,
+evidence, footprints) independently, so total materialized rows are
+bounded by the limits times the application count — never by the size of
+the database, and unrelated runs are never materialized. Bulk insert uses
+prepared statements inside the commit transaction.
+
+A cap hit is **detected exactly** (rows are fetched with `LIMIT limit + 1`)
+and **reported**, never silent: the returned `SystemSnapshotInput` names
+the capped sections (`load_truncated_sections`, `is_load_truncated()`),
+and `rebuild_system_model` REFUSES a bounded load with the typed
 `StoreError::SnapshotBounded { run_id, sections, limit }` — because a
 model built from a prefix of the stored facts would understate what the
 run observed (dropping claimants, edges, and history context) and then
 present the remainder as the whole truth. Bounded knowledge is never
 upgraded into a complete-looking model; the caller raises the limit and
-retries.
+retries. The same signal travels with the inventory-only read
+(`load_snapshot_applications` → `LoadedApplications::is_load_truncated`).
+
+**Not wired into a pipeline yet.** Phase 6.4 delivers the storage and
+rehydration API and proves it by test; no scan/analysis pipeline calls it
+yet, because the workspace has no orchestrator that owns a run end-to-end
+(the GUI/IPC layer is a later phase and the Tauri shell is not a
+workspace member). Wiring a caller is additive and does not change this
+contract.
 
 **Corruption handling.** Every new field decodes strictly: unknown enum
 values, malformed `u:/e:/l:` paths, half and impossible object identities

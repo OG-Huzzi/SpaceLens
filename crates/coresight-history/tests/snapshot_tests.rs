@@ -2086,6 +2086,252 @@ fn non_parallel_application_facts_are_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// commit contract: parallel application facts
+// ---------------------------------------------------------------------------
+
+/// One way to make the application facts disagree with the model input.
+type Divergence = (&'static str, fn(&mut Vec<AppSnapshotFact>));
+
+#[test]
+fn inconsistent_application_facts_are_rejected_field_by_field() {
+    // Only `app_facts` is persisted, so a caller whose two vectors disagree
+    // beyond the id would silently persist a snapshot that does not
+    // describe the facts the model was built from. Each divergence is
+    // rejected before the transaction opens.
+    let dir = tempfile::tempdir().unwrap();
+    let snap = rich_snapshot();
+
+    let cases: Vec<Divergence> = vec![
+        ("record", |f| {
+            f[0].record.version = Some("9.9".to_string());
+        }),
+        ("install_roots", |f| {
+            f[0].install_roots = vec![PathBuf::from("/apps/Elsewhere")];
+        }),
+        ("executable", |f| {
+            f[0].executable = Some(PathBuf::from("/apps/Alpha/other.exe"));
+        }),
+        ("associations", |f| {
+            f[0].associations.clear();
+        }),
+    ];
+
+    for (label, mutate) in cases {
+        let db = dir.path().join(format!("mismatch-{label}.db"));
+        let mut store = HistoryStore::open(&db).unwrap();
+        let record = run_record(&format!("mismatch-{label}-run"), 1);
+        store.begin_run(&record).unwrap();
+
+        let mut facts = snap.app_facts.clone();
+        mutate(&mut facts);
+        let err = store
+            .commit_system_snapshot(
+                &record.run_id,
+                &snap.input,
+                &facts,
+                &snap.inventory,
+                &snap.footprint,
+            )
+            .unwrap_err();
+        assert_corrupt(&err, "app_snapshot_apps", "app_id");
+        assert!(
+            !store.has_system_snapshot(&record.run_id).unwrap(),
+            "a rejected commit must leave no snapshot ({label})"
+        );
+    }
+}
+
+#[test]
+fn footprint_report_must_match_the_application_facts() {
+    // Counters and candidates describe the same facts that get stored; a
+    // report listing candidates that are not in the application facts is
+    // refused rather than persisted as inconsistent knowledge.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fp-mismatch.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+    let snap = rich_snapshot();
+    let record = run_record("fp-mismatch-run", 1);
+    store.begin_run(&record).unwrap();
+
+    // The fixture's report holds Alpha's one footprint; add a ghost.
+    let mut footprint = snap.footprint.clone();
+    footprint.candidates.push(FootprintCandidate {
+        path: PathBuf::from("/apps/Ghost"),
+        app: ApplicationId::derive("Ghost", None),
+        kind: FootprintKind::InstallationDirectory,
+        confidence: coresight_apps::Confidence::Probable,
+        evidence: Vec::new(),
+    });
+    let err = store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &snap.app_facts,
+            &snap.inventory,
+            &footprint,
+        )
+        .unwrap_err();
+    assert_corrupt(&err, "app_snapshot_footprints", "footprint_ord");
+    assert!(!store.has_system_snapshot(&record.run_id).unwrap());
+
+    // The consistent report commits, and the candidates round-trip.
+    store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &snap.app_facts,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .unwrap();
+    let loaded = store
+        .load_system_snapshot(&record.run_id, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+    let mut want = snap.footprint.candidates.clone();
+    want.sort_by(|a, b| {
+        a.path
+            .as_os_str()
+            .as_encoded_bytes()
+            .cmp(b.path.as_os_str().as_encoded_bytes())
+            .then(a.app.0.cmp(&b.app.0))
+            .then(a.kind.cmp(&b.kind))
+    });
+    assert_eq!(
+        loaded.footprint.candidates, want,
+        "footprint candidates must round-trip"
+    );
+}
+
+#[test]
+fn capped_child_sections_are_reported_and_never_rebuilt() {
+    // Install roots, provenance and views are MODEL-AFFECTING inputs, so a
+    // cap that cut them short must be reported exactly like the top-level
+    // sections — otherwise a partial load could become a model.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("child-cap.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    let app = app_record("Many", Some("Roots"));
+    let roots: Vec<PathBuf> = (0..4)
+        .map(|i| PathBuf::from(format!("/apps/Many/root{i}")))
+        .collect();
+    let mut record = app;
+    record.observed_in_views = (0..4).map(|i| format!("VIEW{i}")).collect();
+    record.provenance = vec![
+        ApplicationSource::RegistryUninstall,
+        ApplicationSource::BundleInfoPlist,
+        ApplicationSource::DesktopEntry,
+    ];
+
+    let snap = committed(
+        SystemModelInput {
+            artifacts: vec![artifact("/apps/Many", 1, 1, None)],
+            applications: vec![ApplicationFact {
+                record: record.clone(),
+                install_roots: roots.clone(),
+                executable: None,
+                associations: Vec::new(),
+            }],
+            relationships: Vec::new(),
+            history: Vec::new(),
+            source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+        },
+        vec![AppSnapshotFact {
+            record,
+            install_roots: roots,
+            executable: None,
+            associations: Vec::new(),
+            footprints: Vec::new(),
+        }],
+    );
+    let run_id = commit_snapshot(&mut store, "child-cap-run", 1, &snap);
+
+    // A cap of 2 cuts the 4 roots and the 4 views short.
+    let small = QueryLimits { max_results: 2 };
+    let loaded = store
+        .load_system_snapshot(&run_id, &small)
+        .unwrap()
+        .unwrap();
+    assert!(
+        loaded.is_load_truncated(),
+        "a capped CHILD section must report truncation"
+    );
+    assert!(
+        loaded.load_truncated_sections.contains(&"install_roots"),
+        "install_roots must be named (got {:?})",
+        loaded.load_truncated_sections
+    );
+    assert!(
+        loaded.load_truncated_sections.contains(&"views"),
+        "views must be named (got {:?})",
+        loaded.load_truncated_sections
+    );
+    assert!(
+        loaded.app_facts[0].install_roots.len() <= 2,
+        "a capped child section must not exceed the caller's bound"
+    );
+
+    // And the rebuild refuses rather than building from partial roots.
+    match store.rebuild_system_model(&run_id, &small, &SystemModelLimits::default()) {
+        Err(StoreError::SnapshotBounded { sections, .. }) => {
+            assert!(
+                sections.contains(&"install_roots"),
+                "the refused sections must name install_roots (got {sections:?})"
+            );
+        }
+        other => panic!("a capped child section must refuse the rebuild, got {other:?}"),
+    }
+
+    // With room, everything loads complete and rebuilds.
+    let enough = QueryLimits { max_results: 32 };
+    let full = store
+        .load_system_snapshot(&run_id, &enough)
+        .unwrap()
+        .unwrap();
+    assert!(!full.is_load_truncated());
+    assert_eq!(full.app_facts[0].install_roots.len(), 4);
+    assert!(store
+        .rebuild_system_model(&run_id, &enough, &SystemModelLimits::default())
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn load_snapshot_applications_reports_its_own_bound() {
+    // The inventory-only API must not hand back a partial record list with
+    // no signal.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("apps-bound.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+    let snap = rich_snapshot();
+    let run_id = commit_snapshot(&mut store, "apps-bound-run", 1, &snap);
+
+    let capped = store
+        .load_snapshot_applications(&run_id, &QueryLimits { max_results: 1 })
+        .unwrap()
+        .unwrap();
+    assert!(
+        capped.is_load_truncated(),
+        "a bounded inventory load must report itself"
+    );
+    assert!(capped.records.len() <= 1);
+
+    let full = store
+        .load_snapshot_applications(&run_id, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+    assert!(!full.is_load_truncated());
+    assert_eq!(full.records.len(), snap.app_facts.len());
+
+    // Absence is still absence, not an empty inventory.
+    assert!(store
+        .load_snapshot_applications(&RunId("no-such-run".to_string()), &QueryLimits::default())
+        .unwrap()
+        .is_none());
+}
+
+// ---------------------------------------------------------------------------
 // boundedness tests
 // ---------------------------------------------------------------------------
 
