@@ -92,10 +92,14 @@ bounded by the limits times the application count — never by the size of
 the database, and unrelated runs are never materialized. Bulk insert uses
 prepared statements inside the commit transaction.
 
-A cap hit is **detected exactly** (rows are fetched with `LIMIT limit + 1`)
-and **reported**, never silent: the returned `SystemSnapshotInput` names
-the capped sections (`load_truncated_sections`, `is_load_truncated()`),
-and `rebuild_system_model` REFUSES a bounded load with the typed
+A cap hit is **detected exactly** (rows are fetched with
+`LIMIT limit + 1`, and `probe_limit` saturates at `i64::MAX` rather than
+wrapping, so an extreme caller bound can never become a NEGATIVE SQLite
+`LIMIT` — which SQLite reads as "unlimited" and would silently disable
+both the bound and its detection) and **reported**, never silent: the
+returned `SystemSnapshotInput` names the capped sections
+(`load_truncated_sections`, `is_load_truncated()`), and
+`rebuild_system_model` REFUSES a bounded load with the typed
 `StoreError::SnapshotBounded { run_id, sections, limit }` — because a
 model built from a prefix of the stored facts would understate what the
 run observed (dropping claimants, edges, and history context) and then
@@ -103,6 +107,8 @@ present the remainder as the whole truth. Bounded knowledge is never
 upgraded into a complete-looking model; the caller raises the limit and
 retries. The same signal travels with the inventory-only read
 (`load_snapshot_applications` → `LoadedApplications::is_load_truncated`).
+A zero limit is a real cap (it reports and refuses), never an empty
+success.
 
 **Not wired into a pipeline yet.** Phase 6.4 delivers the storage and
 rehydration API and proves it by test; no scan/analysis pipeline calls it
@@ -122,9 +128,10 @@ a defaulted `0`, `None`, or empty value.
 ## Migrations & versioning
 
 - Forward-only, numbered SQL migrations embedded in the binary; `schema_version`
-  table. Current version: **5** (v1 core bootstrap, v2 history tables,
+  table. Current version: **6** (v1 core bootstrap, v2 history tables,
   v3 wide identity + lossless tagged paths, v4 relationship-report
-  status, v5 Phase 6.4 application/system snapshots).
+  status, v5 Phase 6.4 application/system snapshots, v6 Phase 6.4.1
+  application-id re-keying).
 - The app refuses to open a NEWER DB (`StoreError::SchemaTooNew`, tells
   the user to upgrade); older stores migrate forward automatically.
 - Each migration step runs in ONE transaction with its version bump, so a
@@ -134,6 +141,71 @@ a defaulted `0`, `None`, or empty value.
   so classification and safety verdicts are reproducible and auditable per scan.
 - An automatic pre-migration file backup copy remains PLANNED; the safety
   net today is the per-step transaction plus the integrity check below.
+
+### Application-identity re-keying (migration v6, Phase 6.4.1)
+
+The Phase 6.4 `ApplicationId` hashed `"{name}|{publisher}"`, which is
+ambiguous at the component boundary: `("A|B","C")` and `("A","B|C")`
+derived the SAME id, so two distinct logical applications could share one
+identity. Phase 6.4.1 replaces that with a **length-prefixed** encoding
+(`len(name) || name || len(publisher) || publisher`), which is injective
+for all inputs because each component's byte prefix states exactly how
+many bytes belong to it.
+
+Compatibility (mandatory, because v5 rows already exist):
+
+- The migration **never globally replaces** an id. One legacy id may
+  legitimately cover several distinct `(name, publisher)` pairs — that is
+  exactly the ambiguity being repaired — so each row is re-keyed from ITS
+  OWN stored `name`/`publisher`, splitting the legacy id back into the
+  distinct identities it conflated.
+- Every child row (provenance, views, roots, evidence, footprints,
+  footprint evidence) is re-keyed by joining on its parent's
+  `(run_id, app_id, fact_ord)`, so a child can never be adopted by a
+  different application.
+- `app_snapshot_apps` gained an `id_encoding` column recording which
+  encoding each row was written with. The loader verifies it: a row
+  claiming the legacy encoding in a v6 store is refused rather than
+  silently trusted — re-keying requires the forward migration.
+- A stored id matching NEITHER encoding is typed corruption; the
+  migration refuses rather than guessing (which would silently reinterpret
+  a historical fact).
+- The re-key runs inside the migration transaction with foreign-key
+  checks deferred to commit (`PRAGMA defer_foreign_keys=ON`), because
+  swapping a parent key while children still reference the old one is
+  exactly the intermediate state immediate FK enforcement would reject.
+  Either the whole re-key lands consistently or none of it does.
+- Normalization is unchanged: name and publisher are trimmed and
+  lowercased, `None` publisher is the empty string, and NO Unicode
+  normalization is applied (documented, not hidden) — so identity is
+  insensitive to case and outer whitespace, sensitive to interior
+  characters, and NFC/NFD spellings stay distinct by design.
+
+### Checked numeric conversions (Phase 6.4.1)
+
+Every domain value written into a signed SQLite `INTEGER` is converted
+through checked helpers (`checked_u64_i64`, `checked_counter_i64`,
+`checked_ord_i64`) that reject anything above `i64::MAX` **before the
+snapshot transaction mutates the previous snapshot** — never wrapped,
+narrowed, saturated, or deferred until reload. Object identity is
+deliberately exempt: those columns are intentional bit-pattern storage, so
+`u64::MAX` identity components round-trip exactly.
+
+### Footprint policy (Phase 6.4.1)
+
+Footprint candidates are keyed by `(path bytes, application, kind)` — one
+*scope* per application. Confidence and evidence describe how well that
+scope is known, so two same-key candidates are two descriptions of ONE
+scope, reconciled by a commutative, deterministic rule consistent with the
+producer: **stronger confidence wins, then the fuller evidence list**
+(ranked by an explicit strength order — `Confirmed` is declared FIRST in
+`Confidence`, so its derived `Ord` puts it lowest and using it directly
+would invert "stronger wins"). Reconciliation happens at BOTH commit and
+load, so stored rows and reloaded candidates are identical. Candidates
+differing in path, application, or kind are distinct facts and are all
+preserved. A footprint's `app` must match its enclosing application fact,
+otherwise the commit is rejected (a misattributed scope would relocate
+onto the wrong software).
 
 ## Indexes (initial set; extend by measured query, not guess)
 

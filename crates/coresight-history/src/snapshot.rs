@@ -204,6 +204,47 @@ impl HistoryStore {
             if i.associations != f.associations {
                 return Err(parallel_mismatch(run_id, "associations"));
             }
+            // A footprint rides along its application fact, so its `app`
+            // must BE that fact's application. A candidate attributed to
+            // different software would silently relocate a scope onto the
+            // wrong application on reload, so it is rejected here.
+            for fp in &f.footprints {
+                if fp.app != f.record.id {
+                    return Err(StoreError::Corrupt {
+                        table: "app_snapshot_footprints",
+                        column: "footprint_ord",
+                        run_id: Some(run_id.0.clone()),
+                        detail: format!(
+                            "footprint for {} is attributed to a different application ({})",
+                            f.record.id.0, fp.app.0
+                        ),
+                    });
+                }
+            }
+        }
+        // The inventory's records must describe the same applications the
+        // snapshot stores. `Inventory::records` is the DEDUPLICATED
+        // merged discovery result, while the model input is a fact
+        // MULTISET (two facts under one id are two records, not one), so
+        // the comparison is over the SET of ids: every stored id must be
+        // covered, and the inventory must not claim an application whose
+        // facts were never stored. Otherwise the stored counters would
+        // describe records that were never stored.
+        {
+            let from_inventory: std::collections::BTreeSet<&ApplicationId> =
+                inventory.records.iter().map(|r| &r.id).collect();
+            let from_facts: std::collections::BTreeSet<&ApplicationId> =
+                app_facts.iter().map(|f| &f.record.id).collect();
+            if from_inventory != from_facts {
+                return Err(StoreError::Corrupt {
+                    table: "app_snapshot_meta",
+                    column: "records_truncated",
+                    run_id: Some(run_id.0.clone()),
+                    detail: "inventory records do not describe the committed application \
+                             facts"
+                        .to_string(),
+                });
+            }
         }
         // The footprint report's counters AND candidates must describe the
         // same facts that get persisted. Candidates are stored per
@@ -263,6 +304,47 @@ impl HistoryStore {
             )?;
         }
 
+        // Every counter is converted BEFORE the first row is written, so a
+        // value outside the store's signed INTEGER domain rejects the
+        // whole commit rather than narrowing one counter (Workstream C).
+        let run_tag = Some(run_id.0.clone());
+        let records_truncated = checked_counter_i64(
+            inventory.records_truncated,
+            "app_snapshot_meta",
+            "records_truncated",
+            &run_tag,
+        )?;
+        let records_rejected = checked_counter_i64(
+            inventory.records_rejected,
+            "app_snapshot_meta",
+            "records_rejected",
+            &run_tag,
+        )?;
+        let fp_candidates_truncated = checked_counter_i64(
+            footprint.candidates_truncated,
+            "app_snapshot_meta",
+            "fp_candidates_truncated",
+            &run_tag,
+        )?;
+        let fp_children_truncated = checked_counter_i64(
+            footprint.children_truncated,
+            "app_snapshot_meta",
+            "fp_children_truncated",
+            &run_tag,
+        )?;
+        let fp_apps_truncated = checked_counter_i64(
+            footprint.apps_truncated,
+            "app_snapshot_meta",
+            "fp_apps_truncated",
+            &run_tag,
+        )?;
+        let fp_evidence_truncated = checked_counter_i64(
+            footprint.evidence_truncated,
+            "app_snapshot_meta",
+            "fp_evidence_truncated",
+            &run_tag,
+        )?;
+
         tx.execute(
             "INSERT INTO app_snapshot_meta
              (run_id, records_truncated, records_rejected, fp_candidates_truncated,
@@ -270,12 +352,12 @@ impl HistoryStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 run_id.0,
-                inventory.records_truncated as i64,
-                inventory.records_rejected as i64,
-                footprint.candidates_truncated as i64,
-                footprint.children_truncated as i64,
-                footprint.apps_truncated as i64,
-                footprint.evidence_truncated as i64,
+                records_truncated,
+                records_rejected,
+                fp_candidates_truncated,
+                fp_children_truncated,
+                fp_apps_truncated,
+                fp_evidence_truncated,
             ],
         )?;
 
@@ -296,12 +378,18 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for (ord, a) in artifacts.iter().enumerate() {
+                let artifact_ord =
+                    checked_ord_i64(ord, "app_snapshot_artifacts", "artifact_ord", &run_tag)?;
+                let size = checked_u64_i64(a.size, "app_snapshot_artifacts", "size", &run_tag)?;
                 stmt.execute(params![
                     run_id.0,
-                    ord as i64,
+                    artifact_ord,
                     crate::path_encoding::encode(&a.path),
                     crate::snapshot_codec::encode_probed_kind(a.kind),
-                    a.size.map(|v| v as i64),
+                    size,
+                    // Object identity is an intentional bit-pattern
+                    // conversion: `u64::MAX` must round-trip exactly, so
+                    // it is deliberately NOT range-checked here.
                     a.identity.map(|id| id.volume as i64),
                     a.identity.map(|id| id.file_id as i64),
                     a.identity.and_then(|id| id.file_id_hi.map(|hi| hi as i64)),
@@ -338,12 +426,12 @@ impl HistoryStore {
         // arrival), so each fact persists under its own fact_ord.
         let mut app_stmt = tx.prepare(
             "INSERT INTO app_snapshot_apps
-             (run_id, app_id, fact_ord, name, version, publisher, install_location,
-              install_date, estimated_size, uninstall_string, quiet_uninstall_string,
-              modify_path, install_source, source, kind, system_component,
-              bundle_identifier, executable_path, executable_candidate)
+             (run_id, app_id, fact_ord, id_encoding, name, version, publisher,
+              install_location, install_date, estimated_size, uninstall_string,
+              quiet_uninstall_string, modify_path, install_source, source, kind,
+              system_component, bundle_identifier, executable_path, executable_candidate)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?16, ?17, ?18, ?19)",
+                     ?15, ?16, ?17, ?18, ?19, ?20)",
         )?;
         let mut prov_stmt = tx.prepare(
             "INSERT INTO app_snapshot_provenance (run_id, app_id, fact_ord, prov_ord, source)
@@ -378,10 +466,15 @@ impl HistoryStore {
         for (fact_ord, &fi) in app_order.iter().enumerate() {
             let fact = &app_facts[fi];
             let r = &fact.record;
+            let fact_ord = checked_ord_i64(fact_ord, "app_snapshot_apps", "fact_ord", &run_tag)?;
             app_stmt.execute(params![
                 run_id.0,
                 r.id.0,
-                fact_ord as i64,
+                fact_ord,
+                // Which identity encoding this id was derived with, so a
+                // future migration can tell current ids from legacy ones
+                // without guessing (see MIGRATION_V6).
+                coresight_apps::ApplicationId::ID_ENCODING_VERSION as i64,
                 r.name,
                 r.version,
                 r.publisher,
@@ -389,7 +482,15 @@ impl HistoryStore {
                     .as_ref()
                     .map(|p| crate::path_encoding::encode(p)),
                 r.install_date,
-                r.estimated_size_bytes.map(|v| v as i64),
+                // Checked, not wrapped: a size the store cannot represent
+                // is rejected BEFORE the transaction mutates the previous
+                // snapshot (Workstream C), never narrowed silently.
+                checked_u64_i64(
+                    r.estimated_size_bytes,
+                    "app_snapshot_apps",
+                    "estimated_size",
+                    &Some(run_id.0.clone()),
+                )?,
                 r.uninstall_string,
                 r.quiet_uninstall_string,
                 r.modify_path,
@@ -409,11 +510,13 @@ impl HistoryStore {
             prov.sort();
             prov.dedup();
             for (prov_ord, source) in prov.iter().enumerate() {
+                let prov_ord =
+                    checked_ord_i64(prov_ord, "app_snapshot_provenance", "prov_ord", &run_tag)?;
                 prov_stmt.execute(params![
                     run_id.0,
                     r.id.0,
-                    fact_ord as i64,
-                    prov_ord as i64,
+                    fact_ord,
+                    prov_ord,
                     crate::snapshot_codec::encode_application_source(source.clone()),
                 ])?;
             }
@@ -421,23 +524,21 @@ impl HistoryStore {
             views.sort();
             views.dedup();
             for (view_ord, view) in views.iter().enumerate() {
-                view_stmt.execute(params![
-                    run_id.0,
-                    r.id.0,
-                    fact_ord as i64,
-                    view_ord as i64,
-                    view,
-                ])?;
+                let view_ord =
+                    checked_ord_i64(view_ord, "app_snapshot_views", "view_ord", &run_tag)?;
+                view_stmt.execute(params![run_id.0, r.id.0, fact_ord, view_ord, view,])?;
             }
             let mut roots = fact.install_roots.clone();
             roots.sort_by(|a, b| path_bytes(a).cmp(path_bytes(b)));
             roots.dedup();
             for (root_ord, root) in roots.iter().enumerate() {
+                let root_ord =
+                    checked_ord_i64(root_ord, "app_snapshot_roots", "root_ord", &run_tag)?;
                 root_stmt.execute(params![
                     run_id.0,
                     r.id.0,
-                    fact_ord as i64,
-                    root_ord as i64,
+                    fact_ord,
+                    root_ord,
                     crate::path_encoding::encode(root),
                 ])?;
             }
@@ -445,19 +546,21 @@ impl HistoryStore {
             let mut assocs = fact.associations.clone();
             assocs.sort_by(|a, b| path_bytes(&a.0).cmp(path_bytes(&b.0)).then(a.1.cmp(&b.1)));
             // Group ordinals per artifact path (the PK includes the path).
-            let mut per_artifact_ord: std::collections::BTreeMap<Vec<u8>, i64> =
+            let mut per_artifact_ord: std::collections::BTreeMap<Vec<u8>, usize> =
                 std::collections::BTreeMap::new();
             for (artifact_path, evidence) in &assocs {
                 let key = path_bytes(artifact_path).to_vec();
                 let ord = per_artifact_ord.entry(key).or_insert(0);
+                let evidence_ord =
+                    checked_ord_i64(*ord, "app_snapshot_evidence", "evidence_ord", &run_tag)?;
                 let (group_tag, group_source) =
                     crate::snapshot_codec::encode_correlation_group(&evidence.correlation_group);
                 ev_stmt.execute(params![
                     run_id.0,
                     r.id.0,
-                    fact_ord as i64,
+                    fact_ord,
                     crate::path_encoding::encode(artifact_path),
-                    *ord,
+                    evidence_ord,
                     crate::snapshot_codec::encode_evidence_kind(evidence.kind),
                     crate::snapshot_codec::encode_evidence_source(evidence.source),
                     crate::snapshot_codec::encode_evidence_strength(evidence.strength),
@@ -474,22 +577,21 @@ impl HistoryStore {
                 ])?;
                 *ord += 1;
             }
-            // Footprints for this app (canonical order → ordinals). The
-            // report/`app_facts` agreement was already proven up front, so
-            // these rows are exactly the candidates the caller reported.
+            // Footprints for this app. Canonicalized by the SAME
+            // reconciliation the loader applies (see
+            // `canonicalize_footprints`), so the rows written here are
+            // exactly the rows reload reconstructs — no duplicate
+            // description is stored and then silently dropped on read.
             let mut footprints = fact.footprints.clone();
-            footprints.sort_by(|a, b| {
-                path_bytes(&a.path)
-                    .cmp(path_bytes(&b.path))
-                    .then(a.kind.cmp(&b.kind))
-                    .then(a.confidence.cmp(&b.confidence))
-            });
+            canonicalize_footprints(&mut footprints);
             for (fp_ord, fp) in footprints.iter().enumerate() {
+                let fp_ord =
+                    checked_ord_i64(fp_ord, "app_snapshot_footprints", "footprint_ord", &run_tag)?;
                 fp_stmt.execute(params![
                     run_id.0,
                     r.id.0,
-                    fact_ord as i64,
-                    fp_ord as i64,
+                    fact_ord,
+                    fp_ord,
                     crate::path_encoding::encode(&fp.path),
                     crate::snapshot_codec::encode_footprint_kind(fp.kind),
                     crate::snapshot_codec::encode_app_confidence(fp.confidence),
@@ -498,12 +600,18 @@ impl HistoryStore {
                 fp_ev.sort();
                 fp_ev.dedup();
                 for (ev_ord, e) in fp_ev.iter().enumerate() {
+                    let ev_ord = checked_ord_i64(
+                        ev_ord,
+                        "app_snapshot_footprint_evidence",
+                        "evidence_ord",
+                        &run_tag,
+                    )?;
                     fp_ev_stmt.execute(params![
                         run_id.0,
                         r.id.0,
-                        fact_ord as i64,
-                        fp_ord as i64,
-                        ev_ord as i64,
+                        fact_ord,
+                        fp_ord,
+                        ev_ord,
                         crate::snapshot_codec::encode_evidence_kind(e.kind),
                         crate::snapshot_codec::encode_app_confidence(e.confidence),
                         e.source,
@@ -536,9 +644,11 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for (ord, c) in coverage.iter().enumerate() {
+                let coverage_ord =
+                    checked_ord_i64(ord, "app_snapshot_coverage", "coverage_ord", &run_tag)?;
                 stmt.execute(params![
                     run_id.0,
-                    ord as i64,
+                    coverage_ord,
                     c.source,
                     crate::snapshot_codec::encode_source_status(c.status),
                     c.note,
@@ -566,10 +676,13 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4)",
             )?;
             for (rel_ord, rel) in rels.iter().enumerate() {
+                let rel_ord =
+                    checked_ord_i64(rel_ord, "app_snapshot_relationships", "rel_ord", &run_tag)?;
                 rel_stmt.execute(params![
                     run_id.0,
-                    rel_ord as i64,
+                    rel_ord,
                     crate::snapshot_codec::encode_relationship_fact_kind(rel.kind),
+                    // Bit-pattern conversion (intentional): see artifacts.
                     rel.object.map(|o| o.volume as i64),
                     rel.object.map(|o| o.file_id as i64),
                     rel.object.and_then(|o| o.file_id_hi.map(|hi| hi as i64)),
@@ -580,10 +693,16 @@ impl HistoryStore {
                 // Duplicate member paths are kept verbatim under ordinals
                 // (the builder dedups canonically on reload — same result).
                 for (mem_ord, member) in members.iter().enumerate() {
+                    let mem_ord = checked_ord_i64(
+                        mem_ord,
+                        "app_snapshot_rel_members",
+                        "member_ord",
+                        &run_tag,
+                    )?;
                     mem_stmt.execute(params![
                         run_id.0,
-                        rel_ord as i64,
-                        mem_ord as i64,
+                        rel_ord,
+                        mem_ord,
                         crate::path_encoding::encode(member),
                     ])?;
                 }
@@ -607,11 +726,13 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for (ord, h) in history.iter().enumerate() {
+                let hist_ord = checked_ord_i64(ord, "app_snapshot_history", "hist_ord", &run_tag)?;
                 stmt.execute(params![
                     run_id.0,
-                    ord as i64,
+                    hist_ord,
                     h.run_id,
                     crate::path_encoding::encode(&h.path),
+                    // Bit-pattern conversion (intentional): see artifacts.
                     h.identity.map(|id| id.volume as i64),
                     h.identity.map(|id| id.file_id as i64),
                     h.identity.and_then(|id| id.file_id_hi.map(|hi| hi as i64)),
@@ -958,7 +1079,7 @@ impl HistoryStore {
     ) -> Result<(Vec<AppSnapshotFact>, Vec<ApplicationFact>), StoreError> {
         // App rows in canonical commit order (fact_ord), capped.
         let mut stmt = self.conn.prepare(
-            "SELECT app_id, fact_ord, name, version, publisher, install_location,
+            "SELECT app_id, fact_ord, id_encoding, name, version, publisher, install_location,
                     install_date, estimated_size, uninstall_string, quiet_uninstall_string,
                     modify_path, install_source, source, kind, system_component,
                     bundle_identifier, executable_path, executable_candidate
@@ -969,22 +1090,23 @@ impl HistoryStore {
             Ok(AppRow {
                 app_id: r.get(0)?,
                 fact_ord: r.get(1)?,
-                name: r.get(2)?,
-                version: r.get(3)?,
-                publisher: r.get(4)?,
-                install_location: r.get(5)?,
-                install_date: r.get(6)?,
-                estimated_size: r.get(7)?,
-                uninstall_string: r.get(8)?,
-                quiet_uninstall_string: r.get(9)?,
-                modify_path: r.get(10)?,
-                install_source: r.get(11)?,
-                source: r.get(12)?,
-                kind: r.get(13)?,
-                system_component: r.get(14)?,
-                bundle_identifier: r.get(15)?,
-                executable_path: r.get(16)?,
-                executable_candidate: r.get(17)?,
+                id_encoding: r.get(2)?,
+                name: r.get(3)?,
+                version: r.get(4)?,
+                publisher: r.get(5)?,
+                install_location: r.get(6)?,
+                install_date: r.get(7)?,
+                estimated_size: r.get(8)?,
+                uninstall_string: r.get(9)?,
+                quiet_uninstall_string: r.get(10)?,
+                modify_path: r.get(11)?,
+                install_source: r.get(12)?,
+                source: r.get(13)?,
+                kind: r.get(14)?,
+                system_component: r.get(15)?,
+                bundle_identifier: r.get(16)?,
+                executable_path: r.get(17)?,
+                executable_candidate: r.get(18)?,
             })
         })?;
         let mut app_rows: Vec<AppRow> = Vec::new();
@@ -1561,6 +1683,11 @@ impl HistoryStore {
 struct AppRow {
     app_id: String,
     fact_ord: i64,
+    /// Which identity encoding this row's `app_id` was derived with
+    /// (`ApplicationId::ID_ENCODING_VERSION`). A row claiming the legacy
+    /// encoding in a v6 store means the migration did not run (or was
+    /// bypassed); it is refused rather than silently reinterpreted.
+    id_encoding: i64,
     name: String,
     version: Option<String>,
     publisher: Option<String>,
@@ -1593,6 +1720,24 @@ fn load_snapshot_record(
     // Mandatory identity components: empty id/name fail loudly.
     crate::snapshot_codec::verify_application_id(&row.app_id, &row.name, row.publisher.as_deref())
         .map_err(|detail| corrupt("app_snapshot_apps", "app_id", run_tag, detail))?;
+    // The stored id must be the CURRENT encoding's id for this row's own
+    // (name, publisher) — `verify_application_id` already proves the
+    // normalized pair matches, so this check proves the encoding. A row
+    // claiming another encoding in a v6 store was written by a build this
+    // one cannot interpret, so it is refused rather than trusted.
+    if row.id_encoding != coresight_apps::ApplicationId::ID_ENCODING_VERSION as i64 {
+        return Err(corrupt(
+            "app_snapshot_apps",
+            "id_encoding",
+            run_tag,
+            format!(
+                "application id was derived with encoding version {}, but this build \
+                 derives version {}; re-keying requires the forward migration",
+                row.id_encoding,
+                coresight_apps::ApplicationId::ID_ENCODING_VERSION
+            ),
+        ));
+    }
     let system_component = match row.system_component {
         0 => false,
         1 => true,
@@ -1657,6 +1802,79 @@ fn corrupt(
     }
 }
 
+/// A value this build cannot represent in a signed SQLite `INTEGER`.
+///
+/// Raised BEFORE any row is written, so a rejected commit can never
+/// narrow, wrap, saturate, or half-persist a fact (Workstream C).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueOutOfRange {
+    pub table: &'static str,
+    pub column: &'static str,
+    pub detail: String,
+}
+
+/// Convert a domain `u64` to the store's signed `INTEGER` domain,
+/// rejecting anything above `i64::MAX` (Workstream C). Deliberately NOT
+/// used for object identity: those are intentional bit-pattern
+/// conversions (see [`snap_identity`] and the identity write path).
+pub(crate) fn checked_u64_i64(
+    value: Option<u64>,
+    table: &'static str,
+    column: &'static str,
+    run_id: &Option<String>,
+) -> Result<Option<i64>, StoreError> {
+    match value {
+        None => Ok(None),
+        Some(v) => {
+            let converted = i64::try_from(v).map_err(|_| StoreError::Corrupt {
+                table,
+                column,
+                run_id: run_id.clone(),
+                detail: format!(
+                    "value {v} exceeds the signed 64-bit INTEGER store domain \
+                         (maximum representable {})",
+                    i64::MAX
+                ),
+            })?;
+            Ok(Some(converted))
+        }
+    }
+}
+
+/// Convert a domain `u64` counter to the store's signed `INTEGER` domain,
+/// rejecting values above `i64::MAX`.
+pub(crate) fn checked_counter_i64(
+    value: u64,
+    table: &'static str,
+    column: &'static str,
+    run_id: &Option<String>,
+) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::Corrupt {
+        table,
+        column,
+        run_id: run_id.clone(),
+        detail: format!("counter {value} exceeds the signed 64-bit INTEGER store domain"),
+    })
+}
+
+/// Convert an ordinal (an index into a canonically ordered collection)
+/// to the store's signed `INTEGER` domain, rejecting values above
+/// `i64::MAX`. No giant allocation is needed to hit the bound: the
+/// caller's collection is already in memory, so this is a cheap check.
+pub(crate) fn checked_ord_i64(
+    ordinal: usize,
+    table: &'static str,
+    column: &'static str,
+    run_id: &Option<String>,
+) -> Result<i64, StoreError> {
+    i64::try_from(ordinal).map_err(|_| StoreError::Corrupt {
+        table,
+        column,
+        run_id: run_id.clone(),
+        detail: format!("ordinal {ordinal} exceeds the signed 64-bit INTEGER store domain"),
+    })
+}
+
 /// The two application vectors the commit accepts disagreed. Reported as
 /// corruption because the caller would otherwise get a snapshot that does
 /// not describe the facts the model was built from.
@@ -1671,17 +1889,63 @@ fn parallel_mismatch(run_id: &RunId, field: &str) -> StoreError {
     }
 }
 
-/// Canonical footprint-candidate order (path bytes, application, kind),
-/// with exact duplicates collapsed — the union rule the report and the
-/// per-application facts must agree on.
+/// Canonicalize a footprint-candidate collection: deterministic order,
+/// and a COMMUTATIVE reconciliation of same-key duplicates — never an
+/// arrival-order winner.
+///
+/// ## Set semantics (explicit)
+///
+/// The admission key is `(path bytes, application, kind)`: that is what
+/// makes one *scope* for an application, so it is the unit a caller
+/// reports once. Everything else — confidence and the evidence list —
+/// describes how well that scope is known, so two candidates sharing a
+/// key are two DESCRIPTIONS of one scope, not two scopes.
+///
+/// ## Reconciliation rule (commutative, deterministic, producer-consistent)
+///
+/// Same-key candidates are reconciled by the SAME precedence the
+/// producer (`coresight_apps::footprint::admit_candidate` /
+/// `candidate_rank`) applies: stronger `Confidence` wins, then the
+/// canonically larger evidence list. Because the comparison is a total
+/// order over the candidates' own content, `choose(a, b) == choose(b, a)`
+/// — the surviving candidate is a pure function of the duplicate SET, so
+/// no arrival order can decide it and no meaningful evidence is silently
+/// dropped (the winner is simply the strictly better description).
+///
+/// Candidates that differ ONLY in confidence/evidence are therefore one
+/// fact; candidates that differ in path, application, or kind are
+/// distinct facts and are all preserved.
 fn canonicalize_footprints(candidates: &mut Vec<FootprintCandidate>) {
+    // Total order over the full content: sort by the admission key, then
+    // by the reconciliation rank in DESCENDING order, so within each
+    // same-key run the FIRST element is the best description.
     candidates.sort_by(|a, b| {
         path_bytes(&a.path)
             .cmp(path_bytes(&b.path))
             .then(a.app.0.cmp(&b.app.0))
             .then(a.kind.cmp(&b.kind))
+            .then(evidence_rank(b).cmp(&evidence_rank(a)))
     });
+    // `dedup_by` keeps the FIRST element of each adjacent same-key run,
+    // which the sort above made the best description. Equivalent to a max
+    // over the group, so the survivor cannot depend on the pre-sort order.
     candidates.dedup_by(|a, b| a.path == b.path && a.app == b.app && a.kind == b.kind);
+}
+
+/// The reconciliation rank of one candidate: stronger confidence first,
+/// then the fuller canonically-ordered evidence list.
+///
+/// Confidence strength uses the SAME explicit order the producer
+/// (`coresight_apps::footprint`) ranks by — `Confirmed` is declared
+/// FIRST in the `Confidence` enum, so its derived `Ord` puts it lowest.
+/// Ranking by declaration order would make "stronger wins" false.
+/// The order is defined once in `coresight-apps` and reused here, so
+/// persistence and discovery cannot disagree.
+fn evidence_rank(c: &FootprintCandidate) -> (u8, &[FootprintEvidence]) {
+    (
+        coresight_apps::footprint::confidence_strength(c.confidence),
+        c.evidence.as_slice(),
+    )
 }
 
 fn decode_snap_path(

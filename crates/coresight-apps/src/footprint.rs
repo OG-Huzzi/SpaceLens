@@ -275,8 +275,31 @@ impl CandidateKey {
 /// Canonical precedence between two same-key candidates: stronger
 /// confidence wins, then the fuller evidence list. Arrival order is never
 /// a tie-breaker.
-fn candidate_rank(c: &FootprintCandidate) -> (Confidence, &[FootprintEvidence]) {
-    (c.confidence, c.evidence.as_slice())
+///
+/// Confidence strength is ranked by [`confidence_strength`], NOT by the
+/// derived `Ord` on [`Confidence`]: the enum is declared proof-first
+/// (`Confirmed` first), so its `Ord` puts `Confirmed` LOWEST. Using the
+/// raw `Ord` here made `max`-style selection prefer `Unknown` over
+/// `Confirmed` — the opposite of the documented rule. Ranking by the
+/// explicit strength order keeps "stronger wins" literally true.
+fn candidate_rank(c: &FootprintCandidate) -> (u8, &[FootprintEvidence]) {
+    (confidence_strength(c.confidence), c.evidence.as_slice())
+}
+
+/// Strength order of a confidence band: higher is stronger. Explicit
+/// (not the enum's declaration order) so "stronger wins" is unambiguous.
+///
+/// Public so every consumer that reconciles candidates — including the
+/// persistence boundary — ranks by the SAME order instead of re-deriving
+/// one from `Confidence`'s declaration order.
+pub fn confidence_strength(c: Confidence) -> u8 {
+    match c {
+        Confidence::Unknown => 0,
+        Confidence::Possible => 1,
+        Confidence::Probable => 2,
+        Confidence::Strong => 3,
+        Confidence::Confirmed => 4,
+    }
 }
 
 /// Bounded candidate admission. Working memory is O(max_records)

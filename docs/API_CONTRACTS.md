@@ -193,6 +193,19 @@ reload, application ids are re-verified against normalized
 (`Corrupt { table, column, run_id, detail }`, `SnapshotBounded`,
 `SchemaTooNew`, `UnknownRun`, …) — never a defaulted value.
 
+Phase 6.4.1 additions:
+
+- Values are range-checked **before** the snapshot transaction, so an
+  unrepresentable size/counter/ordinal rejects the commit and preserves
+  the previous snapshot — never wrapped or narrowed.
+- Footprint candidates are reconciled by a commutative, deterministic
+  rule at both commit and load (stronger confidence, then fuller
+  evidence), so stored and reloaded facts are identical; a footprint
+  attributed to a foreign application is rejected.
+- `ApplicationId` uses a length-prefixed encoding (injective at component
+  boundaries). Ids persisted under the Phase 6.4 encoding are re-keyed by
+  the v5→v6 migration, per stored fact rather than globally.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

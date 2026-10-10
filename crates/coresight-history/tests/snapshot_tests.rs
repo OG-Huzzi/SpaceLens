@@ -9,10 +9,10 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use coresight_apps::{
-    ApplicationId, ApplicationRecord, ApplicationSource, AssociationScope, CorrelationGroup,
-    EvidenceKind, EvidenceSource, EvidenceStrength, FootprintCandidate, FootprintEvidence,
-    FootprintKind, FootprintReport, Inventory, MatchedAttribute, OwnershipEvidence, PackageKind,
-    ProbedKind, SourceCoverage, SourceStatus,
+    ApplicationId, ApplicationRecord, ApplicationSource, AssociationScope, Confidence,
+    CorrelationGroup, EvidenceKind, EvidenceSource, EvidenceStrength, FootprintCandidate,
+    FootprintEvidence, FootprintKind, FootprintReport, Inventory, MatchedAttribute,
+    OwnershipEvidence, PackageKind, ProbedKind, SourceCoverage, SourceStatus,
 };
 use coresight_capabilities::access::AccessState;
 use coresight_classifier::{Category, Confidence as ClassificationConfidence};
@@ -113,6 +113,7 @@ fn install_evidence(app: &ApplicationRecord, path: &str) -> OwnershipEvidence {
 
 /// Build a matched (input, app_facts) pair plus an empty inventory and
 /// footprint report — the shape a real caller commits.
+#[derive(Clone)]
 struct Committed {
     input: SystemModelInput,
     app_facts: Vec<AppSnapshotFact>,
@@ -257,6 +258,27 @@ fn commit_snapshot(store: &mut HistoryStore, id: &str, offset: u64, snap: &Commi
     record.run_id
 }
 
+/// Open (or create) a store at `dir/name` for a test.
+fn store_in(dir: &std::path::Path, name: &str) -> HistoryStore {
+    HistoryStore::open(&dir.join(name)).unwrap()
+}
+
+/// The id the Phase 6.4 (delimiter-joined) encoding derived from a pair:
+/// `app-<sha256("{name}|{publisher}")>`. Used only by the migration
+/// fixtures, to write the ids a real v5 store actually holds.
+fn legacy_id_of(name: &str, publisher: Option<&str>) -> String {
+    use sha2::Digest;
+    let key = ApplicationId::legacy_derivation_key(name, publisher);
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    format!(
+        "app-{}",
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
+}
+
 fn model_of(input: &SystemModelInput) -> coresight_system_model::SystemModel {
     build_system_model(input, &SystemModelLimits::default())
 }
@@ -276,7 +298,10 @@ fn fresh_database_migrates_to_schema_v5_with_snapshot_tables() {
         .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(version, HISTORY_SCHEMA_VERSION);
-    assert_eq!(HISTORY_SCHEMA_VERSION, 5, "Phase 6.4 adds schema v5");
+    assert_eq!(
+        HISTORY_SCHEMA_VERSION, 6,
+        "v5 added the snapshot tables; v6 re-keys application ids"
+    );
 
     for table in [
         "app_snapshot_meta",
@@ -309,7 +334,10 @@ fn v4_database_migrates_forward_preserving_every_row() {
     let version: u32 = conn
         .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5, "opening a v4 store must apply the v5 migration");
+    assert_eq!(
+        version, 6,
+        "opening a v4 store must apply v5 then the v6 re-key (both legacy-free)"
+    );
     assert!(table_exists(&conn, "app_snapshot_meta"));
 
     // The pre-existing run and its observation survived untouched.
@@ -357,7 +385,7 @@ fn migration_is_idempotent_across_repeated_opens() {
     let version: u32 = conn
         .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, HISTORY_SCHEMA_VERSION);
 }
 
 #[test]
@@ -1634,6 +1662,9 @@ fn maximum_integer_values_round_trip_without_narrowing() {
     let db = dir.path().join("max-int.db");
     let mut store = HistoryStore::open(&db).unwrap();
 
+    // 1. Full-width object identity at u64::MAX in every component DOES
+    //    round-trip: identity columns are intentional bit-pattern
+    //    conversions, so `u64::MAX` reconstructs exactly.
     let snap = committed(
         SystemModelInput {
             artifacts: vec![ArtifactFact {
@@ -1644,6 +1675,54 @@ fn maximum_integer_values_round_trip_without_narrowing() {
                     file_id: u64::MAX,
                     file_id_hi: Some(u64::MAX),
                 }),
+                content_sha256: None,
+                size: Some(i64::MAX as u64),
+                access: AccessState::ReadSucceeded,
+                classification: None,
+            }],
+            applications: Vec::new(),
+            relationships: Vec::new(),
+            history: Vec::new(),
+            source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+        },
+        Vec::new(),
+    );
+    let run_id = commit_snapshot(&mut store, "max-int-run", 1, &snap);
+    let loaded = store
+        .load_system_snapshot(&run_id, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.input.artifacts[0].size,
+        Some(i64::MAX as u64),
+        "a size at the INTEGER boundary must round-trip exactly"
+    );
+    assert_eq!(
+        loaded.input.artifacts[0].identity,
+        Some(ObjectIdentity {
+            volume: u64::MAX,
+            file_id: u64::MAX,
+            file_id_hi: Some(u64::MAX),
+        }),
+        "full-width identity must reconstruct exactly"
+    );
+}
+
+#[test]
+fn an_unrepresentable_size_is_rejected_at_commit_not_at_reload() {
+    // `u64::MAX` exceeds the signed INTEGER store domain. It must be
+    // rejected BEFORE the transaction writes anything — never narrowed,
+    // wrapped, saturated, or deferred until reload (Workstream C).
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("oversize.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    let snap = committed(
+        SystemModelInput {
+            artifacts: vec![ArtifactFact {
+                path: PathBuf::from("/oversize"),
+                kind: ProbedKind::File,
+                identity: Some(ObjectIdentity::narrow(1, 1)),
                 content_sha256: None,
                 size: Some(u64::MAX),
                 access: AccessState::ReadSucceeded,
@@ -1656,30 +1735,65 @@ fn maximum_integer_values_round_trip_without_narrowing() {
         },
         Vec::new(),
     );
-    let run_id = commit_snapshot(&mut store, "max-int-run", 1, &snap);
+    let record = run_record("oversize-run", 1);
+    store.begin_run(&record).unwrap();
+    let err = store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &snap.app_facts,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .expect_err("an unrepresentable size must be rejected at commit");
+    assert_corrupt(&err, "app_snapshot_artifacts", "size");
+    // Nothing was written: a rejected first commit creates no snapshot.
+    assert!(!store.has_system_snapshot(&record.run_id).unwrap());
+}
 
-    // NOTE: `u64::MAX` as a size exceeds `i64::MAX`, so the persistence
-    // contract (signed SQLite INTEGER columns, like every existing
-    // column) cannot round-trip it — and it must fail loudly rather than
-    // silently truncate. The identity components DO round-trip because
-    // they are stored as bit-patterns.
-    let loaded = store.load_system_snapshot(&run_id, &QueryLimits::default());
-    match loaded {
-        Err(StoreError::Corrupt { column, .. }) => assert_eq!(column, "size"),
-        Ok(Some(s)) => {
-            // If the platform allowed it through, the value must be exact.
-            assert_eq!(s.input.artifacts[0].size, Some(u64::MAX));
-            assert_eq!(
-                s.input.artifacts[0].identity,
-                Some(ObjectIdentity {
-                    volume: u64::MAX,
-                    file_id: u64::MAX,
-                    file_id_hi: Some(u64::MAX),
-                })
-            );
-        }
-        other => panic!("unexpected: {other:?}"),
-    }
+#[test]
+fn an_unrepresentable_estimated_size_is_rejected_before_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("oversize-est.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    let mut record = app_record("Big", Some("Bytes"));
+    record.estimated_size_bytes = Some(u64::MAX);
+    let evidence = install_evidence(&record, "/apps/Big");
+    let snap = committed(
+        SystemModelInput {
+            artifacts: vec![artifact("/apps/Big", 1, 1, None)],
+            applications: vec![ApplicationFact {
+                record: record.clone(),
+                install_roots: vec![PathBuf::from("/apps/Big")],
+                executable: None,
+                associations: vec![(PathBuf::from("/apps/Big"), evidence.clone())],
+            }],
+            relationships: Vec::new(),
+            history: Vec::new(),
+            source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+        },
+        vec![AppSnapshotFact {
+            record,
+            install_roots: vec![PathBuf::from("/apps/Big")],
+            executable: None,
+            associations: vec![(PathBuf::from("/apps/Big"), evidence)],
+            footprints: Vec::new(),
+        }],
+    );
+    let run = run_record("oversize-est-run", 1);
+    store.begin_run(&run).unwrap();
+    let err = store
+        .commit_system_snapshot(
+            &run.run_id,
+            &snap.input,
+            &snap.app_facts,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .expect_err("an unrepresentable estimated size must be rejected");
+    assert_corrupt(&err, "app_snapshot_apps", "estimated_size");
+    assert!(!store.has_system_snapshot(&run.run_id).unwrap());
 }
 
 #[test]
@@ -2332,6 +2446,1023 @@ fn load_snapshot_applications_reports_its_own_bound() {
 }
 
 // ---------------------------------------------------------------------------
+// Workstream B — footprint fidelity
+// ---------------------------------------------------------------------------
+
+/// One footprint candidate for an application scope.
+fn footprint(path: &str, app: &ApplicationId, conf: Confidence, why: &str) -> FootprintCandidate {
+    FootprintCandidate {
+        path: PathBuf::from(path),
+        app: app.clone(),
+        kind: FootprintKind::InstallationDirectory,
+        confidence: conf,
+        evidence: vec![FootprintEvidence::new(
+            EvidenceKind::InstallLocation,
+            conf,
+            "registry",
+            AssociationScope::ThisMachine,
+            why,
+        )],
+    }
+}
+
+/// One application fact carrying `footprints`.
+fn app_fact_with_footprints(
+    record: ApplicationRecord,
+    roots: Vec<PathBuf>,
+    footprints: Vec<FootprintCandidate>,
+) -> AppSnapshotFact {
+    AppSnapshotFact {
+        record,
+        install_roots: roots,
+        executable: None,
+        associations: Vec::new(),
+        footprints,
+    }
+}
+
+/// Replace a `Committed`'s footprint report (the builder helpers below
+/// build the report from the same candidates, so the two always agree).
+fn with_footprint(mut c: Committed, report: FootprintReport) -> Committed {
+    c.footprint = report;
+    c
+}
+
+#[test]
+fn same_key_footprint_duplicates_are_reconciled_not_arrival_ordered() {
+    // Two descriptions of the SAME scope (path, app, kind) differing only
+    // in confidence/evidence. The survivor must be the better description
+    // — chosen by content, never by which arrived first — and no evidence
+    // may be silently dropped without the winner being that description.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_record("Dup", Some("Pub"));
+    let roots = vec![PathBuf::from("/apps/Dup")];
+
+    /// One snapshot whose single application carries `fps`; the report is
+    /// the same candidates, canonicalized exactly as the implementation
+    /// canonicalizes, so report and facts agree by construction.
+    fn build(
+        app: &ApplicationRecord,
+        roots: Vec<PathBuf>,
+        fps: Vec<FootprintCandidate>,
+    ) -> Committed {
+        let mut report = fps.clone();
+        report.sort_by(|a, b| {
+            a.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.path.as_os_str().as_encoded_bytes())
+                .then(a.app.0.cmp(&b.app.0))
+                .then(a.kind.cmp(&b.kind))
+                .then(
+                    coresight_apps::footprint::confidence_strength(b.confidence).cmp(
+                        &coresight_apps::footprint::confidence_strength(a.confidence),
+                    ),
+                )
+        });
+        report.dedup_by(|a, b| a.path == b.path && a.app == b.app && a.kind == b.kind);
+        with_footprint(
+            committed(
+                SystemModelInput {
+                    artifacts: vec![artifact("/apps/Dup", 1, 1, None)],
+                    applications: vec![ApplicationFact {
+                        record: app.clone(),
+                        install_roots: roots.clone(),
+                        executable: None,
+                        associations: Vec::new(),
+                    }],
+                    relationships: Vec::new(),
+                    history: Vec::new(),
+                    source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+                },
+                vec![app_fact_with_footprints(app.clone(), roots, fps)],
+            ),
+            FootprintReport {
+                candidates: report,
+                ..FootprintReport::default()
+            },
+        )
+    }
+
+    // Commit order A: weak first, strong second.
+    let forward = build(
+        &app,
+        roots.clone(),
+        vec![
+            footprint("/apps/Dup", &app.id, Confidence::Possible, "weak"),
+            footprint("/apps/Dup", &app.id, Confidence::Confirmed, "strong"),
+        ],
+    );
+    // Commit order B: the same two candidates in the reverse arrival order.
+    let reversed = build(
+        &app,
+        roots,
+        vec![
+            footprint("/apps/Dup", &app.id, Confidence::Confirmed, "strong"),
+            footprint("/apps/Dup", &app.id, Confidence::Possible, "weak"),
+        ],
+    );
+
+    let mut store_a = store_in(dir.path(), "dup-a.db");
+    let mut store_b = store_in(dir.path(), "dup-b.db");
+    let run_a = commit_snapshot(&mut store_a, "dup-run-a", 1, &forward);
+    let run_b = commit_snapshot(&mut store_b, "dup-run-b", 2, &reversed);
+
+    let loaded_a = store_a
+        .load_system_snapshot(&run_a, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+    let loaded_b = store_b
+        .load_system_snapshot(&run_b, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+
+    // Exactly ONE row survives the reconciliation (one scope), and it is
+    // the SAME (better) description regardless of arrival order.
+    assert_eq!(
+        loaded_a.footprint.candidates.len(),
+        1,
+        "same-key descriptions collapse to one scope"
+    );
+    assert_eq!(
+        loaded_a.footprint.candidates, loaded_b.footprint.candidates,
+        "the surviving description must not depend on arrival order"
+    );
+    assert_eq!(
+        loaded_a.footprint.candidates[0].confidence,
+        Confidence::Confirmed,
+        "the strictly better description must win"
+    );
+    assert_eq!(
+        loaded_a.footprint.candidates[0].evidence[0].why, "strong",
+        "the winner's evidence must survive intact"
+    );
+
+    // The rebuilt model is identical for both arrival orders.
+    let m_a = store_a
+        .rebuild_system_model(
+            &run_a,
+            &QueryLimits::default(),
+            &SystemModelLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+    let m_b = store_b
+        .rebuild_system_model(
+            &run_b,
+            &QueryLimits::default(),
+            &SystemModelLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        m_a, m_b,
+        "footprint reconciliation must be order-independent"
+    );
+    m_a.check_invariants().unwrap();
+}
+
+#[test]
+fn distinct_footprint_facts_are_all_preserved() {
+    // Candidates differing in the admission key (path / app / kind) are
+    // DISTINCT facts: none may be collapsed, and each keeps its evidence.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_record("Distinct", Some("Pub"));
+    let other = app_record("Other", Some("Pub"));
+    let roots = vec![PathBuf::from("/apps/Distinct")];
+
+    // Two applications, each with its own facts. The cache candidate is
+    // attributed to `other`, so it must ride in `other`'s fact — the
+    // storage is per-application, and the commit validation enforces that
+    // a candidate's `app` matches its enclosing fact.
+    let other_roots = vec![PathBuf::from("/apps/Other")];
+    let fps = vec![
+        footprint(
+            "/apps/Distinct",
+            &app.id,
+            Confidence::Confirmed,
+            "the install directory",
+        ),
+        FootprintCandidate {
+            path: PathBuf::from("/apps/Distinct/bin"),
+            app: app.id.clone(),
+            kind: FootprintKind::Executable,
+            confidence: Confidence::Probable,
+            evidence: vec![FootprintEvidence::new(
+                EvidenceKind::ExactExecutablePath,
+                Confidence::Probable,
+                "registry",
+                AssociationScope::ThisMachine,
+                "the recorded executable",
+            )],
+        },
+    ];
+    let other_fps = vec![FootprintCandidate {
+        path: PathBuf::from("/apps/Distinct"),
+        app: other.id.clone(),
+        kind: FootprintKind::Cache,
+        confidence: Confidence::Possible,
+        evidence: vec![FootprintEvidence::new(
+            EvidenceKind::KnownApplicationDirectory,
+            Confidence::Possible,
+            "registry",
+            AssociationScope::ThisMachine,
+            "another application's cache",
+        )],
+    }];
+    let mut all = fps.clone();
+    all.extend(other_fps.clone());
+
+    let snap = with_footprint(
+        committed(
+            SystemModelInput {
+                artifacts: vec![artifact("/apps/Distinct", 1, 1, None)],
+                applications: vec![
+                    ApplicationFact {
+                        record: app.clone(),
+                        install_roots: roots.clone(),
+                        executable: None,
+                        associations: Vec::new(),
+                    },
+                    ApplicationFact {
+                        record: other.clone(),
+                        install_roots: other_roots.clone(),
+                        executable: None,
+                        associations: Vec::new(),
+                    },
+                ],
+                relationships: Vec::new(),
+                history: Vec::new(),
+                source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+            },
+            vec![
+                app_fact_with_footprints(app.clone(), roots, fps),
+                app_fact_with_footprints(other.clone(), other_roots, other_fps),
+            ],
+        ),
+        FootprintReport {
+            candidates: all,
+            ..FootprintReport::default()
+        },
+    );
+
+    let mut store = store_in(dir.path(), "distinct.db");
+    let run_id = commit_snapshot(&mut store, "distinct-run", 1, &snap);
+    let loaded = store
+        .load_system_snapshot(&run_id, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        loaded.footprint.candidates.len(),
+        3,
+        "distinct-key candidates must all survive"
+    );
+    for c in &loaded.footprint.candidates {
+        assert_eq!(c.evidence.len(), 1, "each candidate keeps its own evidence");
+        assert!(!c.evidence[0].why.is_empty());
+    }
+    let apps: Vec<&str> = loaded
+        .footprint
+        .candidates
+        .iter()
+        .map(|c| c.app.0.as_str())
+        .collect();
+    assert!(apps.contains(&app.id.0.as_str()), "own attribution kept");
+    assert!(
+        apps.contains(&other.id.0.as_str()),
+        "foreign attribution kept"
+    );
+}
+
+#[test]
+fn footprint_attributed_to_a_foreign_application_is_rejected() {
+    // A footprint rides along its application fact, so its `app` must BE
+    // that fact's application. A candidate attributed to different
+    // software would silently relocate a scope onto the wrong application
+    // on reload, so it is rejected before any row is written.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_record("Mine", Some("Pub"));
+    let other = app_record("Theirs", Some("Pub"));
+    let roots = vec![PathBuf::from("/apps/Mine")];
+
+    let snap = committed(
+        SystemModelInput {
+            artifacts: vec![artifact("/apps/Mine", 1, 1, None)],
+            applications: vec![ApplicationFact {
+                record: app.clone(),
+                install_roots: roots.clone(),
+                executable: None,
+                associations: Vec::new(),
+            }],
+            relationships: Vec::new(),
+            history: Vec::new(),
+            source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+        },
+        vec![app_fact_with_footprints(
+            app.clone(),
+            roots,
+            vec![footprint(
+                "/apps/Mine",
+                &other.id,
+                Confidence::Confirmed,
+                "misattributed",
+            )],
+        )],
+    );
+
+    let record = run_record("foreign-fp-run", 1);
+    let mut store = store_in(dir.path(), "foreign.db");
+    store.begin_run(&record).unwrap();
+    let err = store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &snap.app_facts,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .expect_err("a footprint attributed to another application must be rejected");
+    assert_corrupt(&err, "app_snapshot_footprints", "footprint_ord");
+    assert!(!store.has_system_snapshot(&record.run_id).unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// Workstream A — legacy application-id re-keying (v5 → v6)
+// ---------------------------------------------------------------------------
+
+/// Build a genuine Phase 6.4 (schema v5) database holding snapshot rows
+/// written under the LEGACY application-identity encoding, so the v6
+/// migration has real historical facts to re-key.
+///
+/// The fixture deliberately includes the ambiguity Phase 6.4 had: two
+/// rows whose `(name, publisher)` pairs are DISTINCT but which the legacy
+/// encoding derived the SAME id for — `("A|B","C")` and `("A","B|C")`.
+/// Both are committed under that one legacy id with different
+/// `fact_ord`s, so a safe migration must split them back into two ids and
+/// move each row's children to its own parent.
+fn build_legacy_v5_snapshot_store(db_path: &std::path::Path) {
+    let conn = Connection::open(db_path).unwrap();
+    // v1 bootstrap + the full v5 snapshot schema, matching MIGRATION_V2
+    // and MIGRATION_V5 as they shipped in Phase 6.4.
+    let core = V4_CORE_SCHEMA;
+    let snapshots = v5_snapshot_schema();
+    let sql = format!(
+        "CREATE TABLE schema_version (version INTEGER NOT NULL);
+         INSERT INTO schema_version (version) VALUES (1);
+         {core}
+         {snapshots}"
+    );
+    conn.execute_batch(&sql).unwrap();
+    conn.close().unwrap();
+}
+
+/// The v4 scan_runs/observations shape the v5 snapshot tables hang off.
+const V4_CORE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS scan_runs (
+    run_id TEXT PRIMARY KEY,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    roots TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    config TEXT NOT NULL,
+    status TEXT NOT NULL,
+    entries_examined INTEGER NOT NULL DEFAULT 0,
+    files INTEGER NOT NULL DEFAULT 0,
+    dirs INTEGER NOT NULL DEFAULT 0,
+    links INTEGER NOT NULL DEFAULT 0,
+    other_entries INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    observation_errors INTEGER NOT NULL DEFAULT 0,
+    candidates_untracked INTEGER NOT NULL DEFAULT 0,
+    hash_failures INTEGER NOT NULL DEFAULT 0,
+    rel_status TEXT,
+    rel_truncated INTEGER
+);
+CREATE TABLE IF NOT EXISTS observations (
+    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    size INTEGER,
+    device INTEGER, inode INTEGER, file_id_hi INTEGER, modified INTEGER,
+    category TEXT, subcategory TEXT, content_sha256 TEXT, obs_error TEXT,
+    PRIMARY KEY (run_id, path)
+);
+CREATE TABLE IF NOT EXISTS relationship_obs (
+    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+    rel_id TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL,
+    member_count INTEGER NOT NULL, recoverable INTEGER, accounting TEXT NOT NULL,
+    PRIMARY KEY (run_id, rel_id)
+);
+CREATE TABLE IF NOT EXISTS relationship_members (
+    run_id TEXT NOT NULL, rel_id TEXT NOT NULL, path TEXT NOT NULL,
+    device INTEGER, inode INTEGER, file_id_hi INTEGER,
+    PRIMARY KEY (run_id, rel_id, path)
+);
+";
+
+/// The v5 snapshot schema, verbatim from MIGRATION_V5 (a historical
+/// fixture: it mirrors the shipped DDL, never edits it).
+fn v5_snapshot_schema() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS app_snapshot_meta (
+            run_id TEXT PRIMARY KEY REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            records_truncated INTEGER NOT NULL, records_rejected INTEGER NOT NULL,
+            fp_candidates_truncated INTEGER NOT NULL, fp_children_truncated INTEGER NOT NULL,
+            fp_apps_truncated INTEGER NOT NULL, fp_evidence_truncated INTEGER NOT NULL
+        );
+        INSERT INTO scan_runs
+            (run_id, started_at, completed_at, roots, platform, config, status)
+            VALUES ('legacy-run', 1000, 2000, '[\"u:/scope\"]', 'test',
+                    '{{\"observationModel\":1,\"classifierSchema\":\"test\",\"classifierRules\":1,\"hashAlgorithm\":\"sha256\",\"relationshipSchema\":1,\"historySchema\":2}}',
+                    'COMPLETED');
+        INSERT INTO app_snapshot_meta
+            (run_id, records_truncated, records_rejected, fp_candidates_truncated,
+             fp_children_truncated, fp_apps_truncated, fp_evidence_truncated)
+            VALUES ('legacy-run', 0, 0, 0, 0, 0, 0);
+        CREATE TABLE IF NOT EXISTS app_snapshot_artifacts (
+            run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            artifact_ord INTEGER NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL,
+            size INTEGER, device INTEGER, inode INTEGER, file_id_hi INTEGER,
+            content_sha256 TEXT, access TEXT NOT NULL, category TEXT,
+            subcategory TEXT, confidence TEXT,
+            PRIMARY KEY (run_id, artifact_ord)
+        );
+        INSERT INTO app_snapshot_artifacts
+            (run_id, artifact_ord, path, kind, size, access)
+            VALUES ('legacy-run', 0, 'u:/apps/A', 'DIR', NULL, 'READ_SUCCEEDED');
+        {}",
+        apps_and_children()
+    )
+}
+
+/// The application rows, the child tables they reference, and every child
+/// row of the legacy fixture.
+///
+/// Two DISTINCT `(name, publisher)` pairs share ONE legacy id (the Phase
+/// 6.4 ambiguity), each with its own `fact_ord` and its own children — so
+/// a correct migration must split the id and carry each child to its own
+/// parent.
+fn apps_and_children() -> String {
+    // The id the OLD (Phase 6.4, delimiter-joined) encoding derived for
+    // BOTH pairs — the conflation the fixture must exercise. It is the
+    // SHA-256 of the legacy key, exactly as v5 stored it.
+    let legacy = legacy_id_of("A|B", Some("C"));
+    assert_eq!(
+        legacy,
+        legacy_id_of("A", Some("B|C")),
+        "the fixture must exercise the real ambiguity"
+    );
+    let child_tables = "
+        CREATE TABLE IF NOT EXISTS app_snapshot_provenance (
+            run_id TEXT NOT NULL, app_id TEXT NOT NULL, fact_ord INTEGER NOT NULL,
+            prov_ord INTEGER NOT NULL, source TEXT NOT NULL,
+            PRIMARY KEY (run_id, app_id, fact_ord, prov_ord),
+            FOREIGN KEY (run_id, app_id, fact_ord)
+                REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_views (
+            run_id TEXT NOT NULL, app_id TEXT NOT NULL, fact_ord INTEGER NOT NULL,
+            view_ord INTEGER NOT NULL, view TEXT NOT NULL,
+            PRIMARY KEY (run_id, app_id, fact_ord, view_ord),
+            FOREIGN KEY (run_id, app_id, fact_ord)
+                REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_roots (
+            run_id TEXT NOT NULL, app_id TEXT NOT NULL, fact_ord INTEGER NOT NULL,
+            root_ord INTEGER NOT NULL, path TEXT NOT NULL,
+            PRIMARY KEY (run_id, app_id, fact_ord, root_ord),
+            FOREIGN KEY (run_id, app_id, fact_ord)
+                REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_evidence (
+            run_id TEXT NOT NULL, app_id TEXT NOT NULL, fact_ord INTEGER NOT NULL,
+            artifact_path TEXT NOT NULL, evidence_ord INTEGER NOT NULL, kind TEXT NOT NULL,
+            source TEXT NOT NULL, strength TEXT NOT NULL, group_tag TEXT NOT NULL,
+            group_source TEXT, scope TEXT NOT NULL, observed_path TEXT NOT NULL,
+            matched_attribute TEXT NOT NULL, matched_value TEXT, matched_path TEXT,
+            PRIMARY KEY (run_id, app_id, fact_ord, artifact_path, evidence_ord),
+            FOREIGN KEY (run_id, app_id, fact_ord)
+                REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_footprints (
+            run_id TEXT NOT NULL, app_id TEXT NOT NULL, fact_ord INTEGER NOT NULL,
+            footprint_ord INTEGER NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            PRIMARY KEY (run_id, app_id, fact_ord, footprint_ord),
+            FOREIGN KEY (run_id, app_id, fact_ord)
+                REFERENCES app_snapshot_apps(run_id, app_id, fact_ord) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_footprint_evidence (
+            run_id TEXT NOT NULL, app_id TEXT NOT NULL, fact_ord INTEGER NOT NULL,
+            footprint_ord INTEGER NOT NULL, evidence_ord INTEGER NOT NULL,
+            kind TEXT NOT NULL, confidence TEXT NOT NULL, source TEXT NOT NULL,
+            scope TEXT NOT NULL, why TEXT NOT NULL,
+            PRIMARY KEY (run_id, app_id, fact_ord, footprint_ord, evidence_ord),
+            FOREIGN KEY (run_id, app_id, fact_ord, footprint_ord)
+                REFERENCES app_snapshot_footprints(run_id, app_id, fact_ord, footprint_ord)
+                ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_coverage (
+            run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            coverage_ord INTEGER NOT NULL, source TEXT NOT NULL,
+            status TEXT NOT NULL, note TEXT,
+            PRIMARY KEY (run_id, coverage_ord)
+        );
+        INSERT INTO app_snapshot_coverage (run_id, coverage_ord, source, status, note)
+            VALUES ('legacy-run', 0, 'win32-uninstall', 'COMPLETE', NULL);
+        CREATE TABLE IF NOT EXISTS app_snapshot_relationships (
+            run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            rel_ord INTEGER NOT NULL, kind TEXT NOT NULL, object_device INTEGER,
+            object_inode INTEGER, object_hi INTEGER, content_sha256 TEXT,
+            PRIMARY KEY (run_id, rel_ord)
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_rel_members (
+            run_id TEXT NOT NULL, rel_ord INTEGER NOT NULL, member_ord INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            PRIMARY KEY (run_id, rel_ord, member_ord),
+            FOREIGN KEY (run_id, rel_ord)
+                REFERENCES app_snapshot_relationships(run_id, rel_ord) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS app_snapshot_history (
+            run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            hist_ord INTEGER NOT NULL, hist_run_id TEXT NOT NULL, path TEXT NOT NULL,
+            device INTEGER, inode INTEGER, file_id_hi INTEGER, category TEXT,
+            PRIMARY KEY (run_id, hist_ord)
+        );
+        CREATE INDEX IF NOT EXISTS idx_app_snap_apps_id ON app_snapshot_apps(run_id, app_id);
+        UPDATE schema_version SET version = 5;";
+    format!(
+        "CREATE TABLE IF NOT EXISTS app_snapshot_apps (
+            run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            app_id TEXT NOT NULL,
+            fact_ord INTEGER NOT NULL,
+            name TEXT NOT NULL, version TEXT, publisher TEXT,
+            install_location TEXT, install_date TEXT, estimated_size INTEGER,
+            uninstall_string TEXT, quiet_uninstall_string TEXT, modify_path TEXT,
+            install_source TEXT, source TEXT NOT NULL, kind TEXT NOT NULL,
+            system_component INTEGER NOT NULL, bundle_identifier TEXT,
+            executable_path TEXT, executable_candidate TEXT,
+            PRIMARY KEY (run_id, app_id, fact_ord)
+        );
+        {child_tables}
+        -- Both rows carry the SAME (conflated) legacy id.
+        INSERT INTO app_snapshot_apps
+            (run_id, app_id, fact_ord, name, publisher, source, kind, system_component)
+            VALUES
+            ('legacy-run', '{legacy}', 0, 'A|B', 'C', 'REGISTRY_UNINSTALL', 'INSTALLED', 0),
+            ('legacy-run', '{legacy}', 1, 'A', 'B|C', 'REGISTRY_UNINSTALL', 'INSTALLED', 0);
+        INSERT INTO app_snapshot_provenance
+            (run_id, app_id, fact_ord, prov_ord, source)
+            VALUES
+            ('legacy-run', '{legacy}', 0, 0, 'REGISTRY_UNINSTALL'),
+            ('legacy-run', '{legacy}', 1, 0, 'REGISTRY_UNINSTALL');
+        INSERT INTO app_snapshot_roots (run_id, app_id, fact_ord, root_ord, path)
+            VALUES ('legacy-run', '{legacy}', 0, 0, 'u:/apps/A-root');
+        INSERT INTO app_snapshot_views (run_id, app_id, fact_ord, view_ord, view)
+            VALUES ('legacy-run', '{legacy}', 1, 0, 'HKLM64');
+        INSERT INTO app_snapshot_evidence
+            (run_id, app_id, fact_ord, artifact_path, evidence_ord, kind, source,
+             strength, group_tag, group_source, scope, observed_path,
+             matched_attribute, matched_value)
+            VALUES
+            ('legacy-run', '{legacy}', 0, 'u:/apps/A', 0, 'INSTALL_LOCATION',
+             'REGISTRY_METADATA', 'DIRECT', 'SOURCE_RECORD', 'REGISTRY_UNINSTALL',
+             'THIS_MACHINE', 'u:/apps/A', 'INSTALL_LOCATION', 'A|B'),
+            ('legacy-run', '{legacy}', 1, 'u:/apps/A', 0, 'INSTALL_LOCATION',
+             'REGISTRY_METADATA', 'DIRECT', 'SOURCE_RECORD', 'REGISTRY_UNINSTALL',
+             'THIS_MACHINE', 'u:/apps/A', 'INSTALL_LOCATION', 'A');
+        INSERT INTO app_snapshot_footprints
+            (run_id, app_id, fact_ord, footprint_ord, path, kind, confidence)
+            VALUES
+            ('legacy-run', '{legacy}', 0, 0, 'u:/apps/A', 'INSTALLATION_DIRECTORY', 'CONFIRMED'),
+            ('legacy-run', '{legacy}', 1, 0, 'u:/apps/A', 'INSTALLATION_DIRECTORY', 'CONFIRMED');
+        INSERT INTO app_snapshot_footprint_evidence
+            (run_id, app_id, fact_ord, footprint_ord, evidence_ord, kind, confidence,
+             source, scope, why)
+            VALUES
+            ('legacy-run', '{legacy}', 0, 0, 0, 'INSTALL_LOCATION', 'CONFIRMED',
+             'registry', 'THIS_MACHINE', 'recorded for A|B'),
+            ('legacy-run', '{legacy}', 1, 0, 0, 'INSTALL_LOCATION', 'CONFIRMED',
+             'registry', 'THIS_MACHINE', 'recorded for A');
+        INSERT INTO app_snapshot_history (run_id, hist_ord, hist_run_id, path, category)
+            VALUES ('legacy-run', 0, 'older-run', 'u:/apps/A', 'APPLICATIONS');"
+    )
+}
+
+#[test]
+fn a_legacy_v5_store_is_re_keyed_per_stored_fact_without_misattribution() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("legacy-v5.db");
+    build_legacy_v5_snapshot_store(&db);
+
+    // The legacy id really is conflated, and the two rows really are
+    // distinct pairs.
+    let legacy = legacy_id_of("A|B", Some("C"));
+    let expected_first = ApplicationId::derive("A|B", Some("C"));
+    let expected_second = ApplicationId::derive("A", Some("B|C"));
+    assert_ne!(
+        expected_first, expected_second,
+        "the fixture's two rows are distinct pairs"
+    );
+    {
+        let conn = Connection::open(&db).unwrap();
+        let rows: Vec<String> = conn
+            .prepare("SELECT app_id FROM app_snapshot_apps ORDER BY fact_ord")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rows, vec![legacy.clone(), legacy.clone()]);
+    }
+
+    // Opening applies the v6 migration.
+    let store = HistoryStore::open(&db).unwrap();
+    let run_id = RunId("legacy-run".to_string());
+    let loaded = store
+        .load_system_snapshot(&run_id, &QueryLimits::default())
+        .unwrap()
+        .expect("the legacy snapshot must be readable after migration");
+
+    // The conflated id SPLIT into the two distinct identities.
+    let ids: Vec<&str> = loaded
+        .app_facts
+        .iter()
+        .map(|f| f.record.id.0.as_str())
+        .collect();
+    assert!(ids.contains(&expected_first.0.as_str()));
+    assert!(ids.contains(&expected_second.0.as_str()));
+    assert_eq!(
+        ids.len(),
+        2,
+        "one legacy id split into exactly its two stored pairs"
+    );
+
+    // Each row kept its OWN facts (name/publisher), so nothing was merged
+    // or relabelled.
+    let by_id = |want: &str| -> &AppSnapshotFact {
+        loaded
+            .app_facts
+            .iter()
+            .find(|f| f.record.id.0 == want)
+            .unwrap_or_else(|| panic!("{want} must be present"))
+    };
+    let first = by_id(&expected_first.0);
+    assert_eq!(first.record.name, "A|B");
+    assert_eq!(first.record.publisher.as_deref(), Some("C"));
+    let second = by_id(&expected_second.0);
+    assert_eq!(second.record.name, "A");
+    assert_eq!(second.record.publisher.as_deref(), Some("B|C"));
+
+    // CHILD ATTRIBUTION: every child row followed ITS OWN parent.
+    assert_eq!(first.install_roots, vec![PathBuf::from("/apps/A-root")]);
+    assert_eq!(
+        first.associations[0].1.matched_value.as_deref(),
+        Some("A|B"),
+        "the evidence must stay with the row that owned it"
+    );
+    // The second row's own evidence stayed with it too.
+    assert_eq!(
+        second.associations[0].1.matched_value.as_deref(),
+        Some("A"),
+        "each row's evidence must follow its own parent"
+    );
+    assert_eq!(
+        second.record.observed_in_views,
+        vec!["HKLM64".to_string()],
+        "the view row must follow its own parent"
+    );
+}
+
+#[test]
+fn the_legacy_migration_preserves_child_rows_and_rebuilds_a_valid_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("legacy-v5b.db");
+    build_legacy_v5_snapshot_store(&db);
+    let store = HistoryStore::open(&db).unwrap();
+    let run_id = RunId("legacy-run".to_string());
+
+    let loaded = store
+        .load_system_snapshot(&run_id, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+
+    // Footprints, coverage, history and relationships all survived.
+    assert_eq!(loaded.footprint.candidates.len(), 2);
+    assert_eq!(loaded.input.source_coverage.len(), 1);
+    assert_eq!(loaded.input.history.len(), 1);
+    assert_eq!(loaded.input.artifacts.len(), 1);
+
+    // The rebuilt model passes the same invariant path as a fresh build,
+    // and both applications are present.
+    let model = store
+        .rebuild_system_model(
+            &run_id,
+            &QueryLimits::default(),
+            &SystemModelLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+    model.check_invariants().unwrap();
+    assert_eq!(model.applications().len(), 2);
+
+    // The id encoding is now current everywhere.
+    let conn = Connection::open(&db).unwrap();
+    let encodings: Vec<i64> = conn
+        .prepare("SELECT id_encoding FROM app_snapshot_apps")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        encodings,
+        vec![2, 2],
+        "every row now claims the current encoding"
+    );
+}
+
+#[test]
+fn opening_a_v6_store_repeatedly_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("legacy-v5c.db");
+    build_legacy_v5_snapshot_store(&db);
+    let run_id = RunId("legacy-run".to_string());
+    let expected_first = ApplicationId::derive("A|B", Some("C"));
+    let expected_second = ApplicationId::derive("A", Some("B|C"));
+
+    // First open performs the migration.
+    {
+        let store = HistoryStore::open(&db).unwrap();
+        let loaded = store
+            .load_system_snapshot(&run_id, &QueryLimits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.app_facts.len(), 2);
+    }
+    // Every later open finds nothing to do (idempotence-safe).
+    for _ in 0..3 {
+        let store = HistoryStore::open(&db).unwrap();
+        let loaded = store
+            .load_system_snapshot(&run_id, &QueryLimits::default())
+            .unwrap()
+            .unwrap();
+        let ids: Vec<&str> = loaded
+            .app_facts
+            .iter()
+            .map(|f| f.record.id.0.as_str())
+            .collect();
+        assert!(ids.contains(&expected_first.0.as_str()));
+        assert!(ids.contains(&expected_second.0.as_str()));
+    }
+
+    // The schema version is still exactly 6, and a NEWER store is refused.
+    let conn = Connection::open(&db).unwrap();
+    let version: u32 = conn
+        .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, HISTORY_SCHEMA_VERSION);
+    drop(conn);
+    conn_exec(&db, "UPDATE schema_version SET version = 99");
+    match HistoryStore::open(&db) {
+        Err(StoreError::SchemaTooNew { found, supported }) => {
+            assert_eq!(found, 99);
+            assert_eq!(supported, HISTORY_SCHEMA_VERSION);
+        }
+        Err(other) => panic!("a newer schema must be refused, got {other:?}"),
+        Ok(_) => panic!("a newer schema must be refused, but the store opened"),
+    }
+}
+
+/// Execute a statement against an already-openable database.
+fn conn_exec(db_path: &std::path::Path, sql: &str) {
+    let conn = Connection::open(db_path).unwrap();
+    conn.execute_batch(sql).unwrap();
+    conn.close().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Workstream C — query-bound safety
+// ---------------------------------------------------------------------------
+
+/// Exactly at the cap: nothing is reported as truncated.
+#[test]
+fn a_limit_exactly_at_the_fact_count_is_not_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = rich_snapshot();
+    let artifact_count = snap.input.artifacts.len();
+    assert!(
+        artifact_count > 1,
+        "the fixture must have several artifacts"
+    );
+
+    let mut store = store_in(dir.path(), "exact.db");
+    let run_id = commit_snapshot(&mut store, "exact-run", 1, &snap);
+
+    let at_limit = QueryLimits {
+        max_results: artifact_count,
+    };
+    let loaded = store
+        .load_system_snapshot(&run_id, &at_limit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.input.artifacts.len(), artifact_count);
+    assert!(
+        !loaded.is_load_truncated(),
+        "a limit exactly equal to the fact count must not be reported as capped"
+    );
+
+    // One more than that is also complete.
+    let over = QueryLimits {
+        max_results: artifact_count + 1,
+    };
+    let loaded = store.load_system_snapshot(&run_id, &over).unwrap().unwrap();
+    assert!(!loaded.is_load_truncated());
+    assert_eq!(loaded.input.artifacts.len(), artifact_count);
+}
+
+/// One below the cap: exactly one section reports, and the rebuild refuses.
+#[test]
+fn a_limit_one_below_the_fact_count_truncates_and_refuses_the_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = rich_snapshot();
+    let artifact_count = snap.input.artifacts.len();
+
+    let mut store = store_in(dir.path(), "below.db");
+    let run_id = commit_snapshot(&mut store, "below-run", 1, &snap);
+
+    let below = QueryLimits {
+        max_results: artifact_count - 1,
+    };
+    let loaded = store
+        .load_system_snapshot(&run_id, &below)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.input.artifacts.len(), artifact_count - 1);
+    assert!(loaded.is_load_truncated());
+    assert!(loaded.load_truncated_sections.contains(&"artifacts"));
+
+    match store.rebuild_system_model(&run_id, &below, &SystemModelLimits::default()) {
+        Err(StoreError::SnapshotBounded {
+            sections, limit, ..
+        }) => {
+            assert_eq!(limit, artifact_count - 1);
+            assert!(sections.contains(&"artifacts"));
+        }
+        other => panic!("a capped load must refuse the rebuild, got {other:?}"),
+    }
+}
+
+/// A zero limit caps everything, reports it, and refuses the rebuild —
+/// never silently builds from nothing.
+#[test]
+fn a_zero_limit_caps_everything_and_is_never_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = rich_snapshot();
+    let mut store = store_in(dir.path(), "zero.db");
+    let run_id = commit_snapshot(&mut store, "zero-run", 1, &snap);
+
+    let zero = QueryLimits { max_results: 0 };
+    let loaded = store.load_system_snapshot(&run_id, &zero).unwrap().unwrap();
+    assert!(loaded.input.artifacts.is_empty());
+    assert!(loaded.is_load_truncated(), "a zero limit is a real cap");
+    assert!(!loaded.load_truncated_sections.is_empty());
+
+    match store.rebuild_system_model(&run_id, &zero, &SystemModelLimits::default()) {
+        Err(StoreError::SnapshotBounded { .. }) => {}
+        other => panic!("a zero-limit rebuild must refuse, got {other:?}"),
+    }
+}
+
+/// An extreme limit must never disable cap detection (the probe row is
+/// still fetched and still compared), and must never become a NEGATIVE
+/// SQLite LIMIT (which SQLite reads as "unlimited").
+#[test]
+fn an_extreme_limit_cannot_bypass_cap_detection() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = rich_snapshot();
+    let artifact_count = snap.input.artifacts.len();
+    let mut store = store_in(dir.path(), "extreme.db");
+    let run_id = commit_snapshot(&mut store, "extreme-run", 1, &snap);
+
+    // Small enough not to allocate: `i64::MAX` and `usize::MAX` are the
+    // boundaries of the probe arithmetic.
+    for limit in [i64::MAX as usize, usize::MAX, i64::MAX as usize - 1] {
+        let loaded = store
+            .load_system_snapshot(&run_id, &QueryLimits { max_results: limit })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.input.artifacts.len(),
+            artifact_count,
+            "the limit must not change what is read"
+        );
+        assert!(
+            !loaded.is_load_truncated(),
+            "a huge limit is not a truncation of a small snapshot"
+        );
+    }
+    // A limit above the fact count still detects a genuine cap when one
+    // exists: cap at exactly the count minus one.
+    let below = QueryLimits {
+        max_results: artifact_count - 1,
+    };
+    let loaded = store
+        .load_system_snapshot(&run_id, &below)
+        .unwrap()
+        .unwrap();
+    assert!(loaded.is_load_truncated(), "cap detection still works");
+}
+
+/// The snapshot listing is bounded and cannot return more than requested.
+#[test]
+fn the_snapshot_listing_honours_its_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = rich_snapshot();
+    let mut store = store_in(dir.path(), "many.db");
+    for n in 1..=6u64 {
+        commit_snapshot(&mut store, &format!("list-{n}"), n, &snap);
+    }
+
+    let capped = store
+        .list_system_snapshots(&QueryLimits { max_results: 3 })
+        .unwrap();
+    assert_eq!(capped.len(), 3, "the listing respects its bound");
+    let small = store
+        .list_system_snapshots(&QueryLimits { max_results: 1 })
+        .unwrap();
+    assert_eq!(small.len(), 1);
+    let zero = store
+        .list_system_snapshots(&QueryLimits { max_results: 0 })
+        .unwrap();
+    assert!(
+        zero.is_empty(),
+        "a zero listing limit returns nothing (not everything)"
+    );
+    let all = store
+        .list_system_snapshots(&QueryLimits::default())
+        .unwrap();
+    assert_eq!(all.len(), 6, "an adequate limit lists every snapshot");
+    // Newest run first is the documented order.
+    assert_eq!(all[0].run_id, RunId("list-6".to_string()));
+}
+
+/// Relationship member rows are capped like every other section.
+#[test]
+fn relationship_members_are_capped_and_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_record("Members", Some("Pub"));
+    let weak = OwnershipEvidence::new(
+        EvidenceKind::FilenameSimilarity,
+        EvidenceSource::FilesystemPathHeuristic,
+        EvidenceStrength::Weak,
+        CorrelationGroup::NameDerived,
+        AssociationScope::ThisMachine,
+        PathBuf::from("/apps/Members"),
+        MatchedAttribute::ApplicationName,
+        Some("Members".to_string()),
+    );
+    let snap = committed(
+        SystemModelInput {
+            artifacts: vec![artifact("/apps/Members", 1, 1, None)],
+            applications: vec![],
+            relationships: vec![RelationshipFact {
+                kind: RelationshipFactKind::ContentDuplicate,
+                paths: (0..4)
+                    .map(|i| PathBuf::from(format!("/apps/Members/f{i}")))
+                    .collect(),
+                object: None,
+                content_sha256: Some(
+                    "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+                ),
+            }],
+            history: Vec::new(),
+            source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+        },
+        vec![],
+    );
+    let _ = (&app, &weak);
+    let mut store = store_in(dir.path(), "members.db");
+    let run_id = commit_snapshot(&mut store, "members-run", 1, &snap);
+
+    // A limit of 2 caps the 4 member paths.
+    let loaded = store
+        .load_system_snapshot(&run_id, &QueryLimits { max_results: 2 })
+        .unwrap()
+        .unwrap();
+    let rel = &loaded.input.relationships[0];
+    assert_eq!(rel.paths.len(), 2, "the member rows respect the cap");
+    assert!(
+        loaded.is_load_truncated(),
+        "a capped member list must be reported"
+    );
+    assert!(loaded
+        .load_truncated_sections
+        .contains(&"relationship_members"));
+}
+
+// ---------------------------------------------------------------------------
 // boundedness tests
 // ---------------------------------------------------------------------------
 
@@ -2391,6 +3522,74 @@ fn loading_one_snapshot_never_materializes_unrelated_runs() {
         "the capped section must be named (got {:?})",
         tiny.load_truncated_sections
     );
+}
+
+#[test]
+fn an_inventory_that_disagrees_with_the_facts_is_rejected() {
+    // `Inventory::records` is the merged discovery result the caller
+    // derived the snapshot from. If it disagrees with the committed
+    // application facts, the counters it supplies would describe records
+    // that were never stored — so the commit is refused, leaving no
+    // snapshot behind.
+    let dir = tempfile::tempdir().unwrap();
+    let mut snap = rich_snapshot();
+    // Drop one record so the inventory no longer describes the two
+    // stored applications.
+    snap.inventory.records.pop();
+
+    let record = run_record("inv-mismatch-run", 1);
+    let mut store = store_in(dir.path(), "inv-mismatch.db");
+    store.begin_run(&record).unwrap();
+    let err = store
+        .commit_system_snapshot(
+            &record.run_id,
+            &snap.input,
+            &snap.app_facts,
+            &snap.inventory,
+            &snap.footprint,
+        )
+        .expect_err("a disagreeing inventory must be rejected");
+    assert_corrupt(&err, "app_snapshot_meta", "records_truncated");
+    assert!(!store.has_system_snapshot(&record.run_id).unwrap());
+
+    // A superset inventory (an extra record) is rejected too.
+    let mut extra = rich_snapshot();
+    extra.inventory.records.push(app_record("Ghost", None));
+    let record2 = run_record("inv-extra-run", 1);
+    let mut store2 = store_in(dir.path(), "inv-extra.db");
+    store2.begin_run(&record2).unwrap();
+    let err = store2
+        .commit_system_snapshot(
+            &record2.run_id,
+            &extra.input,
+            &extra.app_facts,
+            &extra.inventory,
+            &extra.footprint,
+        )
+        .expect_err("an inventory with extra records must be rejected");
+    assert_corrupt(&err, "app_snapshot_meta", "records_truncated");
+    assert!(!store2.has_system_snapshot(&record2.run_id).unwrap());
+}
+
+#[test]
+fn an_inventory_with_the_same_records_in_any_order_is_accepted() {
+    // The comparison is a canonical multiset: the caller may hold the
+    // records in any order (a different provider enumeration order), and
+    // that must not be an error.
+    let dir = tempfile::tempdir().unwrap();
+    let mut snap = rich_snapshot();
+    snap.inventory.records.reverse();
+    let run_id = commit_snapshot(
+        &mut store_in(dir.path(), "inv-order.db"),
+        "inv-order-run",
+        1,
+        &snap,
+    );
+    let loaded = store_in(dir.path(), "inv-order.db")
+        .load_system_snapshot(&run_id, &QueryLimits::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.app_facts.len(), snap.app_facts.len());
 }
 
 #[test]

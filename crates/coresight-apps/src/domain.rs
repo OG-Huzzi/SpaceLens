@@ -22,24 +22,118 @@ use serde::{Deserialize, Serialize};
 /// applications. Two simultaneous DISTINCT installations with identical
 /// name and publisher are represented as one logical application — the
 /// indistinguishability is documented, not hidden.
+///
+/// ## The identity encoding (collision-free by construction)
+///
+/// The id hashes a **length-prefixed** encoding of the normalized pair:
+///
+/// ```text
+/// <len(name) as fixed 8-byte big-endian> <name bytes>
+/// <len(publisher) as fixed 8-byte big-endian> <publisher bytes>
+/// ```
+///
+/// A length prefix is self-delimiting, so the encoding is injective:
+/// no name/publisher content can forge a component boundary. The
+/// Phase 6.4 encoding (`"{name}|{publisher}"`) was ambiguous —
+/// `("A|B", "C")` and `("A", "B|C")` hashed identically, so two genuinely
+/// different logical applications shared one id. That is repaired here
+/// (Workstream A, Phase 6.4.1); see [`ApplicationId::COMPAT_NOTE`].
+///
+/// Normalization is unchanged and defined by [`normalized_pair`]:
+/// name trimmed and lowercased, publisher `None` treated as the empty
+/// string, trimmed and lowercased. Because normalization collapses all
+/// whitespace-trimmed and case-folded spellings to one form, identity is
+/// deliberately insensitive to case and surrounding whitespace, and
+/// sensitive to *interior* characters. Unicode is hashed as its UTF-8
+/// bytes (no Unicode normalization is applied — that would be a second,
+/// hidden rule, so NFC and NFD spellings stay distinct by design).
+///
+/// ## Compatibility
+///
+/// Changing the derivation changes every derived id, so ids persisted by
+/// the Phase 6.4 (schema v5) build would no longer verify against their
+/// stored name/publisher. Persisted rows are therefore **re-keyed, never
+/// globally replaced**: the `v5 → v6` migration recomputes each row's id
+/// from its OWN stored facts (one fact at a time), so a single legacy id
+/// that represented several distinct pairs splits back into distinct ids
+/// and every child row follows its parent. See
+/// [`ApplicationId::COMPAT_NOTE`] for the full rule.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ApplicationId(pub String);
 
 impl ApplicationId {
-    /// Derive a stable id from normalized name + publisher, so the same
-    /// logical application yields the same id across runs AND across
-    /// sources.
-    pub fn derive(name: &str, publisher: Option<&str>) -> Self {
-        use sha2::Digest;
-        let key = format!(
+    /// Version tag of the identity encoding. `1` was the Phase 6.4
+    /// delimiter-joined encoding (ambiguous at component boundaries);
+    /// `2` is the collision-free length-prefixed encoding. The tag is
+    /// recorded in [`ConfigFingerprint::app_snapshot_schema`]'s sibling
+    /// provenance and used by the migration to decide which rows need
+    /// re-keying, so old and new ids are never silently mixed.
+    pub const ID_ENCODING_VERSION: u32 = 2;
+
+    /// The legacy (Phase 6.4) encoding: `"{name}|{publisher}"`. Retained
+    /// ONLY so the migration can recognize and re-key legacy ids;
+    /// never used to derive a new id.
+    #[doc(hidden)]
+    pub fn legacy_derivation_key(name: &str, publisher: Option<&str>) -> String {
+        format!(
             "{}|{}",
             name.trim().to_lowercase(),
             publisher.unwrap_or("").trim().to_lowercase(),
-        );
-        let digest = sha2::Sha256::digest(key.as_bytes());
+        )
+    }
+
+    /// Human/tool-readable summary of the compatibility rule, so callers
+    /// and the migration agree without reading the implementation.
+    pub const COMPAT_NOTE: &'static str = "\
+Application identity is the SHA-256 of the length-prefixed normalized \
+(name, publisher) pair (encoding version 2). Encoding version 1 joined the \
+same pair with a '|' delimiter, which is ambiguous: ('A|B','C') and \
+('A','B|C') produced the same id. Ids persisted under version 1 are \
+re-keyed per stored fact by the v5→v6 migration — never globally replaced \
+— so a legacy id that covered several distinct pairs splits correctly and \
+its child rows follow it. Deriving or reading an id never consults the \
+discovery source: source is provenance, never identity.";
+
+    /// Derive a stable id from normalized name + publisher, so the same
+    /// logical application yields the same id across runs AND across
+    /// sources.
+    ///
+    /// See the type docs for the encoding and the compatibility rule.
+    pub fn derive(name: &str, publisher: Option<&str>) -> Self {
+        use sha2::Digest;
+        let (name, publisher) = normalized_pair(name, publisher);
+        let mut input = Vec::new();
+        push_component(&mut input, &name);
+        push_component(&mut input, &publisher);
+        let digest = sha2::Sha256::digest(&input);
         ApplicationId(format!("app-{}", hex8(&digest[..])))
     }
+}
+
+/// The canonical normalized identity pair: `(name, publisher)` both
+/// trimmed and lowercased, with a missing publisher represented as the
+/// empty string. This is the ONE normalization rule; both
+/// [`ApplicationId::derive`] and [`crate::discovery::merge_inventory`]'s
+/// merge key are defined by it, so the id and the merge key can never
+/// disagree.
+pub(crate) fn normalized_pair(name: &str, publisher: Option<&str>) -> (String, String) {
+    (
+        name.trim().to_lowercase(),
+        publisher.unwrap_or("").trim().to_lowercase(),
+    )
+}
+
+/// Append one self-delimiting component: its byte length as a fixed
+/// 8-byte big-endian prefix, then the bytes. Because the prefix states
+/// exactly how many bytes belong to this component, no interior byte
+/// sequence can be mistaken for a boundary — the pair encoding is
+/// injective for all inputs, including embedded separators, NUL bytes,
+/// and non-UTF-8-compatible scalars.
+fn push_component(out: &mut Vec<u8>, value: &str) {
+    let len = value.len() as u64;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(value.as_bytes());
 }
 
 fn hex8(bytes: &[u8]) -> String {

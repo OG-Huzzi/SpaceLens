@@ -159,8 +159,11 @@ impl From<crate::model::BuildError> for StoreError {
 /// claim a relationship completeness it never had; v5 (Phase 6.4) adds
 /// the normalized application/system snapshot tables
 /// (`app_snapshot_*`) so canonical application-intelligence facts and
-/// system-model inputs survive a reload deterministically.
-pub const HISTORY_SCHEMA_VERSION: u32 = 5;
+/// system-model inputs survive a reload deterministically; v6 (Phase
+/// 6.4.1) re-keys application ids persisted under the Phase 6.4
+/// delimiter-joined encoding, which was ambiguous at component
+/// boundaries (see [`MIGRATION_V6`]).
+pub const HISTORY_SCHEMA_VERSION: u32 = 6;
 
 /// Forward-only migration: v1 (core bootstrap) → v2 (history tables).
 const MIGRATION_V2: &str = "
@@ -266,6 +269,46 @@ UPDATE relationship_members
 const MIGRATION_V4: &str = "
 ALTER TABLE scan_runs ADD COLUMN rel_status TEXT;
 ALTER TABLE scan_runs ADD COLUMN rel_truncated INTEGER;
+";
+
+/// Forward-only migration: v5 → v6 (Phase 6.4.1, Workstream A).
+///
+/// The Phase 6.4 application identity hashed `"{name}|{publisher}"`,
+/// which is ambiguous at the component boundary: `("A|B","C")` and
+/// `("A","B|C")` derive the SAME id, so two distinct logical
+/// applications could share one `ApplicationId`. Phase 6.4.1 replaces
+/// that with a length-prefixed encoding (injective for all inputs), and
+/// this migration re-keys ids persisted under the legacy encoding.
+///
+/// The DDL below only adds the `id_encoding` provenance column; the
+/// re-keying itself is done in Rust by [`rekey_legacy_application_ids`],
+/// because the correct id depends on each row's own stored facts and no
+/// SQL expression can recompute a SHA-256. The rules that function
+/// enforces:
+///
+/// - **Never a global replace.** One legacy id may legitimately cover
+///   several distinct `(name, publisher)` pairs (exactly the ambiguity
+///   being repaired). Each row is re-keyed from ITS OWN stored
+///   `name`/`publisher`, so a legacy id splits back into the distinct
+///   identities it was conflating — never merged into one new id.
+/// - **Children follow their parent row.** `app_id` is a component of
+///   every child key (`provenance`, `views`, `roots`, `evidence`,
+///   `footprints`, `footprint_evidence`), so each child row is re-keyed
+///   to the id recomputed for the parent row it references. Attribution
+///   can therefore never drift to a different application.
+/// - **The probe column is authoritative.** `id_encoding` records which
+///   encoding a row was written with (`2` = current, `1` = legacy). The
+///   loader verifies it, so a v6 store whose rows still carry legacy ids
+///   is refused rather than silently trusted.
+/// - **Conflicting facts stay distinct.** Rows are re-keyed per
+///   `(run_id, app_id, fact_ord)`, so contradictory facts committed under
+///   one legacy id keep their own ordinals and remain separate after
+///   migration — no conflict is silently merged away.
+/// - **Idempotence-safe.** Re-running against a v6 database finds no
+///   legacy rows and performs no writes.
+const MIGRATION_V6: &str = "
+ALTER TABLE app_snapshot_apps
+    ADD COLUMN id_encoding INTEGER NOT NULL DEFAULT 2;
 ";
 
 /// Forward-only migration: v4 → v5 (Phase 6.4). Adds the normalized
@@ -529,6 +572,19 @@ impl HistoryStore {
             let tx = conn.transaction()?;
             tx.execute_batch(MIGRATION_V5)?;
             tx.execute("UPDATE schema_version SET version = 5", params![])?;
+            tx.commit()?;
+        }
+        if current < 6 {
+            let tx = conn.transaction()?;
+            // Re-keying necessarily swaps a parent row's key while its
+            // children still reference the old one (and vice versa).
+            // Immediate FK enforcement would reject those intermediate
+            // states, so the checks are DEFERRED to commit: either the
+            // whole re-key lands consistently or none of it does.
+            tx.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
+            tx.execute_batch(MIGRATION_V6)?;
+            rekey_legacy_application_ids(&tx)?;
+            tx.execute("UPDATE schema_version SET version = 6", params![])?;
             tx.commit()?;
         }
         let store = HistoryStore { conn };
@@ -1665,6 +1721,153 @@ fn retag_legacy_roots(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Er
             serde_json::to_string(&tagged).unwrap_or_default()
         ])?;
     }
+    Ok(())
+}
+
+/// Re-key every application row still carrying a legacy (Phase 6.4)
+/// `ApplicationId`, together with all of its dependent child rows.
+///
+/// Called inside the v6 migration transaction, so the whole re-key is
+/// atomic: any failure rolls the store back to v5 rather than leaving a
+/// partially re-keyed database.
+///
+/// ## How a row is recognised as legacy
+///
+/// A row is legacy when its stored `app_id` equals the id the OLD
+/// encoding derives from its own stored `(name, publisher)` **and** its
+/// stored id does NOT equal the id the CURRENT encoding derives from the
+/// same pair. Recomputing both from the row's own facts is what makes
+/// the migration independent of any external registry: the row itself
+/// states which identity it was written under.
+///
+/// ## Why per-row re-keying is safe
+///
+/// `app_id` alone is not unique — `(run_id, app_id, fact_ord)` is, which
+/// is precisely the granularity at which facts (including conflicting
+/// duplicates) are stored. Recomputing the id per row therefore:
+///
+/// - splits one legacy id that conflated several `(name, publisher)`
+///   pairs into the distinct identities the fixed encoding derives;
+/// - leaves a row whose legacy and new ids coincide untouched;
+/// - never merges two facts that the legacy encoding separated.
+///
+/// ## How children are re-keyed
+///
+/// Each child row is re-keyed by *joining on the parent's
+/// `(run_id, app_id, fact_ord)`*: the child's new id is its parent's new
+/// id, recomputed in the same pass. Because the parent's old id and
+/// `fact_ord` identify it uniquely, a child can never be adopted by a
+/// different application, and children of two rows that previously
+/// shared an id follow their own parent.
+fn rekey_legacy_application_ids(tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+    // Snapshot of the parent rows first: the child UPDATEs below read
+    // the same table, so it must not be mutated while iterated.
+    struct ParentRow {
+        run_id: String,
+        app_id: String,
+        fact_ord: i64,
+        name: String,
+        publisher: Option<String>,
+    }
+    let mut stmt = tx.prepare(
+        "SELECT run_id, app_id, fact_ord, name, publisher
+         FROM app_snapshot_apps ORDER BY run_id, app_id, fact_ord",
+    )?;
+    let parents: Vec<ParentRow> = stmt
+        .query_map([], |r| {
+            Ok(ParentRow {
+                run_id: r.get(0)?,
+                app_id: r.get(1)?,
+                fact_ord: r.get(2)?,
+                name: r.get(3)?,
+                publisher: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    // Recompute the legacy id exactly as Phase 6.4 did, so a row written
+    // by that build is recognised without consulting anything outside
+    // its own facts.
+    let legacy_id = |name: &str, publisher: Option<&str>| -> String {
+        use sha2::Digest;
+        let key = coresight_apps::ApplicationId::legacy_derivation_key(name, publisher);
+        let digest = sha2::Sha256::digest(key.as_bytes());
+        format!(
+            "app-{}",
+            digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        )
+    };
+
+    let mut rekeyed = 0u64;
+    for row in &parents {
+        let current = coresight_apps::ApplicationId::derive(&row.name, row.publisher.as_deref());
+        let legacy = legacy_id(&row.name, row.publisher.as_deref());
+        // Already current (or an id this build cannot explain): leave it
+        // alone and record which encoding it claims to be.
+        if row.app_id == current.0 {
+            continue;
+        }
+        if row.app_id != legacy {
+            // A stored id that matches NEITHER encoding is corruption;
+            // guessing would silently reinterpret a historical fact.
+            return Err(StoreError::Corrupt {
+                table: "app_snapshot_apps",
+                column: "app_id",
+                run_id: Some(row.run_id.clone()),
+                detail: "stored application id matches neither the legacy nor the current \
+                     identity encoding for its own (name, publisher); refusing to re-key"
+                    .to_string(),
+            });
+        }
+
+        // Children first (they reference this parent row's old id), then
+        // the parent itself — all inside the migration transaction. Each
+        // child table keys on the parent's (run_id, app_id, fact_ord), so
+        // a key match can only select THIS parent's children.
+        for table in [
+            "app_snapshot_provenance",
+            "app_snapshot_views",
+            "app_snapshot_roots",
+            "app_snapshot_evidence",
+            "app_snapshot_footprints",
+            "app_snapshot_footprint_evidence",
+        ] {
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET app_id = ?4
+                     WHERE run_id = ?1 AND app_id = ?2 AND fact_ord = ?3"
+                ),
+                params![row.run_id, row.app_id, row.fact_ord, current.0],
+            )?;
+        }
+        tx.execute(
+            "UPDATE app_snapshot_apps SET app_id = ?4, id_encoding = 2
+             WHERE run_id = ?1 AND app_id = ?2 AND fact_ord = ?3",
+            params![row.run_id, row.app_id, row.fact_ord, current.0],
+        )?;
+        rekeyed += 1;
+    }
+
+    // Every surviving row must now claim the CURRENT encoding; anything
+    // else would mean the pass missed a row (or a child drifted).
+    let still_legacy: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM app_snapshot_apps WHERE id_encoding <> 2",
+        [],
+        |r| r.get(0),
+    )?;
+    if still_legacy != 0 {
+        return Err(StoreError::Corrupt {
+            table: "app_snapshot_apps",
+            column: "id_encoding",
+            run_id: None,
+            detail: format!("{still_legacy} application row(s) left un-re-keyed"),
+        });
+    }
+    let _ = rekeyed;
     Ok(())
 }
 

@@ -51,6 +51,43 @@ application with unioned provenance.
 Changing the source of a record does not change its id; changing its name or
 publisher does.
 
+### The identity encoding (Phase 6.4.1 — collision-free)
+
+The id hashes a **length-prefixed** encoding of the normalized pair:
+
+```text
+<len(name) as 8-byte big-endian> <name bytes>
+<len(publisher) as 8-byte big-endian> <publisher bytes>
+```
+
+A length prefix is self-delimiting, so the encoding is **injective**: no
+name/publisher content can forge a component boundary. The Phase 6.4
+encoding joined the pair with a `|` delimiter, which was ambiguous —
+`("A|B","C")` and `("A","B|C")` derived the SAME id, so two distinct
+logical applications could share one identity. That is repaired here.
+
+Normalization is unchanged and defined once (`domain::normalized_pair`):
+name and publisher are each trimmed and lowercased; a missing publisher is
+the empty string, so `None` and `Some("")` are one identity. **No Unicode
+normalization is applied** — that would be a second hidden rule — so NFC
+and NFD spellings of the same name stay distinct by design. Identity is
+therefore insensitive to case and *outer* whitespace, and sensitive to
+interior characters.
+
+`ApplicationId::derive` and `discovery::merge_inventory` are defined by that
+same normalization, so the id and the merge key can never disagree.
+
+### Compatibility
+
+Ids persisted by Phase 6.4 (schema v5) are **re-keyed, never globally
+replaced**: the `v5 → v6` migration recomputes each row's id from its OWN
+stored `(name, publisher)`, so a legacy id that conflated several distinct
+pairs splits back into the distinct identities it was conflating, and every
+child row follows its parent. `ApplicationId::COMPAT_NOTE` states the rule;
+`ID_ENCODING_VERSION` records which encoding a row was written with, and the
+loader refuses a row claiming the legacy encoding in a v6 store rather than
+silently trusting it.
+
 `merge_inventory` chooses a winning record by a **total content order**
 (completeness first, then every surviving field, then the display spelling of
 name/publisher). Provider call order is never a tie-breaker, so

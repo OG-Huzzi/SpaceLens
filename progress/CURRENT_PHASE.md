@@ -3,9 +3,15 @@
 PHASE 6.4 — Persistent Application Intelligence + System-Model Snapshot
 Integration
 
-**Status: VERIFIED**
+PHASE 6.4.1 — Deep Integrity Hardening (application identity, footprint
+fidelity, numeric/query-bound safety, integrated persistence audit)
 
-- **Final verified commit:** `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
+**Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1 is
+IMPLEMENTED with a green local gate; its exact-SHA CI record follows in
+the Phase 6.4.1 section once that run is confirmed.
+
+- **Final verified commit (Phase 6.4):**
+  `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
   ("fix: enforce snapshot input consistency and report every capped
   section"), pushed to `main`. Exact-SHA CI run
   [38034695355](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38034695355),
@@ -185,6 +191,109 @@ Phase 6.4's implementation code is therefore frozen at
 `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`; any later commit in this
 phase is documentation-only and is still run through the full gate on its
 own SHA.
+
+## Phase 6.4.1 — Deep Integrity Hardening
+
+Verified against baseline `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
+(the Phase 6.4 record above is preserved unchanged).
+
+### Migration version
+
+**6** (`HISTORY_SCHEMA_VERSION` 5 → 6). Schema v6 exists solely to
+record which identity encoding each application row was written with and
+to re-key ids persisted under the Phase 6.4 delimiter-joined encoding.
+
+### Found and fixed
+
+Each finding was verified empirically before any change.
+
+1. **Ambiguous application identity (Workstream A).** `"A|B"|"C"` and
+   `"A"|"B|C"` hashed identically (confirmed by probe), so two distinct
+   logical applications shared one `ApplicationId`. Replaced with a
+   length-prefixed encoding, which is injective for all inputs. A
+   **safe forward-only migration** re-keys per stored fact (never a
+   global replace), so a legacy id that conflated several
+   `(name, publisher)` pairs splits back into the distinct identities it
+   was conflating, and every child row follows its own parent. Rows whose
+   stored id matches NEITHER encoding are refused as corruption.
+   `id_encoding` records the encoding and the loader verifies it, so a
+   v6 store cannot silently trust a legacy id.
+2. **Arrival-order-dependent footprint reconciliation (Workstream B).**
+   Same-key footprint candidates were reconciled by `dedup_by` after a
+   sort that did not include the rank, so the survivor depended on the
+   input order (confirmed by probe) — and, worse, the rank itself used
+   `Confidence`'s derived `Ord`, which puts `Confirmed` LOWEST, so
+   "stronger confidence wins" selected `Unknown`. Now: one explicit
+   strength order shared with the producer, a total-order sort, and the
+   same reconciliation at commit and load. Distinct-key candidates are
+   all preserved; a footprint attributed to a foreign application is
+   **rejected** rather than silently relocating a scope.
+3. **Unchecked numeric conversions (Workstream C).** Sizes, estimated
+   sizes, counters, and ordinals were written with `as i64`, which wraps
+   silently. Now checked (`checked_u64_i64`, `checked_counter_i64`,
+   `checked_ord_i64`) before the transaction mutates the previous
+   snapshot, with the prior snapshot preserved on rejection. Object
+   identity remains an intentional bit-pattern conversion.
+4. **Query-bound edge cases.** Cap detection is now proven exact at
+   `limit`, `limit+1`, `limit-1`, `0`, and `i64::MAX`/`usize::MAX` (the
+   probe row can never become a negative SQLite `LIMIT`), and every
+   nested section (including relationship members and footprint
+   evidence) reports through the same truncation signal that refuses the
+   rebuild.
+
+### Tests
+
+Local gate for this work (run, not assumed):
+
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  --all-features -- -D warnings`, `cargo test --workspace`,
+  `cargo test --workspace --all-features`, `cargo test --workspace --
+  --ignored`, `npm ci`, `npm audit --audit-level=high` (0 vulnerabilities),
+  `npm run build`, `git diff --check`.
+- New regression tests: collision-free identity (injectivity,
+  normalization, Unicode, empty/absent publisher, cross-source merges,
+  inventory/model key agreement, legacy-key recognition), legacy v5
+  migration fixtures with child-row attribution and re-key verification,
+  footprint reconciliation order-independence, distinct-fact
+  preservation, foreign attribution rejection, inventory agreement, and
+  the full numeric and query-bound matrix.
+- Extended the performance suite with identity-heavy and footprint-heavy
+  shapes alongside the existing application/evidence/many-snapshot ones.
+
+Measured locally (Windows 11 GNU, debug profile, isolated runs):
+
+| Workload | Commit | Load |
+|---|---|---|
+| artifact-heavy 10k artifacts | 202 ms | 86 ms |
+| artifact-heavy 100k artifacts | 2,399 ms | 702 ms |
+| application-heavy 2,000 apps | 494 ms | 859 ms |
+| evidence-heavy 3,200 items | 207 ms | 92 ms |
+| identity-heavy 1,500 apps | 329 ms | 789 ms |
+| footprint-heavy 6,000 candidates | 675 ms | 661 ms |
+| per-run load with 12 stored snapshots | — | 8 ms |
+
+Scaling is linear in the artifact count (10× the data for ~8× the load
+time); the scaling guard is deliberately loose because these tests run
+concurrently with the other ignored suites and therefore carry scheduler
+noise a solo run does not.
+
+### Phase 6.4.1 limitations (honest)
+
+- Same Phase 6.4 limitations above remain in force (no pipeline caller,
+  run-retention coupling, i64::MAX size ceiling, re-clamped rather than
+  rejected over-claimed strength).
+- Application ids derived BEFORE this phase remain valid in the store and
+  are re-keyed by the forward migration; a v5 store cannot be read by a
+  build older than v6 (forward-only — such a store is refused with
+  `SchemaTooNew`).
+- `Confidence`'s derived `Ord` still puts `Confirmed` first (declaration
+  order). Every consumer that needs "stronger wins" must use the explicit
+  `footprint::confidence_strength` ranking; the enum's `Ord` is unchanged
+  because changing it would alter canonical ordering elsewhere.
+- Footprint reconciliation collapses same-key descriptions into the
+  strictly-better one, so a weaker description's DISTINCT evidence is not
+  retained separately. That is the documented set semantics (one scope);
+  conflicting scopes (different path/app/kind) are never merged.
 
 ## Phase 6.4 limitations (honest)
 

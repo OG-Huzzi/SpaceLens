@@ -6,7 +6,14 @@ limitation is stated. **Phase 5 provides trustworthy historical evidence
 only: no recommendations, no cleanup ranking, no destructive operations**
 (those belong to the next intelligence layer). Phase 6.4 extended this
 crate with the application/system snapshot tables (schema v5) described
-under "Persistence" below and in docs/DATABASE.md.
+under "Persistence" below and in docs/DATABASE.md. Phase 6.4.1 added
+schema v6 (application-id re-keying) plus checked numeric conversions,
+footprint reconciliation, and query-bound hardening.
+
+**Schema version: 6** (v1 core bootstrap, v2 history tables, v3 wide
+identity + lossless tagged paths, v4 relationship-report status, v5
+Phase 6.4 application/system snapshots, v6 Phase 6.4.1 application-id
+re-keying).
 
 ## The identity stack, extended
 

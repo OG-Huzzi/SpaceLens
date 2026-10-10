@@ -14,10 +14,11 @@ deserialization, strict lossless path handling, and candidate-level
 executable confidence.
 
 Phase 6.4 adds **no line of persistence code to this crate**: it stays
-pure, platform-neutral, and database-independent (§16, §17). Storage of
+pure, platform-neutral, and database-independent (§16, §17). As of
+Phase 6.4.1 the storage boundary is at schema **v6**. Storage of
 canonical application-intelligence facts and system-model snapshot
 *inputs* lives in the persistence boundary
-(`coresight-history`, schema v5 — see docs/DATABASE.md and
+(`coresight-history` — see docs/DATABASE.md and
 docs/HISTORY.md), and reload feeds the SAME `build_system_model` /
 `finalize` / `check_invariants` path as a fresh build. No executor,
 network, subprocess, or filesystem mutation exists anywhere in this
@@ -350,7 +351,8 @@ anywhere in the crate.
 ## 16. Persistence boundary
 
 ```text
-Application/system snapshot persistence  IMPLEMENTED (Phase 6.4, schema v5)
+Application/system snapshot persistence  IMPLEMENTED (Phase 6.4, schema v5;
+                                     Phase 6.4.1 re-keyed ids in schema v6)
 Owned by                                 coresight-history (NOT this crate)
 This crate's database dependency         NONE (guarded by source-scan test)
 ```
@@ -445,6 +447,19 @@ Truncation, source-unsupported/unavailable/failed, and access-state
 distinctions survive verbatim — persistence can never turn incomplete
 knowledge into `Unassociated`, `Orphan`, `Complete`, `Resolved`, or
 `Safe`. See docs/DATABASE.md §"Phase 6.4" for the full storage contract.
+
+### Application identity (Phase 6.4.1)
+
+`ApplicationId` hashes a **length-prefixed** encoding of the normalized
+pair, so no name/publisher content can forge a component boundary — the
+Phase 6.4 `"{name}|{publisher}"` join made `("A|B","C")` and `("A","B|C")`
+the same logical application. Normalization is unchanged (trim +
+lowercase, absent publisher = empty, no Unicode normalization). Ids
+persisted under the old encoding are re-keyed per stored fact by the
+forward v5→v6 migration, never globally replaced, so a legacy id that
+conflated several pairs splits correctly and its child rows follow it.
+This crate is unaffected: it consumes ids and never derives or persists
+them.
 
 ## 17. Platform support
 

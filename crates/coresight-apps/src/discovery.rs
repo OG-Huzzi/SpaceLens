@@ -155,14 +155,12 @@ fn prefer_record(new: &ApplicationRecord, existing: &ApplicationRecord) -> bool 
 
 /// The logical-application merge key: normalized (name, publisher) — the
 /// same rule [`crate::domain::ApplicationId`] derives the id from, so the
-/// id and the merge key cannot disagree.
+/// id and the merge key cannot disagree. Both are defined by the single
+/// [`crate::domain::normalized_pair`] normalization.
 type MergeKey = (String, String);
 
 fn merge_key(rec: &ApplicationRecord) -> MergeKey {
-    (
-        rec.name.trim().to_lowercase(),
-        rec.publisher.as_deref().unwrap_or("").trim().to_lowercase(),
-    )
+    crate::domain::normalized_pair(&rec.name, rec.publisher.as_deref())
 }
 
 /// One admitted merge slot: the winning record plus the exact number of
