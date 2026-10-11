@@ -10,8 +10,7 @@ PHASE 6.4.2 — Persistence Boundary, Query Bounds & Retention Safety
 
 **Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1 is
 IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.2 is
-IMPLEMENTED with a green local gate; its exact-SHA CI record follows once
-that run is confirmed.
+IMPLEMENTED and VERIFIED with its own exact-SHA CI record.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -369,6 +368,26 @@ Baseline: `d8eebe1438243989323fdfb7254ad7c94ccf7f62` (the Phase 6.4.1
 verification-record commit). **Schema version stays 6** — no migration was
 added, and no migration v2–v6 SQL was edited.
 
+**Status: VERIFIED**
+
+- **Final implementation commit:** `1cb9163f239b8887f499d2b961d0d3d958dffd44`
+  ("feat: phase 6.4.2 persistence boundary, query bounds and retention
+  safety"), pushed to `main`. Exact-SHA CI run
+  [38139789890](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38139789890),
+  event `push`, attempt 1, conclusion **success**:
+
+  ```text
+  frontend               success
+  rust (ubuntu-latest)   success
+  rust (windows-latest)  success
+  rust (macos-latest)    success
+  ```
+
+  This run executed the full gate on all three platforms, including the
+  persistence performance suite (`cargo test -p coresight-history --
+  --ignored`). The verification-record commit is verified on its own
+  exact SHA below.
+
 ### Confirmed defects, fixes, and regression tests
 
 **D1. Application identities were never validated on the write path**
@@ -451,6 +470,30 @@ and dedups at admission, at commit, and on read.
 - `phase642_tests::footprint_reconciliation_prefers_stronger_confidence_in_all_layers`
 - `phase642_tests::footprint_reconciliation_prefers_the_larger_evidence_count`
 - `phase642_tests::duplicate_footprint_evidence_is_normalized_as_a_set`
+
+### Local verification (all executed, results checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (0 warnings) |
+| `cargo test --workspace` | **852 passed, 0 failed** |
+| `cargo test --workspace --all-features` | 0 failed |
+| `cargo test --workspace -- --ignored` | 0 failed |
+| `npm ci` | ok |
+| `npm audit --audit-level=high` | 0 vulnerabilities |
+| `npm run build` | ok |
+| `git diff --check` | clean |
+
+New test file: `crates/coresight-history/tests/phase642_tests.rs` (13
+tests). Baseline was 839 tests, so this phase adds 13 while one existing
+test (`an_extreme_limit_cannot_bypass_cap_detection`) was updated to assert
+the hardened rejection instead of the old silent saturation — an assertion
+strengthened, not weakened.
+
+Performance is unchanged in shape: the same `snapshot_perf_tests` shapes still
+pass (artifact-heavy 100k ≈ 2.4 s commit / 0.7 s load, identity-heavy,
+footprint-heavy), and the added checks are O(1) per row.
 
 ### Second adversarial audit (Workstream E, 20 claims)
 
