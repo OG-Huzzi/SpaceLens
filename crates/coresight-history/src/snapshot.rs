@@ -86,6 +86,7 @@ use coresight_system_model::{
 use rusqlite::{params, OptionalExtension};
 
 use crate::model::RunId;
+use crate::snapshot_codec::verify_application_id;
 use crate::store::{HistoryStore, QueryLimits, StoreError};
 
 /// One application's persisted snapshot contribution: the record the
@@ -190,6 +191,29 @@ impl HistoryStore {
         // before the transaction opens.
         if input.applications.len() != app_facts.len() {
             return Err(parallel_mismatch(run_id, "length"));
+        }
+        // Identity preflight (Phase 6.4.2, Workstream A): matching parallel
+        // vectors only prove the two copies agree with EACH OTHER — they
+        // prove nothing about the identity they carry. A caller can supply a
+        // forged `ApplicationId` consistently in every input, the parallel
+        // checks above all pass, and the row is written under a name that
+        // does not produce it. That state would be un-persistable: the
+        // loader's `verify_application_id` rejects it on read, so the commit
+        // would look successful and then fail to reload. The id is
+        // therefore checked against the ONE canonical rule BEFORE the
+        // transaction opens, using the shared verifier.
+        for f in app_facts {
+            verify_application_id(
+                &f.record.id.0,
+                &f.record.name,
+                f.record.publisher.as_deref(),
+            )
+            .map_err(|detail| StoreError::Corrupt {
+                table: "app_snapshot_apps",
+                column: "app_id",
+                run_id: Some(run_id.0.clone()),
+                detail,
+            })?;
         }
         for (i, f) in input.applications.iter().zip(app_facts.iter()) {
             if i.record != f.record {
@@ -604,11 +628,15 @@ impl HistoryStore {
                 *ord += 1;
             }
             // Footprints for this app. Canonicalized by the SAME
-            // reconciliation the loader applies (see
-            // `canonicalize_footprints`), so the rows written here are
-            // exactly the rows reload reconstructs — no duplicate
-            // description is stored and then silently dropped on read.
+            // normalization + reconciliation the loader applies (see
+            // `canonicalize_footprints` and `normalize_candidate_evidence`),
+            // so the rows written here are exactly the rows reload
+            // reconstructs — no duplicate description is stored and then
+            // silently dropped on read.
             let mut footprints = fact.footprints.clone();
+            for fp in &mut footprints {
+                coresight_apps::footprint::normalize_candidate_evidence(fp);
+            }
             canonicalize_footprints(&mut footprints);
             for (fp_ord, fp) in footprints.iter().enumerate() {
                 let fp_ord =
@@ -622,10 +650,11 @@ impl HistoryStore {
                     crate::snapshot_codec::encode_footprint_kind(fp.kind),
                     crate::snapshot_codec::encode_app_confidence(fp.confidence),
                 ])?;
-                let mut fp_ev = fp.evidence.clone();
-                fp_ev.sort();
-                fp_ev.dedup();
-                for (ev_ord, e) in fp_ev.iter().enumerate() {
+                // `fp.evidence` was already normalized to the documented
+                // SET semantics above, so it is written in canonical order
+                // with duplicates removed — exactly what the loader reads
+                // back and exactly what the producer published.
+                for (ev_ord, e) in fp.evidence.iter().enumerate() {
                     let ev_ord = checked_ord_i64(
                         ev_ord,
                         "app_snapshot_footprint_evidence",
@@ -804,7 +833,7 @@ impl HistoryStore {
              FROM app_snapshot_meta m JOIN scan_runs r ON r.run_id = m.run_id
              ORDER BY r.started_at DESC, m.run_id DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![probe_limit(limits)], |r| {
+        let rows = stmt.query_map(params![probe_limit(limits)?], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, u64>(2)?,
@@ -1010,7 +1039,7 @@ impl HistoryStore {
              FROM app_snapshot_artifacts WHERE run_id = ?1
              ORDER BY artifact_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)?], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1112,7 +1141,7 @@ impl HistoryStore {
              FROM app_snapshot_apps WHERE run_id = ?1
              ORDER BY fact_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)?], |r| {
             Ok(AppRow {
                 app_id: r.get(0)?,
                 fact_ord: r.get(1)?,
@@ -1293,7 +1322,7 @@ impl HistoryStore {
             .map_err(|e| corrupt(table, column, run_tag, format!("query failed: {e}")))?;
         let rows = stmt
             .query_map(
-                params![run_id.0, app_id, fact_ord, probe_limit(limits)],
+                params![run_id.0, app_id, fact_ord, probe_limit(limits)?],
                 |r| r.get::<_, String>(0),
             )
             .map_err(|e| corrupt(table, column, run_tag, format!("query failed: {e}")))?;
@@ -1339,7 +1368,7 @@ impl HistoryStore {
             matched_path: Option<String>,
         }
         let rows = stmt.query_map(
-            params![run_id.0, app_id, fact_ord, probe_limit(limits)],
+            params![run_id.0, app_id, fact_ord, probe_limit(limits)?],
             |r| {
                 // Column order must match the SELECT list exactly:
                 // artifact_path, evidence_ord, kind, source, strength,
@@ -1443,7 +1472,7 @@ impl HistoryStore {
              ORDER BY footprint_ord LIMIT ?4",
         )?;
         let rows = stmt.query_map(
-            params![run_id.0, app_id, fact_ord, probe_limit(limits)],
+            params![run_id.0, app_id, fact_ord, probe_limit(limits)?],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -1474,7 +1503,7 @@ impl HistoryStore {
                  ORDER BY evidence_ord LIMIT ?5",
             )?;
             let ev_rows = ev_stmt.query_map(
-                params![run_id.0, app_id, fact_ord, fp_ord, probe_limit(limits)],
+                params![run_id.0, app_id, fact_ord, fp_ord, probe_limit(limits)?],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -1543,7 +1572,7 @@ impl HistoryStore {
             "SELECT source, status, note FROM app_snapshot_coverage
              WHERE run_id = ?1 ORDER BY coverage_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)?], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1589,7 +1618,7 @@ impl HistoryStore {
              FROM app_snapshot_relationships WHERE run_id = ?1
              ORDER BY rel_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)?], |r| {
             Ok(RelationshipRow {
                 rel_ord: r.get(0)?,
                 kind: r.get(1)?,
@@ -1629,7 +1658,7 @@ impl HistoryStore {
                  ORDER BY member_ord LIMIT ?3",
             )?;
             let mem_rows = mem_stmt
-                .query_map(params![run_id.0, rel_ord, probe_limit(limits)], |r| {
+                .query_map(params![run_id.0, rel_ord, probe_limit(limits)?], |r| {
                     r.get::<_, String>(0)
                 })?;
             let mut paths = Vec::new();
@@ -1664,7 +1693,7 @@ impl HistoryStore {
              FROM app_snapshot_history WHERE run_id = ?1
              ORDER BY hist_ord LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)], |r| {
+        let rows = stmt.query_map(params![run_id.0, probe_limit(limits)?], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1958,20 +1987,17 @@ fn canonicalize_footprints(candidates: &mut Vec<FootprintCandidate>) {
     candidates.dedup_by(|a, b| a.path == b.path && a.app == b.app && a.kind == b.kind);
 }
 
-/// The reconciliation rank of one candidate: stronger confidence first,
-/// then the fuller canonically-ordered evidence list.
+/// The reconciliation rank of one candidate — delegated to THE one
+/// policy in `coresight_apps::footprint::candidate_rank`, so the producer
+/// and persistence can never disagree about which description of a scope
+/// wins.
 ///
-/// Confidence strength uses the SAME explicit order the producer
-/// (`coresight_apps::footprint`) ranks by — `Confirmed` is declared
-/// FIRST in the `Confidence` enum, so its derived `Ord` puts it lowest.
-/// Ranking by declaration order would make "stronger wins" false.
-/// The order is defined once in `coresight-apps` and reused here, so
-/// persistence and discovery cannot disagree.
-fn evidence_rank(c: &FootprintCandidate) -> (u8, &[FootprintEvidence]) {
-    (
-        coresight_apps::footprint::confidence_strength(c.confidence),
-        c.evidence.as_slice(),
-    )
+/// The policy is: stronger confidence, then the larger count of DISTINCT
+/// evidence items, then the canonically-ordered evidence content as a
+/// deterministic tie-breaker. `FootprintEvidence` is a SET (`Ord`,
+/// dedup-after-sort), which is stated in [`normalize_candidate_evidence`].
+fn evidence_rank(c: &FootprintCandidate) -> (u8, usize, Vec<coresight_apps::FootprintEvidence>) {
+    coresight_apps::footprint::candidate_rank(c)
 }
 
 fn decode_snap_path(
@@ -2126,17 +2152,14 @@ struct ReadCtx<'a> {
     run_tag: &'a Option<String>,
 }
 
-/// The `LIMIT` value that makes a cap hit provable: one row beyond the
-/// caller's bound. Saturating at `i64::MAX` (never wrapping) keeps the
-/// value positive, so a huge caller bound can never become a NEGATIVE
-/// SQLite `LIMIT` — which SQLite reads as "unlimited" and would silently
-/// disable both the bound and its detection.
-fn probe_limit(limits: &QueryLimits) -> i64 {
-    match u64::try_from(limits.max_results).map(|n| n.saturating_add(1)) {
-        Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
-        // A bound larger than u64::MAX is impossible on 64-bit; be total.
-        Err(_) => i64::MAX,
-    }
+/// The shared probe limit: one row beyond the caller's bound, so a cap hit
+/// is provable. Delegates to the ONE conversion policy
+/// ([`QueryLimits::to_probe_sql_limit`]) so this layer and the older
+/// history queries can never disagree about what a limit means — and so a
+/// bound too large to represent fails loudly instead of silently becoming
+/// an unbounded query.
+fn probe_limit(limits: &QueryLimits) -> Result<i64, StoreError> {
+    limits.to_probe_sql_limit()
 }
 
 /// One persisted relationship fact row (the identity-engine proof, as

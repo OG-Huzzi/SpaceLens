@@ -272,18 +272,43 @@ impl CandidateKey {
     }
 }
 
-/// Canonical precedence between two same-key candidates: stronger
-/// confidence wins, then the fuller evidence list. Arrival order is never
-/// a tie-breaker.
+/// Canonical precedence between two same-key candidates. THE one
+/// reconciliation policy, shared by discovery and by persistence so the
+/// two cannot drift:
 ///
-/// Confidence strength is ranked by [`confidence_strength`], NOT by the
-/// derived `Ord` on [`Confidence`]: the enum is declared proof-first
-/// (`Confirmed` first), so its `Ord` puts `Confirmed` LOWEST. Using the
-/// raw `Ord` here made `max`-style selection prefer `Unknown` over
-/// `Confirmed` — the opposite of the documented rule. Ranking by the
-/// explicit strength order keeps "stronger wins" literally true.
-fn candidate_rank(c: &FootprintCandidate) -> (u8, &[FootprintEvidence]) {
-    (confidence_strength(c.confidence), c.evidence.as_slice())
+/// 1. **stronger confidence** (via [`confidence_strength`], not `Confidence`'s
+///    derived `Ord`, which ranks `Confirmed` lowest);
+/// 2. then the **larger count of distinct evidence items** (`FootprintEvidence`
+///    is `Ord + Hash`-comparable data, so "distinct" is dedup-after-sort;
+///    this is NOT lexicographic slice ordering, which compares element
+///    by element and is not a count at all);
+/// 3. then the canonically-ordered evidence content as a deterministic
+///    tie-breaker.
+///
+/// Because this is a total order over the candidates' own content,
+/// `choose(a, b) == choose(b, a)`: the survivor is a pure function of the
+/// duplicate set, so no arrival order can decide it.
+///
+/// Public so every reconciler — discovery admission AND the persistence
+/// boundary — ranks by exactly this one policy instead of re-deriving a
+/// similar-looking one (which is how producer and storage drift apart).
+pub fn candidate_rank(c: &FootprintCandidate) -> (u8, usize, Vec<FootprintEvidence>) {
+    let mut distinct = c.evidence.clone();
+    distinct.sort();
+    distinct.dedup();
+    (confidence_strength(c.confidence), distinct.len(), distinct)
+}
+
+/// Normalize one candidate's evidence to the documented set semantics:
+/// canonical order, duplicates removed.
+///
+/// Applied by the producer at admission AND by persistence on write and
+/// read, so the same facts reconcile identically everywhere. Callers that
+/// need the exact overflow accounting must apply the per-candidate cap
+/// separately (the producer does).
+pub fn normalize_candidate_evidence(candidate: &mut FootprintCandidate) {
+    candidate.evidence.sort();
+    candidate.evidence.dedup();
 }
 
 /// Strength order of a confidence band: higher is stronger. Explicit
@@ -317,9 +342,12 @@ fn admit_candidate(
     evidence_truncated: &mut u64,
     mut candidate: FootprintCandidate,
 ) {
-    // Evidence is published in CANONICAL order, so the same facts always
-    // render identically regardless of the order the probes produced them.
-    candidate.evidence.sort();
+    // Evidence is normalized to the documented set semantics (canonical
+    // order, duplicates removed) by `normalize_candidate_evidence`, so the
+    // same facts always render and reconcile identically regardless of the
+    // order the probes produced them. The per-candidate bound then applies
+    // to the normalized list, and the overflow is counted exactly.
+    normalize_candidate_evidence(&mut candidate);
     if candidate.evidence.len() > limits.max_evidence_per_candidate {
         *evidence_truncated +=
             (candidate.evidence.len() - limits.max_evidence_per_candidate) as u64;

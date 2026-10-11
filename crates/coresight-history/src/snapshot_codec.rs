@@ -236,6 +236,13 @@ fn singleton(
 /// `normalized(name, publisher)`. A mismatch is corruption (tampered id,
 /// tampered name/publisher, or a second identity scheme) — never a
 /// silently accepted second identity.
+///
+/// The name is checked AFTER normalization, not before: a whitespace-only
+/// name is not empty as a raw string but normalizes to the empty
+/// component, and `derive` happily hashes it. Accepting it would persist an
+/// application whose identity collapses onto every other blank-named
+/// application (the same one-identity-per-empty-name problem), so it is
+/// rejected here as corruption (Phase 6.4.2, Workstream A).
 pub fn verify_application_id(
     persisted_id: &str,
     name: &str,
@@ -244,8 +251,9 @@ pub fn verify_application_id(
     if persisted_id.is_empty() {
         return Err("application with an empty id".to_string());
     }
-    if name.is_empty() {
-        return Err("application with an empty name".to_string());
+    let normalized_name = name.trim();
+    if normalized_name.is_empty() {
+        return Err("application with an empty name after normalization".to_string());
     }
     let recomputed = coresight_apps::ApplicationId::derive(name, publisher);
     if recomputed.0 != persisted_id {

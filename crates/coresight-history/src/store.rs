@@ -97,6 +97,14 @@ pub enum StoreError {
         sections: Vec<&'static str>,
         limit: usize,
     },
+    /// A query's `max_results` is too large to be represented as SQLite's
+    /// signed `LIMIT`. SQLite interprets a NEGATIVE `LIMIT` as unbounded,
+    /// so accepting such a value would silently disable the caller's
+    /// bound; it is rejected instead (Phase 6.4.2, Workstream B).
+    LimitOutOfRange {
+        requested: usize,
+        supported: usize,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -132,6 +140,14 @@ impl std::fmt::Display for StoreError {
                 "snapshot load for run {run_id} hit the caller's bound of {limit} rows in \
                  section(s) {sections:?}; the facts returned are incomplete, so no model was \
                  built — raise QueryLimits and retry"
+            ),
+            StoreError::LimitOutOfRange {
+                requested,
+                supported,
+            } => write!(
+                f,
+                "query limit {requested} exceeds the representable maximum {supported}; \
+                 refusing to run a query whose bound could become unlimited"
             ),
         }
     }
@@ -618,6 +634,10 @@ impl HistoryStore {
     pub fn begin_run(&mut self, record: &RunRecord) -> Result<(), StoreError> {
         let conn = &mut self.conn;
         let tx = conn.transaction()?;
+        // Checked timestamp BEFORE the row exists (Phase 6.4.2, Workstream
+        // C): a caller-supplied time outside the representable domain
+        // rejects the run rather than being stored wrapped.
+        let started_at = time_nanos(record.started_at)?;
         tx.execute(
             "INSERT INTO scan_runs
              (run_id, started_at, completed_at, roots, platform, config, status,
@@ -626,7 +646,7 @@ impl HistoryStore {
              VALUES (?1, ?2, NULL, ?3, ?4, ?5, 'RUNNING', 0, 0, 0, 0, 0, 0, 0, 0, 0)",
             params![
                 record.run_id.0,
-                time_nanos(record.started_at),
+                started_at,
                 serde_roots(&record.roots),
                 record.platform,
                 serde_json::to_string(&record.config).unwrap_or_default(),
@@ -654,6 +674,18 @@ impl HistoryStore {
         }
         let conn = &mut self.conn;
         let tx = conn.transaction()?;
+        // Numeric preflight (Phase 6.4.2, Workstream C): every numeric
+        // value this commit writes is validated BEFORE the first
+        // destructive statement, so an unrepresentable counter aborts the
+        // whole commit instead of wrapping mid-way through it.
+        let rel_truncated = match relationships {
+            Some(r) => Some(checked_relationship_counter(r.relationships_truncated)?),
+            None => None,
+        };
+        // Checked timestamps before the final UPDATE (Phase 6.4.2,
+        // Workstream C): a terminal time outside the representable domain
+        // aborts the commit rather than being stored wrapped.
+        let completed_at = time_nanos(record.completed_at.unwrap_or(record.started_at))?;
         let updated = tx.execute(
             "UPDATE scan_runs SET completed_at = ?2, status = ?3,
                 entries_examined = ?4, files = ?5, dirs = ?6, links = ?7,
@@ -663,7 +695,7 @@ impl HistoryStore {
              WHERE run_id = ?1 AND status = 'RUNNING'",
             params![
                 record.run_id.0,
-                time_nanos(record.completed_at.unwrap_or(record.started_at)),
+                completed_at,
                 serde_status(record.status),
                 record.counts.entries_examined,
                 record.counts.files,
@@ -675,7 +707,7 @@ impl HistoryStore {
                 record.counts.candidates_untracked,
                 record.counts.hash_failures,
                 relationships.map(|r| serde_duplicate_status(r.status)),
-                relationships.map(|r| r.relationships_truncated as i64),
+                rel_truncated,
             ],
         )?;
         if updated == 0 {
@@ -688,6 +720,13 @@ impl HistoryStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         for entry in &snapshot.entries {
+            // Every observed modification time is checked too: an
+            // unrepresentable timestamp rejects the whole commit instead of
+            // wrapping into a plausible-looking past date (Phase 6.4.2).
+            let modified = match entry.modified {
+                Some(t) => Some(time_nanos(t)?),
+                None => None,
+            };
             obs.execute(params![
                 record.run_id.0,
                 crate::path_encoding::encode(&entry.path),
@@ -696,7 +735,7 @@ impl HistoryStore {
                 entry.object.map(|o| o.device as i64),
                 entry.object.map(|o| o.inode as i64),
                 entry.object.and_then(|o| o.file_id_hi.map(|hi| hi as i64)),
-                entry.modified.map(time_nanos),
+                modified,
                 entry.classification.as_ref().map(|c| c.category.clone()),
                 entry
                     .classification
@@ -718,13 +757,18 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for r in &rel.relationships {
+                // Recoverable bytes are an honest upper bound that can
+                // legitimately be huge; an unrepresentable value must not
+                // silently wrap into a negative column (which would read as
+                // "more bytes than exist" or, worse, as absent).
+                let recoverable = checked_recoverable_bytes(r)?;
                 ro.execute(params![
                     record.run_id.0,
                     r.id,
                     serde_relationship_kind(r.kind),
                     r.size,
                     r.member_count,
-                    r.recoverable_bytes.map(|v| v as i64),
+                    recoverable,
                     serde_accounting(r.accounting),
                 ])?;
                 for m in &r.members {
@@ -769,7 +813,7 @@ impl HistoryStore {
                     observation_errors, candidates_untracked, hash_failures
              FROM scan_runs ORDER BY started_at DESC, run_id DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limits.max_results as i64], map_run_row)?;
+        let rows = stmt.query_map(params![limits.to_sql_limit()?], map_run_row)?;
         let mut runs = Vec::new();
         for r in rows {
             runs.push(r?);
@@ -972,10 +1016,7 @@ impl HistoryStore {
              ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(
-            params![
-                crate::path_encoding::encode(path),
-                limits.max_results as i64
-            ],
+            params![crate::path_encoding::encode(path), limits.to_sql_limit()?],
             map_history_point,
         )?;
         let mut out = Vec::new();
@@ -1007,7 +1048,7 @@ impl HistoryStore {
                 volume as i64,
                 file_id as i64,
                 file_id_hi.map(|hi| hi as i64),
-                limits.max_results as i64
+                limits.to_sql_limit()?
             ],
             map_history_point,
         )?;
@@ -1032,7 +1073,7 @@ impl HistoryStore {
              ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(
-            params![sha256_hex, limits.max_results as i64],
+            params![sha256_hex, limits.to_sql_limit()?],
             map_history_point,
         )?;
         let mut out = Vec::new();
@@ -1058,7 +1099,7 @@ impl HistoryStore {
              WHERE o.rel_id = ?1
              ORDER BY r.started_at DESC, r.run_id DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![rel_id, limits.max_results as i64], |r| {
+        let rows = stmt.query_map(params![rel_id, limits.to_sql_limit()?], |r| {
             Ok(RelationshipHistoryPoint {
                 run_id: RunId(r.get(0)?),
                 started_at: time_from_nanos_opt(r.get::<_, Option<i64>>(1)?),
@@ -1118,7 +1159,7 @@ impl HistoryStore {
                     None => false,
                 };
                 let over_age = match policy.max_age {
-                    Some(age) => now.saturating_sub(*started) > age.as_nanos() as i64,
+                    Some(age) => retention_age_exceeded(*started, age, now),
                     None => false,
                 };
                 let no_bounds_beyond_floor = policy.max_runs.is_none() && policy.max_age.is_none();
@@ -1150,6 +1191,45 @@ impl Default for QueryLimits {
     fn default() -> Self {
         QueryLimits {
             max_results: 10_000,
+        }
+    }
+}
+
+impl QueryLimits {
+    /// The largest supported `max_results`.
+    ///
+    /// SQLite reads a NEGATIVE `LIMIT` as "unbounded", so any limit that
+    /// does not fit a signed 64-bit integer would silently disable the
+    /// caller's bound instead of failing. `usize::MAX as i64` is `-1` on
+    /// every supported platform, so the conversion must be checked (see
+    /// [`StoreError::LimitOutOfRange`]).
+    pub const MAX_SUPPORTED: usize = i64::MAX as usize;
+
+    /// Convert to the store's signed `INTEGER` `LIMIT` domain, rejecting
+    /// any value that would silently become an unbounded query.
+    ///
+    /// This is the ONE shared conversion policy for every query API in
+    /// this crate — snapshot reads, history reads, and listing reads — so
+    /// no call site can introduce its own narrowing rule.
+    pub fn to_sql_limit(&self) -> Result<i64, StoreError> {
+        i64::try_from(self.max_results).map_err(|_| StoreError::LimitOutOfRange {
+            requested: self.max_results,
+            supported: Self::MAX_SUPPORTED,
+        })
+    }
+
+    /// The `LIMIT` value that makes a cap hit provable: one row beyond the
+    /// caller's bound, so `len > max_results` proves the section was cut
+    /// short (exact detection, never guessed).
+    ///
+    /// Saturating keeps the value positive even at the domain boundary, so
+    /// the probe can never become a negative/unlimited `LIMIT`.
+    pub fn to_probe_sql_limit(&self) -> Result<i64, StoreError> {
+        // `MAX_SUPPORTED + 1` cannot overflow `i64` because
+        // `MAX_SUPPORTED == i64::MAX`, and `saturating_add` caps it.
+        match self.to_sql_limit() {
+            Ok(limit) => Ok(limit.saturating_add(1)),
+            Err(e) => Err(e),
         }
     }
 }
@@ -1932,10 +2012,29 @@ fn serde_accounting(a: StorageAccounting) -> &'static str {
 
 use coresight_identity::StorageAccounting;
 
-fn time_nanos(t: SystemTime) -> i64 {
-    t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0)
+/// Convert a public `SystemTime` to the store's signed nanosecond domain.
+///
+/// `Duration::as_nanos()` returns a `u128` wider than `i64`, so an
+/// unchecked cast wraps any timestamp past ~2262 CE into a NEGATIVE
+/// number. The reader (`time_from_nanos`) clamps negatives to the epoch,
+/// so the original time would be silently corrupted rather than
+/// rejected. Unrepresentable timestamps therefore fail loudly
+/// (Phase 6.4.2, Workstream C): `None` is never synthesized here, and
+/// `None` from the caller means "no timestamp", not "a huge one".
+fn time_nanos(t: SystemTime) -> Result<i64, StoreError> {
+    // A time BEFORE the epoch is stored as 0 rather than a negative, which
+    // the reader clamps to the epoch anyway. That is a documented,
+    // lossless-enough convention for pre-epoch clocks.
+    let duration = t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    i64::try_from(duration.as_nanos()).map_err(|_| StoreError::Corrupt {
+        table: "scan_runs",
+        column: "started_at",
+        run_id: None,
+        detail: format!(
+            "timestamp {t:?} lies outside the store's signed 64-bit \
+             nanosecond domain (year ~2262 and later are unrepresentable)"
+        ),
+    })
 }
 
 fn time_from_nanos(n: i64) -> SystemTime {
@@ -1946,6 +2045,75 @@ fn time_from_nanos_opt(n: Option<i64>) -> Option<SystemTime> {
     n.map(time_from_nanos)
 }
 
+/// The store's clock reading. `SystemTime::now()` is always within the
+/// representable nanosecond domain on any real platform (year 2262 is far
+/// in the future), so the checked conversion cannot fail in practice; the
+/// `expect` documents that a failure would be a platform defect rather
+/// than caller data, so no caller-supplied value is ever silently clamped.
 fn now_nanos() -> i64 {
     time_nanos(SystemTime::now())
+        .expect("SystemTime::now() must lie within the store's nanosecond domain")
+}
+
+/// Checked conversion of the relationship truncation counter (Phase
+/// 6.4.2, Workstream C). The counter records how many relationships the
+/// engine could not publish under its caps, so it is an incompleteness
+/// signal, not a size — an unrepresentable value must fail loudly rather
+/// than wrap into a negative count.
+fn checked_relationship_counter(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::Corrupt {
+        table: "scan_runs",
+        column: "rel_truncated",
+        run_id: None,
+        detail: format!(
+            "relationship truncation counter {value} exceeds the signed 64-bit \
+             INTEGER store domain"
+        ),
+    })
+}
+
+/// Checked conversion of a relationship's recoverable-byte upper bound
+/// (Phase 6.4.2, Workstream C).
+fn checked_recoverable_bytes(
+    relationship: &coresight_identity::Relationship,
+) -> Result<Option<i64>, StoreError> {
+    match relationship.recoverable_bytes {
+        None => Ok(None),
+        Some(v) => i64::try_from(v).map(Some).map_err(|_| StoreError::Corrupt {
+            table: "relationship_obs",
+            column: "recoverable",
+            run_id: None,
+            detail: format!(
+                "recoverable_bytes {v} exceeds the signed 64-bit INTEGER \
+                 store domain for relationship {}",
+                relationship.id
+            ),
+        }),
+    }
+}
+
+/// True when the run is older than the retention age, WITHOUT narrowing
+/// the policy duration to a signed nanosecond count.
+///
+/// `Duration::as_nanos()` returns a `u128` that is wider than `i64`, so
+/// `age.as_nanos() as i64` silently wraps any duration above ~292 years
+/// (300 years becomes a large NEGATIVE number). Combined with the
+/// `saturating_sub` on a possibly-nonzero elapsed time, that inversion
+/// makes `over_age` fire for runs that are barely old — or fail to fire
+/// for genuinely ancient ones. `Duration::MAX` must never read as a tiny
+/// or negative age.
+///
+/// Instead the comparison is done in the wider domain: elapsed time (also
+/// in nanoseconds, clamped to `u128`) is compared directly against the
+/// policy's nanosecond count. A policy duration longer than any
+/// measurable elapsed time can therefore never be satisfied, which is the
+/// honest reading of "keep everything at least this long".
+fn retention_age_exceeded(started_nanos: i64, age: Duration, now_nanos: i64) -> bool {
+    // `started_nanos` is a stored timestamp; a non-positive value is
+    // historical corruption, never a fresh run. Treating it as epoch 0
+    // keeps the rule deterministic.
+    let started = started_nanos.max(0) as u128;
+    let now = now_nanos.max(0) as u128;
+    let elapsed = now.saturating_sub(started);
+    elapsed > age.as_nanos()
 }

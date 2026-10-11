@@ -6,8 +6,12 @@ Integration
 PHASE 6.4.1 — Deep Integrity Hardening (application identity, footprint
 fidelity, numeric/query-bound safety, integrated persistence audit)
 
+PHASE 6.4.2 — Persistence Boundary, Query Bounds & Retention Safety
+
 **Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1 is
-IMPLEMENTED and VERIFIED with its own exact-SHA CI record.
+IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.2 is
+IMPLEMENTED with a green local gate; its exact-SHA CI record follows once
+that run is confirmed.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -358,6 +362,136 @@ dependency, source-scan guard intact).
   conflicting scopes (different path/app/kind) are never merged.
 
 `PHASE 6.5 — NOT STARTED.`
+
+## Phase 6.4.2 — Persistence Boundary, Query Bounds & Retention Safety
+
+Baseline: `d8eebe1438243989323fdfb7254ad7c94ccf7f62` (the Phase 6.4.1
+verification-record commit). **Schema version stays 6** — no migration was
+added, and no migration v2–v6 SQL was edited.
+
+### Confirmed defects, fixes, and regression tests
+
+**D1. Application identities were never validated on the write path**
+(Workstream A). Matching parallel vectors prove only that the two input
+copies agree with each other; they say nothing about whether the id they
+carry is derivable from its own `(name, publisher)`. A caller could supply
+a forged `ApplicationId` consistently in `input.applications`,
+`app_facts`, and every footprint's attribution — every parallel check
+passes, the commit succeeds, and the row is then un-readable because the
+loader's `verify_application_id` rejects it. Confirmed by probe: the
+forged commit returned `Ok(())`. Fix: the commit path now runs the SHARED
+verifier (`snapshot_codec::verify_application_id`) over every application
+record BEFORE the transaction opens.
+- `phase642_tests::a_forged_application_id_is_rejected_before_persistence`
+- `phase642_tests::an_invalid_replacement_preserves_the_valid_snapshot`
+
+**D2. Whitespace-only names passed identity validation** (Workstream A).
+The check was `name.is_empty()` on the raw string, so `"   "` was
+accepted and `derive` happily hashed it — collapsing onto one shared
+empty-named identity. Fix: the name is validated AFTER normalization;
+`verify_application_id` now rejects a name that trims to empty.
+- `phase642_tests::empty_and_whitespace_only_names_are_rejected`
+
+**D3. Query limits could silently become an unbounded SQLite `LIMIT`**
+(Workstream B). Every query site cast `limits.max_results as i64`, and
+`usize::MAX as i64` is `-1` on every supported platform — which SQLite
+reads as **unbounded**, disabling both the bound and its detection.
+Confirmed by probe (`USIZE_MAX_AS_I64 = -1`). Fix: one typed policy
+shared by every query API — `QueryLimits::MAX_SUPPORTED` (`i64::MAX`),
+`to_sql_limit()`, and `to_probe_sql_limit()` (limit + 1, saturated so it
+stays positive) — replacing all 12 snapshot call sites and every older
+history API (`list_runs`, `history_for_path`, `history_for_object`,
+`history_for_content`, `relationship_history`) plus snapshot listing.
+Unrepresentable limits now fail with `StoreError::LimitOutOfRange`
+BEFORE SQL executes. This intentionally CHANGES the accepted domain:
+`usize::MAX` and `i64::MAX + 1` are rejected rather than silently
+saturated.
+- `phase642_tests::query_limit_conversion_is_checked_everywhere`
+- `phase642_tests::every_query_entry_point_rejects_unsupported_limits`
+- `snapshot_tests::an_extreme_limit_cannot_bypass_cap_detection` (updated
+  to assert the new rejection rather than the old saturation)
+
+**D4. Truncation counters and recoverable bytes wrapped negative on the
+older run path** (Workstream C). `scan_runs.rel_truncated` and
+`relationship_obs.recoverable` were written with `as i64`. Fix: checked
+conversions (`checked_relationship_counter`, `checked_recoverable_bytes`)
+run BEFORE the commit's first destructive statement.
+- covered by `phase642_tests` numeric preflight plus the existing
+  `an_unrepresentable_size_is_rejected_at_commit_not_at_reload` /
+  `an_unrepresentable_estimated_size_is_rejected_before_write`
+
+**D5. Retention age narrowed a `u128` into `i64` and could delete history**
+(Workstream C). `age.as_nanos() as i64` wraps any duration above ~292
+years to a NEGATIVE number; combined with `saturating_sub`, that inverts
+the rule. Confirmed by probe: a 300-year policy narrowed to
+`-8985944073709551616`. Fix: elapsed time and the policy duration are now
+compared in the wide domain (`retention_age_exceeded`), so `Duration::MAX`
+and multi-century policies mean "keep everything at least this long".
+- `phase642_tests::extreme_retention_durations_never_delete_history`
+
+**D6. Timestamps narrowed a `u128` into `i64` and could wrap to a
+plausible past date** (Workstream C). `time_nanos` used
+`d.as_nanos() as i64`, so a `SystemTime` past ~2262 CE wrapped negative and
+the reader clamped it to the epoch — silent corruption, not rejection.
+Fix: checked conversion, applied to `started_at`, `completed_at`, and every
+`entry.modified`, before the row is written.
+- `phase642_tests::an_unrepresentable_timestamp_is_rejected_not_wrapped`
+- `phase642_tests::an_unrepresentable_completed_at_preserves_the_run_row`
+
+**D7. Footprint ranking used lexicographic slice ordering, not
+evidence-count ordering** (Workstream D). Both the producer's
+`candidate_rank` and the persistence `evidence_rank` compared
+`&[FootprintEvidence]` element by element, which is not a count at all.
+Fix: one explicit policy defined ONCE in
+`coresight_apps::footprint::candidate_rank` and CALLED by both layers —
+(1) stronger confidence via `confidence_strength`, (2) larger count of
+distinct evidence items, (3) canonical evidence content as tie-breaker.
+Evidence is a documented SET: `normalize_candidate_evidence` canonicalizes
+and dedups at admission, at commit, and on read.
+- `phase642_tests::footprint_reconciliation_prefers_stronger_confidence_in_all_layers`
+- `phase642_tests::footprint_reconciliation_prefers_the_larger_evidence_count`
+- `phase642_tests::duplicate_footprint_evidence_is_normalized_as_a_set`
+
+### Second adversarial audit (Workstream E, 20 claims)
+
+Every claim was checked against code, tests, or `git diff` — several with
+a purpose-built probe:
+
+| # | Claim | Evidence |
+|---|---|---|
+| 1 | Invalid identity refused before the transaction | D1 preflight; `a_forged_application_id…` |
+| 2 | Whitespace-only names rejected | D2; probe across 6 spellings, all rejected |
+| 3 | Every query API shares the contract | `every_query_entry_point…` |
+| 4 | No limit can become negative | no `max_results as i64` remains anywhere |
+| 5 | `limit + 1` detection exact | 63 snapshot + 12 phase642 tests |
+| 6 | No non-identity cast wraps | remaining casts audited: identity bit-patterns only |
+| 7 | Counters preserve meaning | D4; counter semantics unchanged |
+| 8 | Extreme durations cannot delete | D5; `Duration::MAX` + 300-year both keep |
+| 9 | Failed commit preserves the prior snapshot | `a_rejected_replacement…` + `an_invalid_replacement…` |
+| 10 | Reconciliation order-independent | D7 tests run both arrival orders |
+| 11 | Producer/persistence/reload identical | both layers call the same `candidate_rank` |
+| 12 | v5→v6 migration + legacy fixture pass | 2 tests pass |
+| 13 | Child rows attached to the correct parent | re-keying test passes |
+| 14 | Strict decoding + bounded refusal intact | corrupt + bounded_load tests pass |
+| 15 | Full-width identities round-trip | `u64::MAX` identity test passes |
+| 16 | No migration v2–v6 SQL edited | `git diff` shows no removed migration SQL |
+| 17 | `coresight-system-model` unchanged | `git diff` empty; no SQLite dependency |
+| 18 | No derived authorization | no new claims/insights are persisted |
+| 19 | No new subsystem | only 3 source files changed |
+| 20 | Docs/tests/records agree | this record |
+
+### Phase 6.4.2 limitations (honest)
+
+- The accepted query-limit domain NARROWED: limits above `i64::MAX` are
+  now a typed error instead of silently saturating. A caller needing more
+  than 9.2 quintillion rows has a different problem.
+- Timestamps past ~2262 CE cannot be represented. Previously they were
+  silently clamped to the epoch; now they are rejected. A real machine
+  clock cannot reach this, but a synthetic/remote clock source could.
+- The footprint policy defines evidence as a SET: a candidate's duplicate
+  evidence items collapse to one. If the domain ever requires preserving
+  duplicates, that is a schema and contract change, not a ranking tweak.
+- All prior Phase 6.4/6.4.1 limitations remain in force.
 
 ## Phase 6.4 limitations (honest)
 

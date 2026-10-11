@@ -3420,9 +3420,10 @@ fn an_extreme_limit_cannot_bypass_cap_detection() {
     let mut store = store_in(dir.path(), "extreme.db");
     let run_id = commit_snapshot(&mut store, "extreme-run", 1, &snap);
 
-    // Small enough not to allocate: `i64::MAX` and `usize::MAX` are the
-    // boundaries of the probe arithmetic.
-    for limit in [i64::MAX as usize, usize::MAX, i64::MAX as usize - 1] {
+    // The largest SUPPORTED limits still behave as "no cap, nothing
+    // truncated": the probe value stays positive, so a genuine cap would
+    // still be detected if one existed.
+    for limit in [i64::MAX as usize, i64::MAX as usize - 1] {
         let loaded = store
             .load_system_snapshot(&run_id, &QueryLimits { max_results: limit })
             .unwrap()
@@ -3437,6 +3438,29 @@ fn an_extreme_limit_cannot_bypass_cap_detection() {
             "a huge limit is not a truncation of a small snapshot"
         );
     }
+    // The FIRST unsupported value is refused with a typed error rather
+    // than silently becoming an unbounded query. Phase 6.4.2 hardened this
+    // from "saturating but never negative" to "reject outright": a caller
+    // cannot ask for more rows than the store can even address.
+    match store.load_system_snapshot(
+        &run_id,
+        &QueryLimits {
+            max_results: QueryLimits::MAX_SUPPORTED + 1,
+        },
+    ) {
+        Err(StoreError::LimitOutOfRange { .. }) => {}
+        other => panic!("an unrepresentable limit must be refused, got {other:?}"),
+    }
+    // `usize::MAX` is refused for the same reason.
+    assert!(matches!(
+        store.load_system_snapshot(
+            &run_id,
+            &QueryLimits {
+                max_results: usize::MAX
+            }
+        ),
+        Err(StoreError::LimitOutOfRange { .. })
+    ));
     // A limit above the fact count still detects a genuine cap when one
     // exists: cap at exactly the count minus one.
     let below = QueryLimits {

@@ -199,6 +199,31 @@ Phase 6.4.1 additions:
   unrepresentable size/counter/ordinal rejects the commit and preserves
   the previous snapshot — never wrapped or narrowed.
 - Footprint candidates are reconciled by a commutative, deterministic
+  rule at both commit and load (stronger confidence, then the larger
+  distinct-evidence count, then canonical content), so stored and
+  reloaded facts are identical; a footprint attributed to a foreign
+  application is rejected.
+- `ApplicationId` uses a length-prefixed encoding (injective at component
+  boundaries). Ids persisted under the Phase 6.4 encoding are re-keyed by
+  the v5→v6 migration, per stored fact rather than globally.
+
+Phase 6.4.2 additions:
+
+- **Query limits are validated, never narrowed.** One shared policy for
+  every query API: `QueryLimits::MAX_SUPPORTED` is `i64::MAX`, and
+  `to_sql_limit()` / `to_probe_sql_limit()` either convert exactly or fail
+  with `StoreError::LimitOutOfRange`. A `usize::MAX` request is rejected
+  because `usize::MAX as i64` is `-1`, which SQLite reads as UNBOUNDED.
+- **Identity is validated at commit, before the transaction opens**, using
+  the same verifier the loader uses. A forged ApplicationId supplied
+  consistently across all parallel inputs used to commit and then fail on
+  reload; it is now refused. Whitespace-only names are rejected because
+  they normalize to an empty component.
+
+- Values are range-checked **before** the snapshot transaction, so an
+  unrepresentable size/counter/ordinal rejects the commit and preserves
+  the previous snapshot — never wrapped or narrowed.
+- Footprint candidates are reconciled by a commutative, deterministic
   rule at both commit and load (stronger confidence, then fuller
   evidence), so stored and reloaded facts are identical; a footprint
   attributed to a foreign application is rejected.

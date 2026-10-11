@@ -197,15 +197,76 @@ Footprint candidates are keyed by `(path bytes, application, kind)` — one
 *scope* per application. Confidence and evidence describe how well that
 scope is known, so two same-key candidates are two descriptions of ONE
 scope, reconciled by a commutative, deterministic rule consistent with the
-producer: **stronger confidence wins, then the fuller evidence list**
-(ranked by an explicit strength order — `Confirmed` is declared FIRST in
-`Confidence`, so its derived `Ord` puts it lowest and using it directly
-would invert "stronger wins"). Reconciliation happens at BOTH commit and
-load, so stored rows and reloaded candidates are identical. Candidates
-differing in path, application, or kind are distinct facts and are all
-preserved. A footprint's `app` must match its enclosing application fact,
-otherwise the commit is rejected (a misattributed scope would relocate
-onto the wrong software).
+producer: **stronger confidence wins, then the larger count of DISTINCT
+evidence items, then the canonically-ordered evidence content as a
+deterministic tie-breaker** (ranked by the explicit strength order —
+`Confirmed` is declared FIRST in `Confidence`, so its derived `Ord` puts it
+lowest and using it directly would invert "stronger wins"). The rank is
+defined ONCE in `coresight_apps::footprint::candidate_rank` and called by
+both the producer and persistence, so the two cannot drift. Evidence is a
+SET: normalized to canonical order with duplicates removed at admission, at
+commit, and on read (`normalize_candidate_evidence`). Reconciliation happens
+at BOTH commit and load, so stored rows and reloaded candidates are
+identical. Candidates differing in path, application, or kind are distinct
+facts and are all preserved. A footprint's `app` must match its enclosing
+application fact, otherwise the commit is rejected (a misattributed scope
+would relocate onto the wrong software).
+
+### Query-limit contract (Phase 6.4.2)
+
+One shared, typed conversion policy is used by EVERY query API in this
+crate — snapshot reads, the older history reads (`list_runs`,
+`history_for_path`, `history_for_object`, `history_for_content`,
+`relationship_history`), and snapshot listing:
+
+- `QueryLimits::MAX_SUPPORTED` (`i64::MAX`) is the documented upper bound.
+- `QueryLimits::to_sql_limit()` converts or fails with the typed
+  `StoreError::LimitOutOfRange { requested, supported }`.
+- `QueryLimits::to_probe_sql_limit()` returns `limit + 1` (saturating, so it
+  stays positive at the boundary) and drives exact cap detection.
+
+SQLite reads a NEGATIVE `LIMIT` as **unbounded**. `usize::MAX as i64` is
+`-1` on every supported platform, so an unchecked cast would silently
+disable the caller's bound AND its detection. Every entry point now rejects
+an unrepresentable limit with a typed error BEFORE executing SQL; nothing
+saturates silently, because saturating would change the promised semantics
+of "at most N rows".
+
+Invalid limit, corrupted data, and detected truncation remain three
+DISTINCT states: `LimitOutOfRange`, `Corrupt`, and the truncation signal
+(`is_load_truncated()` / `SnapshotBounded`).
+
+### Retention duration comparison (Phase 6.4.2)
+
+`Duration::as_nanos()` returns a `u128` wider than `i64`. Comparing an age
+policy by narrowing it (`as i64`) wraps any duration above ~292 years into
+a NEGATIVE number, which inverts the rule and can delete genuinely fresh
+history (or keep ancient runs forever). Elapsed time and the policy
+duration are now compared in the wide domain, so `Duration::MAX` and
+multi-century policies behave as "keep everything at least this long".
+
+### Numeric persistence (Phase 6.4.2)
+
+- Truncation counters (including the older `scan_runs.rel_truncated`) and
+  `relationship_obs.recoverable` are converted with checked helpers, BEFORE
+  any destructive statement in the commit: an unrepresentable value aborts
+  the whole commit instead of wrapping negative mid-transaction.
+- Full-width `ObjectIdentity` components keep their intentional
+  bit-pattern conversions, documented and tested separately — `u64::MAX`
+  identity components round-trip exactly.
+
+### Application-identity validation at commit (Phase 6.4.2)
+
+The commit path now runs an identity preflight using the shared
+`snapshot_codec::verify_application_id` (the same verifier the loader
+uses), before the transaction opens. Matching parallel vectors prove only
+that the two input copies agree with each other; they say nothing about
+whether the id they carry is derivable from its own name/publisher. A forged
+id supplied consistently everywhere used to commit successfully and then
+FAIL on reload — the worst kind of failure, a snapshot that cannot be read.
+The name is validated AFTER normalization, so a whitespace-only name
+(non-empty as a raw string, empty after trimming) is rejected rather than
+collapsing onto a shared empty-named identity.
 
 ## Indexes (initial set; extend by measured query, not guess)
 
