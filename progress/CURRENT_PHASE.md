@@ -14,8 +14,8 @@ PHASE 6.4.4 — Numeric Preflight Closure & Relationship Metadata Consistency
 
 **Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1,
 6.4.2 and 6.4.3 are IMPLEMENTED and VERIFIED with their own exact-SHA CI
-records. Phase 6.4.4 is IMPLEMENTED with a green local gate; its exact-SHA
-CI record follows once that run is confirmed.
+records. Phase 6.4.4 is IMPLEMENTED and VERIFIED with its own exact-SHA CI
+record.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -535,6 +535,27 @@ refusal, and the retention tests assert baseline protection that the old
 Baseline: `bdd11e6196ef3179f8c66e3678ac986e0a531012` (the Phase 6.4.3
 verification-record commit). **Schema v6 remains unchanged** — no
 migration was added, and no migration v2–v6 SQL was edited.
+
+**Status: VERIFIED**
+
+- **Final implementation commit:** `5a9d0f1865f923c31ab0cd9014bf37ee4c2a26ac`
+  ("feat: phase 6.4.4 numeric preflight closure and relationship metadata
+  consistency"), pushed to `main`. Exact-SHA CI run
+  [38158859361](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38158859361),
+  event `push`, attempt 1, `head_sha` confirmed equal to the commit SHA,
+  conclusion **success**:
+
+  ```text
+  frontend               success
+  rust (ubuntu-latest)   success
+  rust (windows-latest)  success
+  rust (macos-latest)    success
+  ```
+
+  This run executed the full gate on all three platforms, including the
+  persistence performance suite (`cargo test -p coresight-history --
+  --ignored`). The verification-record commit is verified on its own
+  exact SHA below.
 
 ### Confirmed defects, fixes, and regression tests
 
