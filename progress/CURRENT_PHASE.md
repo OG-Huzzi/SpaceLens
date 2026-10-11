@@ -13,8 +13,7 @@ PHASE 6.4.3 — Read-Side Integrity & Exact Boundary Semantics
 **Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1 is
 IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.2 is
 IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.3 is
-IMPLEMENTED with a green local gate; its exact-SHA CI record follows once
-that run is confirmed.
+IMPLEMENTED and VERIFIED with its own exact-SHA CI record.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -369,6 +368,27 @@ dependency, source-scan guard intact).
 Baseline: `9fa856edda45d9c24a464c2b869a478efb92a891` (the Phase 6.4.2
 verification-record commit). **Schema v6 remains unchanged** — no
 migration was added, and no migration v2–v6 SQL was edited.
+
+**Status: VERIFIED**
+
+- **Final implementation commit:** `7ce1c401a7d9b854388436b326c6aeaaa987e033`
+  ("feat: phase 6.4.3 read-side integrity and exact boundary semantics"),
+  pushed to `main`. Exact-SHA CI run
+  [38152399413](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38152399413),
+  event `push`, attempt 1, `head_sha` confirmed equal to the commit SHA,
+  conclusion **success**:
+
+  ```text
+  frontend               success
+  rust (ubuntu-latest)   success
+  rust (windows-latest)  success
+  rust (macos-latest)    success
+  ```
+
+  This run executed the full gate on all three platforms, including the
+  persistence performance suite (`cargo test -p coresight-history --
+  --ignored`). The verification-record commit is verified on its own
+  exact SHA below.
 
 ### Confirmed defects, fixes, and regression tests
 
