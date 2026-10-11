@@ -210,26 +210,38 @@ Phase 6.4.1 additions:
 Phase 6.4.2 additions:
 
 - **Query limits are validated, never narrowed.** One shared policy for
-  every query API: `QueryLimits::MAX_SUPPORTED` is `i64::MAX`, and
+  every query API: `QueryLimits::MAX_SUPPORTED` is `i64::MAX - 1`, and
   `to_sql_limit()` / `to_probe_sql_limit()` either convert exactly or fail
   with `StoreError::LimitOutOfRange`. A `usize::MAX` request is rejected
   because `usize::MAX as i64` is `-1`, which SQLite reads as UNBOUNDED.
+  The domain deliberately stops one below `i64::MAX` so `limit + 1`
+  probing stays exact at every accepted value.
 - **Identity is validated at commit, before the transaction opens**, using
-  the same verifier the loader uses. A forged ApplicationId supplied
+  the same verifier the loader uses. A forged `ApplicationId` supplied
   consistently across all parallel inputs used to commit and then fail on
   reload; it is now refused. Whitespace-only names are rejected because
   they normalize to an empty component.
 
-- Values are range-checked **before** the snapshot transaction, so an
-  unrepresentable size/counter/ordinal rejects the commit and preserves
-  the previous snapshot — never wrapped or narrowed.
-- Footprint candidates are reconciled by a commutative, deterministic
-  rule at both commit and load (stronger confidence, then fuller
-  evidence), so stored and reloaded facts are identical; a footprint
-  attributed to a foreign application is rejected.
-- `ApplicationId` uses a length-prefixed encoding (injective at component
-  boundaries). Ids persisted under the Phase 6.4 encoding are re-keyed by
-  the v5→v6 migration, per stored fact rather than globally.
+Phase 6.4.3 additions:
+
+- **Legacy negative numerics round-trip, and the ambiguity is documented.**
+  `scan_runs.rel_truncated` was written with an unchecked `u64 as i64`, so
+  a value at or above `2^63` is a NEGATIVE stored integer. Reads
+  reconstruct it exactly instead of clamping to 0 (which erased the
+  truncation signal). A negative value is NOT claimed to be detectable as
+  legacy-vs-tampered — that distinction is not in the format.
+- **The limit bound is validated before the existence probe.** An
+  unsupported limit is refused even when the run has no snapshot, so an
+  invalid bound can never masquerade as absence.
+- **Footprint evidence is normalized on read** to the documented set
+  contract, AFTER the section cap is applied (so a genuine overflow still
+  reports truncation). Tampered duplicate rows are normalized away.
+- **commit_run performs a true preflight**: every numeric conversion and
+  caller-supplied timestamp is computed BEFORE the transaction opens.
+  Timestamp errors name the actual field (started_at / completed_at /
+  modified).
+- **RetentionPolicy::keep_latest must be >= 1**, else
+  `StoreError::InvalidRetentionPolicy` before any row is read or deleted.
 
 ## Rules for evolution
 

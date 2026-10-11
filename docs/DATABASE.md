@@ -203,57 +203,78 @@ deterministic tie-breaker** (ranked by the explicit strength order —
 `Confirmed` is declared FIRST in `Confidence`, so its derived `Ord` puts it
 lowest and using it directly would invert "stronger wins"). The rank is
 defined ONCE in `coresight_apps::footprint::candidate_rank` and called by
-both the producer and persistence, so the two cannot drift. Evidence is a
-SET: normalized to canonical order with duplicates removed at admission, at
-commit, and on read (`normalize_candidate_evidence`). Reconciliation happens
+both the producer and persistence, so the two cannot drift. Reconciliation happens
 at BOTH commit and load, so stored rows and reloaded candidates are
 identical. Candidates differing in path, application, or kind are distinct
 facts and are all preserved. A footprint's `app` must match its enclosing
 application fact, otherwise the commit is rejected (a misattributed scope
 would relocate onto the wrong software).
 
-### Query-limit contract (Phase 6.4.2)
+**Evidence is a SET**, normalized identically at all three points:
+discovery admission, commit, and reload (`normalize_candidate_evidence`).
+The read path normalizes AFTER applying the section cap, so a genuinely
+oversized section still reports truncation and `rebuild_system_model`
+refuses it. Because a legitimate database can never contain duplicate
+evidence rows (the write path deduplicates), duplicates can only arrive
+from tampering; the chosen tampered-store policy is to **normalize them
+away** rather than reject the read, which preserves the set contract
+without weakening truncation detection.
+
+### Query-limit contract (Phase 6.4.2, refined 6.4.3)
 
 One shared, typed conversion policy is used by EVERY query API in this
 crate — snapshot reads, the older history reads (`list_runs`,
 `history_for_path`, `history_for_object`, `history_for_content`,
 `relationship_history`), and snapshot listing:
 
-- `QueryLimits::MAX_SUPPORTED` (`i64::MAX`) is the documented upper bound.
+- `QueryLimits::MAX_SUPPORTED` is `i64::MAX - 1` — deliberately ONE BELOW
+  the largest SQLite `LIMIT`, because snapshot reads detect a cap hit
+  EXACTLY by probing with `limit + 1` rows and that sum must stay
+  representable.
 - `QueryLimits::to_sql_limit()` converts or fails with the typed
   `StoreError::LimitOutOfRange { requested, supported }`.
-- `QueryLimits::to_probe_sql_limit()` returns `limit + 1` (saturating, so it
-  stays positive at the boundary) and drives exact cap detection.
+- `QueryLimits::to_probe_sql_limit()` returns `limit + 1` — never
+  saturated, never negative.
 
 SQLite reads a NEGATIVE `LIMIT` as **unbounded**. `usize::MAX as i64` is
 `-1` on every supported platform, so an unchecked cast would silently
-disable the caller's bound AND its detection. Every entry point now rejects
-an unrepresentable limit with a typed error BEFORE executing SQL; nothing
-saturates silently, because saturating would change the promised semantics
-of "at most N rows".
+disable the caller's bound AND its detection. Every entry point now
+rejects an unrepresentable limit with a typed error BEFORE executing SQL —
+and **including on the absent-record path**: `load_system_snapshot`,
+`load_snapshot_applications`, and `rebuild_system_model` validate the
+bound before probing whether the run has a snapshot, so an invalid limit
+can never masquerade as "no snapshot exists".
+
+Nothing saturates silently. At an earlier `MAX_SUPPORTED` of `i64::MAX`
+the probe would have had to saturate, silently degrading detection
+exactly at the boundary, so `i64::MAX` is now the first REFUSED value.
 
 Invalid limit, corrupted data, and detected truncation remain three
 DISTINCT states: `LimitOutOfRange`, `Corrupt`, and the truncation signal
 (`is_load_truncated()` / `SnapshotBounded`).
 
-### Retention duration comparison (Phase 6.4.2)
+### Legacy numeric compatibility (Phase 6.4.3)
 
-`Duration::as_nanos()` returns a `u128` wider than `i64`. Comparing an age
-policy by narrowing it (`as i64`) wraps any duration above ~292 years into
-a NEGATIVE number, which inverts the rule and can delete genuinely fresh
-history (or keep ancient runs forever). Elapsed time and the policy
-duration are now compared in the wide domain, so `Duration::MAX` and
-multi-century policies behave as "keep everything at least this long".
+`scan_runs.rel_truncated` was originally written with an UNCHECKED
+`u64 as i64` conversion, so a domain value at or above `2^63` was stored
+as a NEGATIVE SQLite integer — a valid legacy bit pattern, not corruption.
+The read path reconstructs it faithfully (`stored as u64`, the exact
+inverse of the legacy write).
 
-### Numeric persistence (Phase 6.4.2)
+**Documented limitation:** a negative stored value is AMBIGUOUS. A legacy
+wrapped counter and a tampered value that never came from this writer are
+indistinguishable in the stored format, so the store does NOT claim to
+tell them apart. It reconstructs the round-tripped value — the only
+reading that preserves every historical value the old writer could
+produce. What it must never do is clamp to zero, which is what the
+previous implementations did: a legacy `rel_truncated` above `2^63` read
+back as "nothing truncated", erasing the incompleteness signal and making
+a truncated run look complete.
 
-- Truncation counters (including the older `scan_runs.rel_truncated`) and
-  `relationship_obs.recoverable` are converted with checked helpers, BEFORE
-  any destructive statement in the commit: an unrepresentable value aborts
-  the whole commit instead of wrapping negative mid-transaction.
-- Full-width `ObjectIdentity` components keep their intentional
-  bit-pattern conversions, documented and tested separately — `u64::MAX`
-  identity components round-trip exactly.
+`relationship_obs.recoverable` follows the same rule (its read paths were
+already correct). New writes are unaffected — Phase 6.4.2's checked
+conversion rejects an unrepresentable counter before any mutation, so no
+NEW row can store a wrapped value.
 
 ### Application-identity validation at commit (Phase 6.4.2)
 
@@ -267,6 +288,39 @@ FAIL on reload — the worst kind of failure, a snapshot that cannot be read.
 The name is validated AFTER normalization, so a whitespace-only name
 (non-empty as a raw string, empty after trimming) is rejected rather than
 collapsing onto a shared empty-named identity.
+
+### Numeric persistence and TRUE preflight (Phase 6.4.2 + 6.4.3)
+
+- `commit_run` performs a TRUE preflight (Phase 6.4.3, Workstream D):
+  every potentially failing conversion — the relationship truncation
+  counter, every `recoverable_bytes`, the `completed_at` timestamp, and
+  every observation's `modified` timestamp — is computed BEFORE the
+  transaction opens. A rejected input therefore never even begins
+  modifying existing state, rather than relying on transaction rollback.
+- Timestamps convert through `checked_run_timestamp`, which names the
+  ACTUAL field (`started_at`, `completed_at`, or `modified`) in the error
+  instead of always blaming one.
+- Truncation counters (including the older `scan_runs.rel_truncated`) and
+  `relationship_obs.recoverable` reject unrepresentable values; a `u64`
+  above `i64::MAX` fails loudly rather than wrapping negative.
+- Full-width `ObjectIdentity` components keep their intentional
+  bit-pattern conversions, documented and tested separately — `u64::MAX`
+  identity components round-trip exactly.
+
+### Retention policy (Phase 6.4.3)
+
+`RetentionPolicy::keep_latest` must be at least 1. A value of 0 would
+permit deleting the newest committed run — the baseline for future
+comparisons — so it is rejected with `StoreError::InvalidRetentionPolicy`
+BEFORE any row is read or deleted. The doc comment and tests agree with
+this.
+
+The age comparison stays in the wide domain: `Duration::as_nanos()` is a
+`u128` wider than `i64`, so narrowing it wraps any duration above ~292
+years into a NEGATIVE number, inverting the rule and deleting genuinely
+fresh history. Elapsed time and the policy duration are compared as
+`u128`, so `Duration::MAX` and multi-century policies mean "keep
+everything at least this long".
 
 ## Indexes (initial set; extend by measured query, not guess)
 

@@ -526,15 +526,23 @@ fn query_limit_conversion_is_checked_everywhere() {
         (0usize, 0i64),
         (1, 1),
         (10_000, 10_000),
-        (QueryLimits::MAX_SUPPORTED, i64::MAX),
+        (QueryLimits::MAX_SUPPORTED, i64::MAX - 1),
     ] {
         let got = QueryLimits { max_results: limit }.to_sql_limit().unwrap();
         assert_eq!(got, expected, "limit {limit} must convert exactly");
     }
 
-    // The first unsupported value (i64::MAX + 1) is rejected, NOT wrapped
-    // to a negative/unbounded limit.
+    // The first unsupported value is rejected, NOT wrapped to a
+    // negative/unbounded limit. `i64::MAX` is now that value: it is a
+    // perfectly valid SQLite LIMIT, but the probe (`limit + 1`) would be
+    // unrepresentable, so a contract promising exact one-extra-row
+    // detection must refuse it rather than silently saturate.
     let first_unsupported = QueryLimits::MAX_SUPPORTED + 1;
+    assert_eq!(
+        first_unsupported,
+        i64::MAX as usize,
+        "i64::MAX must be the first unsupported value"
+    );
     let first_unsupported_limits = QueryLimits {
         max_results: first_unsupported,
     };
@@ -569,8 +577,17 @@ fn query_limit_conversion_is_checked_everywhere() {
         .to_probe_sql_limit()
         .unwrap(),
         i64::MAX,
-        "the probe at the domain boundary stays positive (never negative)"
+        "the probe at the boundary is the exact one-extra row, never saturated"
     );
+    // And the first unsupported value has NO probe at all — it is refused,
+    // so limit+1 detection can never be silently downgraded.
+    assert!(matches!(
+        QueryLimits {
+            max_results: QueryLimits::MAX_SUPPORTED + 1
+        }
+        .to_probe_sql_limit(),
+        Err(StoreError::LimitOutOfRange { .. })
+    ));
 }
 
 /// Extreme retention durations must never delete history.
@@ -622,20 +639,108 @@ fn extreme_retention_durations_never_delete_history() {
     assert!(store.get_run(&record.run_id).unwrap().is_some());
 
     // Ordinary retention behaviour is unchanged: a tiny age still prunes
-    // beyond the keep_latest floor.
+    // older runs while the newest baseline is preserved.
+    let older = run_record("retention-older-run");
+    // Backdate the older run so an age rule clearly applies to it.
+    let older = RunRecord {
+        started_at: UNIX_EPOCH + Duration::from_secs(1_000_000),
+        ..older.clone()
+    };
+    store.begin_run(&older).unwrap();
+    let older_snap = SnapshotBuilder::new().build(older.run_id.clone()).unwrap();
+    store.commit_run(&older, &older_snap, None).unwrap();
+
     let report = store
         .apply_retention(&RetentionPolicy {
-            keep_latest: 0,
+            keep_latest: 1,
             max_runs: None,
             max_age: Some(Duration::from_secs(0)),
         })
         .unwrap();
     assert_eq!(
         report.removed_runs,
-        vec![record.run_id.clone()],
-        "a zero age must still prune normally"
+        vec![older.run_id.clone()],
+        "a zero age must still prune the older run"
     );
-    assert!(store.get_run(&record.run_id).unwrap().is_none());
+    // The newest baseline survives.
+    assert!(
+        store.get_run(&record.run_id).unwrap().is_some(),
+        "the newest baseline must be protected"
+    );
+    assert!(store.get_run(&older.run_id).unwrap().is_none());
+}
+
+/// `keep_latest == 0` would allow deleting the newest baseline, which the
+/// API promises never happens, so it is rejected with a typed error
+/// BEFORE any row is read or deleted (Phase 6.4.3, Workstream D).
+#[test]
+fn keep_latest_zero_is_rejected_before_any_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("keepzero.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+    let record = run_record("keepzero-run");
+    store.begin_run(&record).unwrap();
+    let snapshot = SnapshotBuilder::new().build(record.run_id.clone()).unwrap();
+    store.commit_run(&record, &snapshot, None).unwrap();
+
+    let err = store
+        .apply_retention(&RetentionPolicy {
+            keep_latest: 0,
+            max_runs: None,
+            max_age: None,
+        })
+        .expect_err("keep_latest == 0 must be rejected");
+    match err {
+        StoreError::InvalidRetentionPolicy(detail) => {
+            assert!(detail.contains("keep_latest"), "{detail}");
+        }
+        other => panic!("expected a typed retention-policy error, got {other:?}"),
+    }
+    // Nothing was touched.
+    assert!(store.get_run(&record.run_id).unwrap().is_some());
+    assert_eq!(
+        store.get_run(&record.run_id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+}
+
+/// `Duration::MAX` never deletes, and `max_runs` still prunes correctly
+/// beyond the protected baseline.
+#[test]
+fn retention_max_runs_prunes_beyond_the_protected_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("keepmax.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    let mut ids = Vec::new();
+    for n in 0..4u64 {
+        let r = run_record(&format!("keepmax-{n}"));
+        store.begin_run(&r).unwrap();
+        let s = SnapshotBuilder::new().build(r.run_id.clone()).unwrap();
+        store.commit_run(&r, &s, None).unwrap();
+        ids.push(r.run_id);
+    }
+
+    // keep_latest = 1 protects the newest; max_runs = 2 keeps two total.
+    let report = store
+        .apply_retention(&RetentionPolicy {
+            keep_latest: 1,
+            max_runs: Some(2),
+            max_age: None,
+        })
+        .unwrap();
+    assert_eq!(report.removed_runs.len(), 2, "two oldest runs are pruned");
+    assert!(
+        store.get_run(&ids[3]).unwrap().is_some(),
+        "the newest baseline must survive"
+    );
+    assert!(
+        store.get_run(&ids[2]).unwrap().is_some(),
+        "the run up to max_runs must survive"
+    );
+    assert!(store.get_run(&ids[1]).unwrap().is_none());
+    assert!(store.get_run(&ids[0]).unwrap().is_none());
+    assert_eq!(report.kept_runs, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -687,8 +792,12 @@ fn an_unrepresentable_completed_at_preserves_the_run_row() {
     let err = store
         .commit_run(&terminal, &snapshot, None)
         .expect_err("an unrepresentable completed_at must be rejected");
+    // The error must name the ACTUAL field, not a generic timestamp.
     match err {
-        StoreError::Corrupt { column, .. } => assert_eq!(column, "started_at"),
+        StoreError::Corrupt { column, detail, .. } => {
+            assert_eq!(column, "completed_at");
+            assert!(detail.contains("completed_at"), "{detail}");
+        }
         other => panic!("expected typed corruption, got {other:?}"),
     }
     let after = store.get_run(&record.run_id).unwrap().unwrap();
@@ -899,8 +1008,10 @@ fn every_query_entry_point_rejects_unsupported_limits() {
     let db = dir.path().join("bounds.db");
     let mut store = HistoryStore::open(&db).unwrap();
 
+    // The first unsupported limit. `i64::MAX` is a valid SQLite LIMIT but
+    // cannot support exact `limit + 1` probing, so it is refused.
     let bad = QueryLimits {
-        max_results: QueryLimits::MAX_SUPPORTED + 1,
+        max_results: i64::MAX as usize,
     };
 
     // Older history APIs.

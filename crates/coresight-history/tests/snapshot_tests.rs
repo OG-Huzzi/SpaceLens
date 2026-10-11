@@ -3422,30 +3422,37 @@ fn an_extreme_limit_cannot_bypass_cap_detection() {
 
     // The largest SUPPORTED limits still behave as "no cap, nothing
     // truncated": the probe value stays positive, so a genuine cap would
-    // still be detected if one existed.
-    for limit in [i64::MAX as usize, i64::MAX as usize - 1] {
-        let loaded = store
-            .load_system_snapshot(&run_id, &QueryLimits { max_results: limit })
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            loaded.input.artifacts.len(),
-            artifact_count,
-            "the limit must not change what is read"
-        );
-        assert!(
-            !loaded.is_load_truncated(),
-            "a huge limit is not a truncation of a small snapshot"
-        );
-    }
+    // The largest SUPPORTED limit still behaves as "no cap, nothing
+    // truncated": the probe value is the exact one-extra row, so a genuine
+    // cap would still be detected if one existed.
+    let loaded = store
+        .load_system_snapshot(
+            &run_id,
+            &QueryLimits {
+                max_results: QueryLimits::MAX_SUPPORTED,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.input.artifacts.len(),
+        artifact_count,
+        "the limit must not change what is read"
+    );
+    assert!(
+        !loaded.is_load_truncated(),
+        "a huge limit is not a truncation of a small snapshot"
+    );
     // The FIRST unsupported value is refused with a typed error rather
-    // than silently becoming an unbounded query. Phase 6.4.2 hardened this
-    // from "saturating but never negative" to "reject outright": a caller
-    // cannot ask for more rows than the store can even address.
+    // than silently becoming an unbounded query. Phase 6.4.2 rejected
+    // values that would wrap negative; Phase 6.4.3 tightens the domain so
+    // `limit + 1` probing is exact at every accepted value — `i64::MAX`
+    // is a valid SQLite LIMIT but cannot probe, so it is the first
+    // refused value.
     match store.load_system_snapshot(
         &run_id,
         &QueryLimits {
-            max_results: QueryLimits::MAX_SUPPORTED + 1,
+            max_results: i64::MAX as usize,
         },
     ) {
         Err(StoreError::LimitOutOfRange { .. }) => {}

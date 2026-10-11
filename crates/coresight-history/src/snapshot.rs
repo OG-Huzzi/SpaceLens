@@ -870,6 +870,11 @@ impl HistoryStore {
         run_id: &RunId,
         limits: &QueryLimits,
     ) -> Result<Option<SystemSnapshotInput>, StoreError> {
+        // The bound is validated FIRST, before the existence probe, so an
+        // unsupported limit is refused even when the run has no snapshot
+        // (Phase 6.4.3, Workstream B). Returning `Ok(None)` for an absent
+        // run is absence, and must never be how an invalid bound passes.
+        limits.to_sql_limit()?;
         let meta: Option<(i64, i64, i64, i64, i64, i64)> = self
             .conn
             .query_row(
@@ -1549,7 +1554,20 @@ impl HistoryStore {
                     why,
                 });
             }
+            // The stored cap is applied BEFORE normalization: if the
+            // section exceeded the query bound, the truncation signal must
+            // be preserved (a rebuild refuses incomplete facts), and
+            // normalizing first could hide duplicate rows inside the bound
+            // and mask a real overflow.
             let evidence = enforce_cap("footprint_evidence", limits.max_results, evidence, caps);
+            // Then the capped evidence is normalized to the documented SET
+            // contract — the SAME `normalize_candidate_evidence` the
+            // producer applies at admission and the commit applies on
+            // write. A tampered store that inserted duplicate evidence rows
+            // therefore reloads as the canonical set it should have stored,
+            // rather than as a list that violates the contract the rest of
+            // the code promises.
+            let evidence = normalize_evidence_set(evidence);
             out.push(FootprintCandidate {
                 path,
                 app: ApplicationId(app_id.to_string()),
@@ -2123,6 +2141,37 @@ impl LoadCaps {
     fn into_sections(self) -> Vec<&'static str> {
         self.0
     }
+}
+
+/// Normalize a decoded footprint-evidence list to the documented SET
+/// contract: canonical ordering, duplicates removed (Phase 6.4.3,
+/// Workstream C).
+///
+/// This is the READ-side counterpart of the write-side normalization, and
+/// it goes through the one shared normalizer
+/// (`coresight_apps::footprint::normalize_candidate_evidence`) so producer,
+/// commit, and reload cannot disagree about what an evidence set is.
+///
+/// The chosen tampered-store policy is NORMALIZE, not reject: the write
+/// path already guarantees a legitimate database never contains duplicate
+/// evidence rows (they are deduplicated on write), so duplicates can only
+/// arrive from tampering or corruption. Normalizing them away preserves
+/// the set contract the callers rely on, keeps cap detection intact (the
+/// cap is applied first, so a genuinely oversized section still reports
+/// truncation), and avoids turning a duplicated row into a hard read
+/// failure for historical data that would otherwise be readable.
+fn normalize_evidence_set(
+    evidence: Vec<coresight_apps::FootprintEvidence>,
+) -> Vec<coresight_apps::FootprintEvidence> {
+    let mut scratch = FootprintCandidate {
+        path: PathBuf::new(),
+        app: ApplicationId(String::new()),
+        kind: coresight_apps::FootprintKind::InstallationDirectory,
+        confidence: coresight_apps::Confidence::Confirmed,
+        evidence,
+    };
+    coresight_apps::footprint::normalize_candidate_evidence(&mut scratch);
+    scratch.evidence
 }
 
 /// Detect (and record) a cap hit: rows are fetched with `LIMIT limit + 1`,

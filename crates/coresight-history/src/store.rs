@@ -105,6 +105,10 @@ pub enum StoreError {
         requested: usize,
         supported: usize,
     },
+    /// A retention policy would violate the API's core guarantee — the
+    /// newest committed run is the baseline for future comparisons and is
+    /// never removed. Checked BEFORE any row is read or deleted.
+    InvalidRetentionPolicy(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -149,6 +153,9 @@ impl std::fmt::Display for StoreError {
                 "query limit {requested} exceeds the representable maximum {supported}; \
                  refusing to run a query whose bound could become unlimited"
             ),
+            StoreError::InvalidRetentionPolicy(detail) => {
+                write!(f, "invalid retention policy: {detail}")
+            }
         }
     }
 }
@@ -672,20 +679,50 @@ impl HistoryStore {
         if snapshot.run_id != record.run_id {
             return Err(StoreError::UnknownRun(record.run_id.clone()));
         }
-        let conn = &mut self.conn;
-        let tx = conn.transaction()?;
-        // Numeric preflight (Phase 6.4.2, Workstream C): every numeric
-        // value this commit writes is validated BEFORE the first
-        // destructive statement, so an unrepresentable counter aborts the
-        // whole commit instead of wrapping mid-way through it.
+        // ---- TRUE preflight (Phase 6.4.3, Workstream D) ----
+        // Every potentially failing conversion is computed BEFORE the
+        // transaction opens, so a rejected input cannot even BEGIN
+        // modifying existing state. Relying on transaction rollback would
+        // satisfy the "no partial commit" guarantee but not the "no
+        // mutation attempt" one, and it would make the failure order depend
+        // on SQLite's rather than on the caller's input.
         let rel_truncated = match relationships {
             Some(r) => Some(checked_relationship_counter(r.relationships_truncated)?),
             None => None,
         };
-        // Checked timestamps before the final UPDATE (Phase 6.4.2,
-        // Workstream C): a terminal time outside the representable domain
-        // aborts the commit rather than being stored wrapped.
-        let completed_at = time_nanos(record.completed_at.unwrap_or(record.started_at))?;
+        for r in relationships
+            .iter()
+            .flat_map(|rep| rep.relationships.iter())
+        {
+            let _ = checked_recoverable_bytes(r)?;
+        }
+        let completed_at = checked_run_timestamp(
+            record.completed_at.unwrap_or(record.started_at),
+            "completed_at",
+        )?;
+        // Every observation's modification time is part of the same
+        // contract: one unrepresentable entry rejects the whole commit.
+        let entry_timestamps: Vec<Option<i64>> = snapshot
+            .entries
+            .iter()
+            .map(|e| match e.modified {
+                Some(t) => checked_run_timestamp(t, "modified").map(Some),
+                None => Ok(None),
+            })
+            .collect::<Result<_, _>>()?;
+        let relationship_rows: Vec<Option<i64>> = relationships
+            .map(|rep| {
+                rep.relationships
+                    .iter()
+                    .map(checked_recoverable_bytes)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        // Preflight passed: only now open the transaction.
+        let conn = &mut self.conn;
+        let tx = conn.transaction()?;
         let updated = tx.execute(
             "UPDATE scan_runs SET completed_at = ?2, status = ?3,
                 entries_examined = ?4, files = ?5, dirs = ?6, links = ?7,
@@ -719,14 +756,10 @@ impl HistoryStore {
               subcategory, content_sha256, obs_error)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
-        for entry in &snapshot.entries {
-            // Every observed modification time is checked too: an
-            // unrepresentable timestamp rejects the whole commit instead of
-            // wrapping into a plausible-looking past date (Phase 6.4.2).
-            let modified = match entry.modified {
-                Some(t) => Some(time_nanos(t)?),
-                None => None,
-            };
+        for (entry, modified) in snapshot.entries.iter().zip(entry_timestamps.iter()) {
+            // The modification time was already checked in the preflight;
+            // it is bound here verbatim so no conversion can fail between
+            // the UPDATE above and this INSERT.
             obs.execute(params![
                 record.run_id.0,
                 crate::path_encoding::encode(&entry.path),
@@ -756,12 +789,10 @@ impl HistoryStore {
                 "INSERT INTO relationship_members (run_id, rel_id, path, device, inode, file_id_hi)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
-            for r in &rel.relationships {
-                // Recoverable bytes are an honest upper bound that can
-                // legitimately be huge; an unrepresentable value must not
-                // silently wrap into a negative column (which would read as
-                // "more bytes than exist" or, worse, as absent).
-                let recoverable = checked_recoverable_bytes(r)?;
+            for (r, recoverable) in rel.relationships.iter().zip(relationship_rows.iter()) {
+                // Recoverable bytes were checked in the preflight and bound
+                // here verbatim, so no conversion can fail after the run
+                // row has already been updated.
                 ro.execute(params![
                     record.run_id.0,
                     r.id,
@@ -941,7 +972,7 @@ impl HistoryStore {
             relationships,
             members_by_rel,
             rel_status.status,
-            rel_status.truncated.unwrap_or(0).max(0) as u64,
+            legacy_counter_from_stored(rel_status.truncated),
         )
         .map_err(|detail| StoreError::Corrupt {
             table: "relationship_obs",
@@ -1124,10 +1155,23 @@ impl HistoryStore {
     /// and `max_age` prune older committed runs. Running/failed rows are
     /// not deleted by age (they are the crash-recovery record). Every
     /// removal is reported.
+    ///
+    /// `keep_latest` must be at least 1: a value of 0 would permit
+    /// deleting the newest baseline, which contradicts the guarantee this
+    /// API exists to provide. It is rejected with
+    /// [`StoreError::InvalidRetentionPolicy`] BEFORE any row is read or
+    /// deleted (Phase 6.4.3, Workstream D).
     pub fn apply_retention(
         &mut self,
         policy: &RetentionPolicy,
     ) -> Result<RetentionReport, StoreError> {
+        if policy.keep_latest == 0 {
+            return Err(StoreError::InvalidRetentionPolicy(
+                "keep_latest must be at least 1: the newest committed run is \
+                 the baseline for future comparisons and is never removed"
+                    .to_string(),
+            ));
+        }
         let conn = &mut self.conn;
         let tx = conn.transaction()?;
         let mut stmt = tx.prepare(
@@ -1198,20 +1242,45 @@ impl Default for QueryLimits {
 impl QueryLimits {
     /// The largest supported `max_results`.
     ///
-    /// SQLite reads a NEGATIVE `LIMIT` as "unbounded", so any limit that
-    /// does not fit a signed 64-bit integer would silently disable the
-    /// caller's bound instead of failing. `usize::MAX as i64` is `-1` on
-    /// every supported platform, so the conversion must be checked (see
-    /// [`StoreError::LimitOutOfRange`]).
-    pub const MAX_SUPPORTED: usize = i64::MAX as usize;
+    /// Two constraints shape this value:
+    ///
+    /// 1. SQLite reads a NEGATIVE `LIMIT` as "unbounded", so any limit that
+    ///    does not fit a signed 64-bit integer would silently disable the
+    ///    caller's bound (see [`StoreError::LimitOutOfRange`]).
+    /// 2. Snapshot reads detect a cap hit EXACTLY by probing with
+    ///    `limit + 1` rows ([`QueryLimits::to_probe_sql_limit`]). At
+    ///    `i64::MAX` that probe would be unrepresentable and would have to
+    ///    saturate, degrading detection precisely at the boundary — so the
+    ///    accepted maximum is one below it, and a request for `i64::MAX` is
+    ///    refused with a typed error rather than silently downgraded.
+    ///
+    /// The policy is uniform across every query API in this crate; the
+    /// bound is checked BEFORE any SQL is issued, including on the
+    /// no-record paths (a query for an absent run still rejects an
+    /// unsupported limit).
+    pub const MAX_SUPPORTED: usize = (i64::MAX - 1) as usize;
 
     /// Convert to the store's signed `INTEGER` `LIMIT` domain, rejecting
-    /// any value that would silently become an unbounded query.
+    /// any value outside the supported domain.
+    ///
+    /// The bound is [`MAX_SUPPORTED`], which is deliberately BELOW `i64::MAX`
+    /// because snapshot reads must also be able to compute the probe value
+    /// (`limit + 1`) exactly. Accepting `i64::MAX` here would let
+    /// `to_probe_sql_limit` overflow, so the shared validation rejects it up
+    /// front instead of panicking at the boundary.
     ///
     /// This is the ONE shared conversion policy for every query API in
     /// this crate — snapshot reads, history reads, and listing reads — so
     /// no call site can introduce its own narrowing rule.
     pub fn to_sql_limit(&self) -> Result<i64, StoreError> {
+        if self.max_results > Self::MAX_SUPPORTED {
+            return Err(StoreError::LimitOutOfRange {
+                requested: self.max_results,
+                supported: Self::MAX_SUPPORTED,
+            });
+        }
+        // Guaranteed in range by the check above; `i64::try_from` cannot
+        // fail, but the total conversion is kept for the typed error.
         i64::try_from(self.max_results).map_err(|_| StoreError::LimitOutOfRange {
             requested: self.max_results,
             supported: Self::MAX_SUPPORTED,
@@ -1222,15 +1291,12 @@ impl QueryLimits {
     /// caller's bound, so `len > max_results` proves the section was cut
     /// short (exact detection, never guessed).
     ///
-    /// Saturating keeps the value positive even at the domain boundary, so
-    /// the probe can never become a negative/unlimited `LIMIT`.
+    /// [`MAX_SUPPORTED`] guarantees the sum always fits a signed 64-bit
+    /// integer, so this never saturates and can never become a
+    /// negative/unlimited `LIMIT` for any accepted limit.
     pub fn to_probe_sql_limit(&self) -> Result<i64, StoreError> {
-        // `MAX_SUPPORTED + 1` cannot overflow `i64` because
-        // `MAX_SUPPORTED == i64::MAX`, and `saturating_add` caps it.
-        match self.to_sql_limit() {
-            Ok(limit) => Ok(limit.saturating_add(1)),
-            Err(e) => Err(e),
-        }
+        // `MAX_SUPPORTED + 1 == i64::MAX`, so this cannot overflow.
+        self.to_sql_limit().map(|limit| limit + 1)
     }
 }
 
@@ -2012,29 +2078,39 @@ fn serde_accounting(a: StorageAccounting) -> &'static str {
 
 use coresight_identity::StorageAccounting;
 
-/// Convert a public `SystemTime` to the store's signed nanosecond domain.
+/// Convert a caller-supplied run timestamp to the store's signed
+/// nanosecond domain, naming the ACTUAL field so the error says what was
+/// wrong instead of always blaming `started_at`.
 ///
 /// `Duration::as_nanos()` returns a `u128` wider than `i64`, so an
 /// unchecked cast wraps any timestamp past ~2262 CE into a NEGATIVE
 /// number. The reader (`time_from_nanos`) clamps negatives to the epoch,
 /// so the original time would be silently corrupted rather than
-/// rejected. Unrepresentable timestamps therefore fail loudly
-/// (Phase 6.4.2, Workstream C): `None` is never synthesized here, and
-/// `None` from the caller means "no timestamp", not "a huge one".
-fn time_nanos(t: SystemTime) -> Result<i64, StoreError> {
+/// rejected — hence the checked conversion.
+fn checked_run_timestamp(t: SystemTime, field: &'static str) -> Result<i64, StoreError> {
     // A time BEFORE the epoch is stored as 0 rather than a negative, which
     // the reader clamps to the epoch anyway. That is a documented,
     // lossless-enough convention for pre-epoch clocks.
     let duration = t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     i64::try_from(duration.as_nanos()).map_err(|_| StoreError::Corrupt {
         table: "scan_runs",
-        column: "started_at",
+        column: field,
         run_id: None,
         detail: format!(
-            "timestamp {t:?} lies outside the store's signed 64-bit \
+            "{field} timestamp {t:?} lies outside the store's signed 64-bit \
              nanosecond domain (year ~2262 and later are unrepresentable)"
         ),
     })
+}
+
+/// Convert a public `SystemTime` to the store's signed nanosecond domain.
+///
+/// `SystemTime::now()` is always within the representable nanosecond
+/// domain on any real platform (year 2262 is far in the future), so this
+/// cannot fail in practice; a failure would be a platform defect rather
+/// than caller data.
+fn time_nanos(t: SystemTime) -> Result<i64, StoreError> {
+    checked_run_timestamp(t, "started_at")
 }
 
 fn time_from_nanos(n: i64) -> SystemTime {
@@ -2053,6 +2129,44 @@ fn time_from_nanos_opt(n: Option<i64>) -> Option<SystemTime> {
 fn now_nanos() -> i64 {
     time_nanos(SystemTime::now())
         .expect("SystemTime::now() must lie within the store's nanosecond domain")
+}
+/// Reinterpret a stored signed `INTEGER` counter as its unsigned domain
+/// value.
+///
+/// ## Why this exists (Phase 6.4.3, Workstream A)
+///
+/// `scan_runs.rel_truncated` was originally written with an UNCHECKED
+/// `u64 as i64` conversion, so a domain value at or above `2^63` was
+/// stored as a NEGATIVE SQLite integer — a valid legacy bit pattern, not
+/// corruption. The read path must reconstruct such values faithfully.
+///
+/// | Stored value | Meaning | Result |
+/// |---|---|---|
+/// | `NULL` | "not recorded" | `0` (no report was recorded) |
+/// | `>= 0` | the value itself | `v as u64` |
+/// | `< 0` | a legacy wrapped bit pattern | `v as u64` (exact round trip) |
+///
+/// ## A documented limitation, not a claimed capability
+///
+/// A negative stored value is AMBIGUOUS by construction: "a legacy wrapped
+/// counter" and "a tampered value that never came from this writer" are
+/// indistinguishable in the stored format. This code deliberately does not
+/// pretend to tell them apart. It reconstructs the round-tripped value —
+/// the only reading that preserves every historical value the old writer
+/// could produce — and the limitation is documented rather than dressed up
+/// as corruption detection.
+///
+/// What this must NEVER do is clamp to zero, which is what the previous
+/// implementation did (`.max(0) as u64`): a legacy `rel_truncated` above
+/// `2^63` silently read back as "nothing truncated", erasing the very
+/// incompleteness signal the field carries.
+///
+/// New writes are unaffected — Phase 6.4.2's checked conversion rejects an
+/// unrepresentable counter before any mutation, so no NEW row can store a
+/// wrapped value.
+fn legacy_counter_from_stored(stored: Option<i64>) -> u64 {
+    // `as u64` is the exact inverse of the legacy `as i64` write.
+    stored.unwrap_or(0) as u64
 }
 
 /// Checked conversion of the relationship truncation counter (Phase

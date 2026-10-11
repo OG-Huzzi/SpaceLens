@@ -8,9 +8,13 @@ fidelity, numeric/query-bound safety, integrated persistence audit)
 
 PHASE 6.4.2 — Persistence Boundary, Query Bounds & Retention Safety
 
+PHASE 6.4.3 — Read-Side Integrity & Exact Boundary Semantics
+
 **Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1 is
 IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.2 is
-IMPLEMENTED and VERIFIED with its own exact-SHA CI record.
+IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.3 is
+IMPLEMENTED with a green local gate; its exact-SHA CI record follows once
+that run is confirmed.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -359,6 +363,150 @@ dependency, source-scan guard intact).
   strictly-better one, so a weaker description's DISTINCT evidence is not
   retained separately. That is the documented set semantics (one scope);
   conflicting scopes (different path/app/kind) are never merged.
+
+## Phase 6.4.3 — Read-Side Integrity & Exact Boundary Semantics
+
+Baseline: `9fa856edda45d9c24a464c2b869a478efb92a891` (the Phase 6.4.2
+verification-record commit). **Schema v6 remains unchanged** — no
+migration was added, and no migration v2–v6 SQL was edited.
+
+### Confirmed defects, fixes, and regression tests
+
+**D1. Legacy truncation counts were clamped to zero, erasing the
+incompleteness signal (Workstream A).** The pre-6.4.2 writer used an
+unchecked `u64 as i64`, so a legitimate `rel_truncated` above `2^63` was
+stored as a NEGATIVE SQLite integer. The read path used
+`.max(0) as u64`, which clamped it to **0** — presenting a truncated run
+as a complete one. Confirmed by probe: a legacy value of
+`10_000_000_000_000_000_000` read back as `0`.
+Fix: `legacy_counter_from_stored` reconstructs the round-tripped value
+faithfully.
+- `phase643_tests::a_legacy_negative_rel_truncated_round_trips_and_keeps_its_meaning`
+- `phase643_tests::a_positive_rel_truncated_round_trips`
+- `phase643_tests::a_null_rel_status_means_no_report`
+- `phase643_tests::the_negative_value_ambiguity_is_documented_not_hidden`
+
+**Compatibility policy, stated explicitly:** a negative stored value is
+AMBIGUOUS — a legacy wrapped counter and a tampered value are
+indistinguishable in the stored format. The store does NOT claim to tell
+them apart; it reconstructs the round-tripped value, the only reading that
+preserves every historical value the old writer could produce. `recoverable`
+already followed this rule in both read paths and needed no change.
+
+**D2. `i64::MAX` was an accepted limit that silently degraded `limit + 1`
+detection (Workstream B).** `MAX_SUPPORTED` was `i64::MAX`, so the probe
+had to saturate exactly at the boundary — "exact detection" quietly became
+approximate for the largest allowed value. Fix: `MAX_SUPPORTED` is now
+`i64::MAX - 1`, `to_sql_limit` rejects anything above it, and `i64::MAX`
+is the first refused value.
+- `phase643_tests::the_supported_limit_domain_supports_exact_probing`
+- `phase642_tests::query_limit_conversion_is_checked_everywhere` (updated)
+- `snapshot_tests::an_extreme_limit_cannot_bypass_cap_detection` (updated)
+
+**D3. `load_system_snapshot` validated its bound only AFTER probing for
+the snapshot (Workstream B).** For an absent run it returned `Ok(None)`
+before any limit check, so an invalid limit could masquerade as "no
+snapshot exists". Confirmed by test. Fix: the bound is validated first,
+so `load_system_snapshot`, `load_snapshot_applications`, and
+`rebuild_system_model` all reject an unsupported limit even when the run
+does not exist.
+- `phase643_tests::every_entry_point_validates_the_bound_before_any_sql`
+
+**D4. The footprint read path exposed persisted duplicate evidence as a
+list (Workstream C).** `load_snapshot_footprints` pushed decoded rows
+verbatim, violating the documented set contract the write path enforces.
+Fix: the capped evidence is normalized through the shared
+`normalize_candidate_evidence`, and the CAP is applied FIRST so a genuine
+overflow still reports truncation rather than being hidden by dedup.
+Proven by direct SQL tampering — the only way a duplicate can exist.
+- `phase643_footprint_tests::duplicate_persisted_evidence_is_normalized_into_the_set_contract`
+- `phase643_footprint_tests::the_evidence_cap_is_applied_before_normalization`
+
+**D5. The numeric "preflight" ran inside the transaction (Workstream D).**
+Conversions happened after the UPDATE/INSERT statements began, so a
+rejection relied on rollback rather than never touching data. Fix: every
+conversion (relationship counters, `recoverable_bytes`, `completed_at`,
+and each observation's `modified`) is computed BEFORE the transaction
+opens.
+- `phase643_tests::an_invalid_observation_timestamp_preserves_all_committed_data`
+
+**D6. Timestamp errors always blamed `started_at` (Workstream D).** An
+unrepresentable `completed_at` was reported as `started_at`. Fix:
+`checked_run_timestamp(t, field)` names the actual field.
+- `phase643_tests::timestamp_errors_identify_the_actual_field`
+
+**D7. `keep_latest == 0` was accepted, contradicting the documented
+guarantee (Workstream D).** The doc comment promised the newest baseline
+is "ALWAYS kept", yet a zero floor made it deletable (confirmed by the
+existing test, which used `keep_latest: 0` to force deletion). Fix:
+rejected with `StoreError::InvalidRetentionPolicy` before any row is read
+or deleted, and the tests were rewritten to use realistic multi-run
+fixtures. My own first drafting of this test hit an overflow bug
+(`MAX_SUPPORTED + 1` on `usize`), which the suite caught immediately.
+- `phase643_tests::keep_latest_zero_is_rejected_and_one_protects_the_baseline`
+- `phase642_tests::keep_latest_zero_is_rejected_before_any_deletion`
+- `phase642_tests::retention_max_runs_prunes_beyond_the_protected_baseline`
+
+### Local verification (all executed, results checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (0 warnings) |
+| `cargo test --workspace` | **866 passed, 0 failed** |
+| `cargo test --workspace --all-features` | 0 failed |
+| `cargo test --workspace -- --ignored` | 0 failed |
+| `git diff --check` | clean |
+
+Baseline was 852 tests, so this phase adds 14 across two new test files
+(`phase643_tests.rs`, `phase643_footprint_tests.rs`) and updates three
+existing assertions to the tightened limit/retention contracts. No
+assertion was weakened: the two limit tests now assert the *stricter*
+refusal, and the retention tests assert baseline protection that the old
+`keep_latest: 0` behaviour violated.
+
+### Second adversarial audit (Workstream E, 15 claims)
+
+1. Legacy negative numerics follow the documented policy → D1 fix; four tests.
+2. All public queries reject unsupported bounds before SQL, including
+   absent-record paths → D3 fix; `every_entry_point_validates_the_bound_before_any_sql`.
+3. Exact `limit + 1` holds across the declared domain → D2 fix; the
+   boundary test asserts `i64::MAX - 1 → probe i64::MAX` exactly.
+4. Duplicate persisted evidence cannot violate the set contract or bypass
+   cap detection → D4 fix; both tamper tests.
+5. Producer, write, reload, and rebuild agree → `phase642_tests::producer_commit_and_reload_produce_identical_footprints`
+   plus the shared `candidate_rank` / `normalize_candidate_evidence` used by every layer.
+6. All caller-controlled numerics and timestamps are preflighted before the
+   first mutation → D5 fix; the preservation test proves prior data survives.
+7. Error messages identify the correct field → D6 fix; asserted per field.
+8. Failed writes preserve prior committed data → D1/D5/D6 tests assert the
+   prior row's status and timestamps are unchanged.
+9. Retention validation and baseline preservation match documentation →
+   D7 fix; doc comment, error variant, and tests now agree.
+10. Full-width identity round trips including `u64::MAX` → existing
+    `maximum_integer_values_round_trip_without_narrowing` still passes; the
+    remaining `as i64` casts were audited and are identity bit-patterns only.
+11. Historical v2–v6 databases remain compatible and decoding stays
+    fail-closed → the legacy fixtures open through the real migration path.
+12. No unrelated schema migration or source-model rewrite → `git diff`
+    confirms only 3 source files changed and no migration SQL.
+13. `coresight-system-model` remains pure → zero diff, no SQLite dependency.
+14. No persisted row manufactures authorization or evidence → no new
+    claims/insights/candidates are persisted.
+15. No GUI, IPC, orchestration, subprocess, network, or destructive
+    execution → no new subsystem; only the existing crates changed.
+
+### Phase 6.4.3 limitations (honest)
+
+- **Negative persisted numerics are ambiguous and are NOT detected.**
+  Legacy-wrapped and tampered values are indistinguishable in the stored
+  format. The policy reconstructs the round-tripped value and documents
+  the limitation rather than claiming detection capability.
+- The accepted query-limit domain narrowed again (`i64::MAX` is now
+  refused so probing stays exact).
+- Timestamps past ~2262 CE remain unrepresentable and are rejected.
+- Evidence remains a SET; duplicates are normalized rather than preserved.
+- All Phase 6.4/6.4.1/6.4.2 limitations remain in force.
 
 `PHASE 6.5 — NOT STARTED.`
 
