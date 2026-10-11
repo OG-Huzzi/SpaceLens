@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use coresight_history::{
-    ConfigFingerprint, HistoryStore, QueryLimits, RetentionPolicy, RunCounts, RunId, RunRecord,
-    RunStatus, Snapshot, SnapshotBuilder, StoreError,
+    ConfigFingerprint, HistoryStore, ObservedEntry, ObservedKind, QueryLimits, RetentionPolicy,
+    RunCounts, RunId, RunRecord, RunStatus, Snapshot, SnapshotBuilder, StoreError,
 };
 use coresight_identity::{DuplicateStatus, ObjectIdentity, StorageAccounting, Undetermined};
 
@@ -335,22 +335,30 @@ fn far_future() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(32503680000)
 }
 
-/// An unrepresentable OBSERVATION timestamp rejects the commit and leaves
-/// the prior committed run, its observations, and its relationships
-/// byte-for-byte unchanged (Workstream D).
+/// An unrepresentable RECOVERABLE-BYTE value is rejected at preflight, as
+/// caller input (not as store corruption), and the previously committed
+/// run, its observations and its relationships are left untouched.
+///
+/// This exercises the recoverable-byte case specifically. The observation
+/// timestamp case is covered separately below by
+/// [`an_invalid_observation_modified_timestamp_preserves_all_committed_data`].
 #[test]
-fn an_invalid_observation_timestamp_preserves_all_committed_data() {
+fn an_invalid_recoverable_byte_value_preserves_all_committed_data() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("preflight-obs.db");
+    let db = dir.path().join("preflight-rec.db");
     let mut store = HistoryStore::open(&db).unwrap();
 
     // Commit a valid run first.
-    let record = run_record("preflight-run");
+    let record = run_record("preflight-rec-run");
     store.begin_run(&record).unwrap();
     let good = empty_snapshot(&record.run_id);
     store.commit_run(&record, &good, None).unwrap();
     let before = store.get_run(&record.run_id).unwrap().unwrap();
     assert_eq!(before.status, RunStatus::Completed);
+
+    // Snapshot the committed state directly, so the assertions below
+    // inspect the DATABASE rather than one returned API object.
+    let snapshot_before = db_dump(&db);
 
     // Now a commit whose report carries an unrepresentable recoverable
     // value. The run row must survive untouched.
@@ -358,9 +366,18 @@ fn an_invalid_observation_timestamp_preserves_all_committed_data() {
     let err = store
         .commit_run(&record, &good, Some(&bad_report))
         .expect_err("an unrepresentable recoverable value must be rejected");
-    match err {
-        StoreError::Corrupt { column, .. } => assert_eq!(column, "recoverable"),
-        other => panic!("expected typed corruption, got {other:?}"),
+    // Invalid CALLER input is typed as such — not as a corrupt store.
+    match &err {
+        StoreError::InvalidRunCount {
+            table,
+            column,
+            value,
+        } => {
+            assert_eq!(*table, "relationship_obs");
+            assert_eq!(*column, "recoverable");
+            assert_eq!(*value, u64::MAX);
+        }
+        other => panic!("expected InvalidRunCount for caller input, got {other:?}"),
     }
     let after = store.get_run(&record.run_id).unwrap().unwrap();
     assert_eq!(
@@ -369,6 +386,130 @@ fn an_invalid_observation_timestamp_preserves_all_committed_data() {
         "the previously committed run must be preserved"
     );
     assert_eq!(after.started_at, before.started_at);
+    assert_eq!(
+        db_dump(&db),
+        snapshot_before,
+        "no row of the previously committed snapshot may change"
+    );
+}
+
+/// An unrepresentable OBSERVATION `modified` timestamp rejects the commit
+/// BEFORE the transaction opens and leaves the previously committed run,
+/// its observations and its relationships byte-for-byte unchanged.
+///
+/// This is the genuine observation-timestamp case: the snapshot really
+/// contains an `ObservedEntry` with a far-future `modified` value.
+#[test]
+fn an_invalid_observation_modified_timestamp_preserves_all_committed_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("preflight-ts.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+
+    // Commit a VALID run carrying one observation, so the state under test
+    // has real observations to preserve.
+    let record = run_record("preflight-ts-run");
+    store.begin_run(&record).unwrap();
+    let good = Snapshot {
+        run_id: record.run_id.clone(),
+        entries: vec![ObservedEntry {
+            path: PathBuf::from("/scope-a/real.bin"),
+            kind: ObservedKind::File,
+            size: Some(10),
+            object: None,
+            modified: Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            classification: None,
+            content_sha256: None,
+            observation_error: None,
+        }],
+    };
+    store.commit_run(&record, &good, None).unwrap();
+    let before = store.get_run(&record.run_id).unwrap().unwrap();
+    assert_eq!(before.status, RunStatus::Completed);
+    // The committed observation really exists.
+    let before_load = store.load_run_snapshot(&record.run_id).unwrap().unwrap();
+    assert_eq!(before_load.snapshot.entries.len(), 1);
+    let snapshot_before = db_dump(&db);
+
+    // A replacement whose observation carries an unrepresentable timestamp.
+    let bad = Snapshot {
+        run_id: record.run_id.clone(),
+        entries: vec![ObservedEntry {
+            path: PathBuf::from("/scope-a/real.bin"),
+            kind: ObservedKind::File,
+            size: Some(11),
+            object: None,
+            modified: Some(far_future()),
+            classification: None,
+            content_sha256: None,
+            observation_error: None,
+        }],
+    };
+    let err = store
+        .commit_run(&record, &bad, None)
+        .expect_err("an unrepresentable observation timestamp must be rejected");
+    // The error must name the OWNING table and column of the field.
+    match &err {
+        StoreError::Corrupt { table, column, .. } => {
+            assert_eq!(*table, "observations", "the field's owning table");
+            assert_eq!(*column, "modified", "the actual column");
+        }
+        other => panic!("expected typed corruption, got {other:?}"),
+    }
+
+    // Not one row changed: same status, same timestamps, same observations.
+    let after = store.get_run(&record.run_id).unwrap().unwrap();
+    assert_eq!(after.status, RunStatus::Completed);
+    assert_eq!(after.started_at, before.started_at);
+    assert_eq!(after.completed_at, before.completed_at);
+    let after_load = store.load_run_snapshot(&record.run_id).unwrap().unwrap();
+    assert_eq!(after_load.snapshot.entries, before_load.snapshot.entries);
+    assert_eq!(
+        db_dump(&db),
+        snapshot_before,
+        "the failed attempt must not alter any persisted row"
+    );
+}
+
+/// Dump the committed rows of a database, for direct state comparison.
+fn db_dump(db: &Path) -> String {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut out = String::new();
+    for sql in [
+        "SELECT run_id, started_at, completed_at, status, entries_examined, files, dirs, \
+         links, other_entries, bytes, observation_errors, candidates_untracked, \
+         hash_failures, rel_status, rel_truncated FROM scan_runs ORDER BY run_id",
+        "SELECT run_id, path, kind, size, modified FROM observations ORDER BY run_id, path",
+        "SELECT run_id, rel_id, kind, size, member_count, recoverable, accounting \
+         FROM relationship_obs ORDER BY run_id, rel_id",
+        "SELECT run_id, rel_id, path FROM relationship_members ORDER BY run_id, rel_id, path",
+    ] {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let cols = stmt.column_count();
+        let rows = stmt
+            .query_map([], |r| {
+                let mut line = String::new();
+                for i in 0..cols {
+                    if i > 0 {
+                        line.push('|');
+                    }
+                    let v: Option<String> = r.get(i).ok();
+                    line.push_str(&v.unwrap_or_else(|| "<NULL>".to_string()));
+                }
+                Ok(line)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        out.push_str(sql);
+        out.push_str(" =>\n");
+        for row in rows {
+            out.push_str("  ");
+            out.push_str(&row);
+            out.push('\n');
+        }
+    }
+    conn.close().unwrap();
+    out
 }
 
 /// A run report whose single relationship carries the given recoverable

@@ -10,10 +10,12 @@ PHASE 6.4.2 — Persistence Boundary, Query Bounds & Retention Safety
 
 PHASE 6.4.3 — Read-Side Integrity & Exact Boundary Semantics
 
-**Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1 is
-IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.2 is
-IMPLEMENTED and VERIFIED with its own exact-SHA CI record. Phase 6.4.3 is
-IMPLEMENTED and VERIFIED with its own exact-SHA CI record.
+PHASE 6.4.4 — Numeric Preflight Closure & Relationship Metadata Consistency
+
+**Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1,
+6.4.2 and 6.4.3 are IMPLEMENTED and VERIFIED with their own exact-SHA CI
+records. Phase 6.4.4 is IMPLEMENTED with a green local gate; its exact-SHA
+CI record follows once that run is confirmed.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -527,6 +529,113 @@ refusal, and the retention tests assert baseline protection that the old
 - Timestamps past ~2262 CE remain unrepresentable and are rejected.
 - Evidence remains a SET; duplicates are normalized rather than preserved.
 - All Phase 6.4/6.4.1/6.4.2 limitations remain in force.
+
+## Phase 6.4.4 — Numeric Preflight Closure & Relationship Metadata Consistency
+
+Baseline: `bdd11e6196ef3179f8c66e3678ac986e0a531012` (the Phase 6.4.3
+verification-record commit). **Schema v6 remains unchanged** — no
+migration was added, and no migration v2–v6 SQL was edited.
+
+### Confirmed defects, fixes, and regression tests
+
+**D1. Nine `RunCounts` fields and `ObservedEntry::size` were bound
+unchecked (Workstream A).** All are `u64`. A `u64::MAX` reached SQLite,
+which failed with a generic `"number too large to fit in target type"` —
+no table, no column, no field, and the failure happened INSIDE the
+transaction after mutation had begun. Confirmed by probe.
+Fix: every field is preflighted and bound verbatim.
+- `phase644_tests::every_run_count_field_is_checked_before_the_transaction`
+  (each of the nine fields independently)
+- `phase644_tests::an_unrepresentable_observation_size_is_caller_input`
+
+**D2. Relationship `size` and `member_count` were bound unchecked.**
+Both are `u64` and both now preflight through shared helpers.
+- `phase644_tests::every_relationship_numeric_field_is_checked`
+
+**D3. Invalid CALLER input was reported as persisted CORRUPTION
+(Workstream A, requirement 4).** The error contract distinguishes the two,
+so mislabeling caller input as a corrupt store sends callers hunting for
+database damage that does not exist. Fix: the new typed
+`StoreError::InvalidRunCount { table, column, value }`, with a `Display`
+that says so explicitly.
+- `phase644_tests::an_unrepresentable_observation_size_is_caller_input`
+- `phase643_tests::an_invalid_recoverable_byte_value_preserves_all_committed_data`
+
+**D4. `begin_run` converted its timestamp inside its own transaction.**
+Fix: `started_at` is validated before the transaction opens.
+- `phase644_tests::begin_run_validates_started_at_before_its_transaction`
+
+**D5. An observation `modified` error named the WRONG TABLE
+(Workstream B, requirement 6).** The column was correct but the table
+reported `scan_runs` for a field that lives in `observations`. Fix:
+`checked_timestamp(t, table, column)` with three wrappers
+(`checked_run_timestamp`, `checked_observation_timestamp`), so each field
+reports its own owner:
+`scan_runs.started_at`, `scan_runs.completed_at`, `observations.modified`.
+- `phase644_tests::an_observation_timestamp_error_names_its_owning_table`
+
+**D6. The test named `an_invalid_observation_timestamp_preserves_all_committed_data`
+did not exercise an observation timestamp (Workstream B, requirement 1).**
+It injected an invalid recoverable-byte value into an EMPTY snapshot, so
+its name and stated coverage were wrong — and it passed for the wrong
+reason. Split into two tests with accurate names, and the genuine
+timestamp test now uses a real `ObservedEntry` with a far-future
+`modified`, plus a direct database dump proving no row changed.
+- `phase643_tests::an_invalid_recoverable_byte_value_preserves_all_committed_data`
+  (the recoverable case, asserted against `InvalidRunCount`)
+- `phase643_tests::an_invalid_observation_modified_timestamp_preserves_all_committed_data`
+  (the genuine timestamp case, with a `db_dump` comparison)
+
+**D7. Relationship metadata had no explicit nullability contract
+(Workstream C).** Tracing every historical writer shows both columns are
+set from the same `Option<&RelationshipReport>`, so they are always a
+PAIR — (absent, absent) or (present, present). The two mixed combinations
+cannot be produced by any writer and were silently accepted, with a
+missing count implicitly treated as zero. Fix: the pair contract is
+enforced, and the mixed combinations are rejected as inconsistent
+metadata naming the offending column and run. Absence and a recorded
+zero-truncation report stay distinct.
+- `phase644_tests::metadata_status_absent_counter_absent_means_no_report`
+- `phase644_tests::metadata_status_present_counter_present_records_the_report`
+- `phase644_tests::metadata_status_present_counter_absent_is_rejected`
+- `phase644_tests::metadata_status_absent_counter_present_is_rejected`
+- `phase644_tests::a_legacy_negative_counter_still_round_trips`
+
+### Preserved guarantees (re-verified, not assumed)
+
+- Full-width object identity still round-trips `u64::MAX` on all three
+  components — `phase644_tests::full_width_identity_is_not_range_checked`.
+  The identity bit-pattern casts remain deliberately NOT range-checked.
+- Valid boundary values `0`, `i64::MAX`, and `None` round-trip —
+  `phase644_tests::valid_numeric_boundaries_round_trip`.
+- The 6.4.3 legacy negative-counter compatibility policy is unchanged —
+  `phase644_tests::a_legacy_negative_counter_still_round_trips`.
+
+### Local verification (all executed, results checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (0 warnings) |
+| `cargo test --workspace` | **879 passed, 0 failed** |
+| `git diff --check` | clean |
+
+Baseline was 866 tests, so this phase adds 13 (`phase644_tests.rs`, 12
+tests) and updates one existing test's name and assertions. The
+recoverable-byte case's assertion changed from "Corrupt with column
+recoverable" to "InvalidRunCount with table/column/value" — a
+strengthening, not a weakening, because it now also proves the
+caller-input-vs-corruption distinction.
+
+### Phase 6.4.4 limitations (honest)
+
+- Caller input above `i64::MAX` cannot be persisted. That is a deliberate
+  rejection, not a narrowing: the store refuses to silently reinterpret a
+  count it cannot represent.
+- Timestamps past ~2262 CE remain unrepresentable and are rejected.
+- Full-width object identity remains intentionally exempt from range
+  checks. Callers MUST NOT rely on the same policy for other fields.
+- All Phase 6.4/6.4.1/6.4.2/6.4.3 limitations remain in force.
 
 `PHASE 6.5 — NOT STARTED.`
 

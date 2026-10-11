@@ -289,23 +289,70 @@ The name is validated AFTER normalization, so a whitespace-only name
 (non-empty as a raw string, empty after trimming) is rejected rather than
 collapsing onto a shared empty-named identity.
 
-### Numeric persistence and TRUE preflight (Phase 6.4.2 + 6.4.3)
+### Numeric persistence and TRUE preflight (Phase 6.4.2 + 6.4.3 + 6.4.4)
 
-- `commit_run` performs a TRUE preflight (Phase 6.4.3, Workstream D):
-  every potentially failing conversion — the relationship truncation
-  counter, every `recoverable_bytes`, the `completed_at` timestamp, and
-  every observation's `modified` timestamp — is computed BEFORE the
-  transaction opens. A rejected input therefore never even begins
-  modifying existing state, rather than relying on transaction rollback.
-- Timestamps convert through `checked_run_timestamp`, which names the
-  ACTUAL field (`started_at`, `completed_at`, or `modified`) in the error
-  instead of always blaming one.
-- Truncation counters (including the older `scan_runs.rel_truncated`) and
-  `relationship_obs.recoverable` reject unrepresentable values; a `u64`
-  above `i64::MAX` fails loudly rather than wrapping negative.
+- `commit_run` and `begin_run` perform a TRUE preflight: every
+  caller-controlled conversion that can fail is computed BEFORE the
+  transaction opens. A rejected input never even begins modifying existing
+  state, rather than relying on transaction rollback.
+- The checked set covers **all nine `RunCounts` fields**
+  (`entries_examined`, `files`, `dirs`, `links`, `other_entries`, `bytes`,
+  `observation_errors`, `candidates_untracked`, `hash_failures`),
+  `ObservedEntry::size`, relationship `size` / `member_count` /
+  `recoverable_bytes`, the relationship truncation counter, and every
+  caller-supplied timestamp (`started_at`, `completed_at`, and each
+  observation's `modified`).
+- **Invalid CALLER input is a distinct typed error from persisted
+  corruption**: `StoreError::InvalidRunCount { table, column, value }`.
+  Mislabeling valid caller data as a corrupt store would send callers
+  looking for database damage that does not exist.
+- Every checked value is BOUND VERBATIM after the preflight succeeds, so
+  no second conversion can fail between the UPDATE and the INSERTs.
+- Timestamps convert through `checked_timestamp`, which names the ACTUAL
+  owning table and column:
+  - `scan_runs.started_at`
+  - `scan_runs.completed_at`
+  - `observations.modified`
 - Full-width `ObjectIdentity` components keep their intentional
   bit-pattern conversions, documented and tested separately — `u64::MAX`
-  identity components round-trip exactly.
+  identity components round-trip exactly and are deliberately NOT
+  range-checked.
+- `Duration::as_nanos()` is a `u128` wider than `i64`, so narrowing it
+  wraps any timestamp above ~2262 CE into a NEGATIVE number; the reader
+  clamps negatives to the epoch, so the original time would be silently
+  corrupted. Unrepresentable timestamps therefore fail loudly.
+
+### Relationship report metadata contract (Phase 6.4.4)
+
+`scan_runs` carries the relationship report as TWO columns written from the
+same `Option<&RelationshipReport>` — `rel_status` and nullable
+`rel_truncated` — so they are always a PAIR. The v4 migration added both as
+nullable columns with no default, so pre-v4 rows carry both as NULL.
+
+**The valid nullability contract:**
+
+| `rel_status` | `rel_truncated` | Meaning | Accepted |
+|---|---|---|---|
+| NULL | NULL | no report was recorded | **yes** — the absent case |
+| present | present | a report was recorded, with its count | **yes** |
+| present | NULL | no writer can produce this | **no** — inconsistent metadata |
+| NULL | present | no writer can produce this | **no** — inconsistent metadata |
+
+The two mixed combinations are rejected as inconsistent metadata
+(`StoreError::Corrupt`) naming the offending column and run. Rejecting
+them is safe: no writer version can produce them, so no legitimate
+historical state is refused.
+
+A *present* count is never inferred to be zero when absent, because a
+present status means a report existed — inventing zero would fabricate a
+completeness the run never recorded. What IS preserved is the distinction
+between "no report was recorded" (both NULL) and "a report was recorded
+with zero truncations" (status present, count `0`).
+
+**Legacy counters keep their faithful signed→unsigned reconstruction**, per
+the Phase 6.4.3 compatibility policy: a negative stored value round-trips
+exactly, and the store does not claim to distinguish a legacy-wrapped
+counter from tampering.
 
 ### Retention policy (Phase 6.4.3)
 

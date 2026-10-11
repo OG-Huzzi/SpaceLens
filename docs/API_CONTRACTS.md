@@ -243,6 +243,28 @@ Phase 6.4.3 additions:
 - **RetentionPolicy::keep_latest must be >= 1**, else
   `StoreError::InvalidRetentionPolicy` before any row is read or deleted.
 
+Phase 6.4.4 additions:
+
+- **Numeric preflight is complete.** Every caller-controlled unsigned value
+  reaching a signed SQLite INTEGER is checked BEFORE the transaction opens:
+  all nine RunCounts fields, ObservedEntry.size, relationship size /
+  member_count / recoverable_bytes, the relationship truncation counter,
+  and every caller timestamp. Invalid input is typed as
+  StoreError.InvalidRunCount { table, column, value } - deliberately
+  distinct from persisted corruption, so callers are not sent hunting for
+  database damage that does not exist. Valid boundaries (0, i64::MAX,
+  None) still round-trip, and full-width ObjectIdentity bit patterns remain
+  intentionally unchecked.
+- **Timestamp errors name the owning table.** scan_runs.started_at,
+  scan_runs.completed_at, and observations.modified each report their own
+  table and column; previously a modified error named scan_runs.
+- **Relationship report metadata has one nullability contract.**
+  rel_status and rel_truncated are written as a pair from the same report,
+  so (absent, absent) and (present, present) are valid and the two mixed
+  combinations are rejected as inconsistent metadata. A present status
+  never causes a missing count to be inferred as zero, so "no report
+  recorded" and "recorded with zero truncations" stay distinct.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

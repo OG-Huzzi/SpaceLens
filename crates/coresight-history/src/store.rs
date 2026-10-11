@@ -109,6 +109,20 @@ pub enum StoreError {
     /// newest committed run is the baseline for future comparisons and is
     /// never removed. Checked BEFORE any row is read or deleted.
     InvalidRetentionPolicy(String),
+    /// A caller-supplied value does not fit the store's signed 64-bit
+    /// `INTEGER` domain. This is CALLER INPUT, not persisted corruption —
+    /// the existing error contract distinguishes the two, and mislabeling
+    /// valid caller data as a corrupt store would send callers looking for
+    /// database damage that does not exist.
+    ///
+    /// Checked in the numeric PREFLIGHT (Phase 6.4.4, Workstream A), before
+    /// any transaction opens, so a rejected value cannot partially mutate
+    /// existing data.
+    InvalidRunCount {
+        table: &'static str,
+        column: &'static str,
+        value: u64,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -156,6 +170,15 @@ impl std::fmt::Display for StoreError {
             StoreError::InvalidRetentionPolicy(detail) => {
                 write!(f, "invalid retention policy: {detail}")
             }
+            StoreError::InvalidRunCount {
+                table,
+                column,
+                value,
+            } => write!(
+                f,
+                "{table}.{column}: caller value {value} exceeds the store's signed 64-bit \
+                 INTEGER domain; this is invalid input, not a corrupt store"
+            ),
         }
     }
 }
@@ -639,12 +662,12 @@ impl HistoryStore {
     /// Persist a run header as `RUNNING` (its own transaction — visible
     /// for crash recovery from this moment).
     pub fn begin_run(&mut self, record: &RunRecord) -> Result<(), StoreError> {
+        // Checked timestamp BEFORE the transaction opens (Phase 6.4.4,
+        // Workstream A): a caller-supplied time outside the representable
+        // domain rejects the run without even beginning an INSERT.
+        let started_at = checked_run_timestamp(record.started_at, "started_at")?;
         let conn = &mut self.conn;
         let tx = conn.transaction()?;
-        // Checked timestamp BEFORE the row exists (Phase 6.4.2, Workstream
-        // C): a caller-supplied time outside the representable domain
-        // rejects the run rather than being stored wrapped.
-        let started_at = time_nanos(record.started_at)?;
         tx.execute(
             "INSERT INTO scan_runs
              (run_id, started_at, completed_at, roots, platform, config, status,
@@ -679,46 +702,85 @@ impl HistoryStore {
         if snapshot.run_id != record.run_id {
             return Err(StoreError::UnknownRun(record.run_id.clone()));
         }
-        // ---- TRUE preflight (Phase 6.4.3, Workstream D) ----
-        // Every potentially failing conversion is computed BEFORE the
-        // transaction opens, so a rejected input cannot even BEGIN
-        // modifying existing state. Relying on transaction rollback would
-        // satisfy the "no partial commit" guarantee but not the "no
+        // ---- TRUE preflight (Phase 6.4.3 Workstream D; closed in 6.4.4) ----
+        // Every caller-controlled conversion that can fail is computed
+        // BEFORE the transaction opens, so a rejected input cannot even
+        // BEGIN modifying existing state. Relying on transaction rollback
+        // would satisfy the "no partial commit" guarantee but not the "no
         // mutation attempt" one, and it would make the failure order depend
-        // on SQLite's rather than on the caller's input.
+        // on SQLite's error reporting rather than the caller's input.
+        //
+        // Relationship truncation counter: an incompleteness signal, not a
+        // size — an unrepresentable value must fail loudly rather than wrap
+        // into a negative count.
         let rel_truncated = match relationships {
             Some(r) => Some(checked_relationship_counter(r.relationships_truncated)?),
             None => None,
         };
-        for r in relationships
-            .iter()
-            .flat_map(|rep| rep.relationships.iter())
-        {
-            let _ = checked_recoverable_bytes(r)?;
-        }
+        // Recoverable-byte upper bounds, and the relationship's own size and
+        // member count (both unsigned, both previously unchecked).
+        let relationship_rows: Vec<(i64, i64, Option<i64>)> = relationships
+            .map(|rep| {
+                rep.relationships
+                    .iter()
+                    .map(|r| {
+                        let size = checked_u64_counter(r.size, "relationship_obs", "size")?;
+                        let member_count = checked_u64_counter(
+                            r.member_count,
+                            "relationship_obs",
+                            "member_count",
+                        )?;
+                        let recoverable = checked_recoverable_bytes(r)?;
+                        Ok((size, member_count, recoverable))
+                    })
+                    .collect::<Result<Vec<_>, StoreError>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        // Terminal timestamp.
         let completed_at = checked_run_timestamp(
             record.completed_at.unwrap_or(record.started_at),
             "completed_at",
         )?;
-        // Every observation's modification time is part of the same
-        // contract: one unrepresentable entry rejects the whole commit.
+        // Every observation's modification time (owned by `observations`).
         let entry_timestamps: Vec<Option<i64>> = snapshot
             .entries
             .iter()
             .map(|e| match e.modified {
-                Some(t) => checked_run_timestamp(t, "modified").map(Some),
+                Some(t) => checked_observation_timestamp(t).map(Some),
                 None => Ok(None),
             })
             .collect::<Result<_, _>>()?;
-        let relationship_rows: Vec<Option<i64>> = relationships
-            .map(|rep| {
-                rep.relationships
-                    .iter()
-                    .map(checked_recoverable_bytes)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+        // Every observation's size.
+        let entry_sizes: Vec<Option<i64>> = snapshot
+            .entries
+            .iter()
+            .map(|e| checked_optional_size(e.size, "observations", "size"))
+            .collect::<Result<_, _>>()?;
+        // Every per-run counter: all nine `RunCounts` fields.
+        let count_entries = checked_u64_counter(
+            record.counts.entries_examined,
+            "scan_runs",
+            "entries_examined",
+        )?;
+        let count_files = checked_u64_counter(record.counts.files, "scan_runs", "files")?;
+        let count_dirs = checked_u64_counter(record.counts.dirs, "scan_runs", "dirs")?;
+        let count_links = checked_u64_counter(record.counts.links, "scan_runs", "links")?;
+        let count_other =
+            checked_u64_counter(record.counts.other_entries, "scan_runs", "other_entries")?;
+        let count_bytes = checked_u64_counter(record.counts.bytes, "scan_runs", "bytes")?;
+        let count_errors = checked_u64_counter(
+            record.counts.observation_errors,
+            "scan_runs",
+            "observation_errors",
+        )?;
+        let count_untracked = checked_u64_counter(
+            record.counts.candidates_untracked,
+            "scan_runs",
+            "candidates_untracked",
+        )?;
+        let count_hash_failures =
+            checked_u64_counter(record.counts.hash_failures, "scan_runs", "hash_failures")?;
 
         // Preflight passed: only now open the transaction.
         let conn = &mut self.conn;
@@ -734,15 +796,15 @@ impl HistoryStore {
                 record.run_id.0,
                 completed_at,
                 serde_status(record.status),
-                record.counts.entries_examined,
-                record.counts.files,
-                record.counts.dirs,
-                record.counts.links,
-                record.counts.other_entries,
-                record.counts.bytes,
-                record.counts.observation_errors,
-                record.counts.candidates_untracked,
-                record.counts.hash_failures,
+                count_entries,
+                count_files,
+                count_dirs,
+                count_links,
+                count_other,
+                count_bytes,
+                count_errors,
+                count_untracked,
+                count_hash_failures,
                 relationships.map(|r| serde_duplicate_status(r.status)),
                 rel_truncated,
             ],
@@ -756,15 +818,20 @@ impl HistoryStore {
               subcategory, content_sha256, obs_error)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
-        for (entry, modified) in snapshot.entries.iter().zip(entry_timestamps.iter()) {
-            // The modification time was already checked in the preflight;
-            // it is bound here verbatim so no conversion can fail between
-            // the UPDATE above and this INSERT.
+        for ((entry, modified), size) in snapshot
+            .entries
+            .iter()
+            .zip(entry_timestamps.iter())
+            .zip(entry_sizes.iter())
+        {
+            // The modification time and size were already checked in the
+            // preflight; they are bound here verbatim so no conversion can
+            // fail between the UPDATE above and this INSERT.
             obs.execute(params![
                 record.run_id.0,
                 crate::path_encoding::encode(&entry.path),
                 serde_kind(entry.kind),
-                entry.size,
+                size,
                 entry.object.map(|o| o.device as i64),
                 entry.object.map(|o| o.inode as i64),
                 entry.object.and_then(|o| o.file_id_hi.map(|hi| hi as i64)),
@@ -789,16 +856,18 @@ impl HistoryStore {
                 "INSERT INTO relationship_members (run_id, rel_id, path, device, inode, file_id_hi)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
-            for (r, recoverable) in rel.relationships.iter().zip(relationship_rows.iter()) {
-                // Recoverable bytes were checked in the preflight and bound
-                // here verbatim, so no conversion can fail after the run
-                // row has already been updated.
+            for (r, (size, member_count, recoverable)) in
+                rel.relationships.iter().zip(relationship_rows.iter())
+            {
+                // Size, member count, and recoverable bytes were all checked
+                // in the preflight and are bound here verbatim, so no
+                // conversion can fail after the run row has been updated.
                 ro.execute(params![
                     record.run_id.0,
                     r.id,
                     serde_relationship_kind(r.kind),
-                    r.size,
-                    r.member_count,
+                    size,
+                    member_count,
                     recoverable,
                     serde_accounting(r.accounting),
                 ])?;
@@ -999,6 +1068,35 @@ impl HistoryStore {
     /// The persisted relationship-report status/truncation for a run
     /// (v4 columns). `None` status = no report was recorded; an
     /// unrecognized persisted status is a typed corruption error.
+    ///
+    /// ## The nullability contract (Phase 6.4.4, Workstream C)
+    ///
+    /// Every historical writer sets BOTH columns from the same
+    /// `Option<&RelationshipReport>`:
+    /// `rel_status = relationships.map(|r| r.status)` and
+    /// `rel_truncated = relationships.map(|r| r.relationships_truncated)`.
+    /// They are therefore written as a PAIR — both present or both absent —
+    /// and the v4 migration added both as nullable columns with no default,
+    /// so pre-v4 rows carry both as NULL.
+    ///
+    /// | `rel_status` | `rel_truncated` | Meaning | Accepted |
+    /// |---|---|---|---|
+    /// | NULL | NULL | no report was recorded | **yes** — the absent case |
+    /// | present | present | a report was recorded, with its count | **yes** |
+    /// | present | NULL | no writer can produce this | **no** — inconsistent metadata |
+    /// | NULL | present | no writer can produce this | **no** — inconsistent metadata |
+    ///
+    /// The two mixed combinations cannot arise from any writer version, so
+    /// they are rejected as inconsistent metadata with the offending column
+    /// and run named. Rejecting them is safe: it cannot reject a legitimate
+    /// historical state.
+    ///
+    /// A *present* count is NOT inferred to be zero when absent, because a
+    /// present status tells us a report existed — inventing a zero would
+    /// fabricate a completeness the run never recorded. What is preserved is
+    /// the distinction between "no report was recorded" and "a report was
+    /// recorded with zero truncations", which the pair of NULLs vs a present
+    /// `0` encodes exactly.
     fn rel_status_for_run(&self, run_id: &RunId) -> Result<RelStatusRow, StoreError> {
         let row = self
             .conn
@@ -1027,6 +1125,30 @@ impl HistoryStore {
             }
             None => None,
         };
+        // Enforce the pair contract above.
+        match (&status, &truncated) {
+            (Some(_), None) => {
+                return Err(StoreError::Corrupt {
+                    table: "scan_runs",
+                    column: "rel_truncated",
+                    run_id: Some(run_id.0.clone()),
+                    detail: "relationship report status is recorded but the truncation \
+                             count is missing; no writer produces this combination"
+                        .to_string(),
+                });
+            }
+            (None, Some(_)) => {
+                return Err(StoreError::Corrupt {
+                    table: "scan_runs",
+                    column: "rel_status",
+                    run_id: Some(run_id.0.clone()),
+                    detail: "relationship truncation count is recorded but the report \
+                             status is missing; no writer produces this combination"
+                        .to_string(),
+                });
+            }
+            (None, None) | (Some(_), Some(_)) => {}
+        }
         Ok(RelStatusRow { status, truncated })
     }
 
@@ -2078,29 +2200,44 @@ fn serde_accounting(a: StorageAccounting) -> &'static str {
 
 use coresight_identity::StorageAccounting;
 
-/// Convert a caller-supplied run timestamp to the store's signed
-/// nanosecond domain, naming the ACTUAL field so the error says what was
-/// wrong instead of always blaming `started_at`.
+/// Convert a caller-supplied timestamp to the store's signed nanosecond
+/// domain, naming the ACTUAL table and column so the error identifies the
+/// field's owner rather than always blaming `scan_runs`.
 ///
 /// `Duration::as_nanos()` returns a `u128` wider than `i64`, so an
 /// unchecked cast wraps any timestamp past ~2262 CE into a NEGATIVE
 /// number. The reader (`time_from_nanos`) clamps negatives to the epoch,
 /// so the original time would be silently corrupted rather than
 /// rejected — hence the checked conversion.
-fn checked_run_timestamp(t: SystemTime, field: &'static str) -> Result<i64, StoreError> {
-    // A time BEFORE the epoch is stored as 0 rather than a negative, which
-    // the reader clamps to the epoch anyway. That is a documented,
-    // lossless-enough convention for pre-epoch clocks.
+///
+/// A time BEFORE the epoch is stored as 0 rather than a negative, which
+/// the reader clamps to the epoch anyway. That is a documented,
+/// lossless-enough convention for pre-epoch clocks.
+fn checked_timestamp(
+    t: SystemTime,
+    table: &'static str,
+    column: &'static str,
+) -> Result<i64, StoreError> {
     let duration = t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
     i64::try_from(duration.as_nanos()).map_err(|_| StoreError::Corrupt {
-        table: "scan_runs",
-        column: field,
+        table,
+        column,
         run_id: None,
         detail: format!(
-            "{field} timestamp {t:?} lies outside the store's signed 64-bit \
+            "{column} timestamp {t:?} lies outside the store's signed 64-bit \
              nanosecond domain (year ~2262 and later are unrepresentable)"
         ),
     })
+}
+
+/// The run-level timestamps (`scan_runs`).
+fn checked_run_timestamp(t: SystemTime, column: &'static str) -> Result<i64, StoreError> {
+    checked_timestamp(t, "scan_runs", column)
+}
+
+/// An observation's modification timestamp (`observations.modified`).
+fn checked_observation_timestamp(t: SystemTime) -> Result<i64, StoreError> {
+    checked_timestamp(t, "observations", "modified")
 }
 
 /// Convert a public `SystemTime` to the store's signed nanosecond domain.
@@ -2175,35 +2312,58 @@ fn legacy_counter_from_stored(stored: Option<i64>) -> u64 {
 /// signal, not a size — an unrepresentable value must fail loudly rather
 /// than wrap into a negative count.
 fn checked_relationship_counter(value: u64) -> Result<i64, StoreError> {
-    i64::try_from(value).map_err(|_| StoreError::Corrupt {
-        table: "scan_runs",
-        column: "rel_truncated",
-        run_id: None,
-        detail: format!(
-            "relationship truncation counter {value} exceeds the signed 64-bit \
-             INTEGER store domain"
-        ),
+    checked_u64_counter(value, "scan_runs", "rel_truncated")
+}
+
+/// Checked conversion of any caller-supplied run counter (Phase 6.4.4,
+/// Workstream A). Every `RunCounts` field is a `u64` whose value comes
+/// from the caller's reports, so it must be checked before the write
+/// transaction rather than left to SQLite's "number too large" error
+/// after mutation has begun.
+fn checked_u64_counter(
+    value: u64,
+    table: &'static str,
+    column: &'static str,
+) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::InvalidRunCount {
+        table,
+        column,
+        value,
     })
 }
 
+/// Checked conversion of an optional size (`ObservedEntry::size`,
+/// recoverable-byte upper bounds). `None` is a legitimate absent value
+/// and passes through unchanged.
+fn checked_optional_size(
+    value: Option<u64>,
+    table: &'static str,
+    column: &'static str,
+) -> Result<Option<i64>, StoreError> {
+    match value {
+        None => Ok(None),
+        Some(v) => i64::try_from(v)
+            .map(Some)
+            .map_err(|_| StoreError::InvalidRunCount {
+                table,
+                column,
+                value: v,
+            }),
+    }
+}
+
 /// Checked conversion of a relationship's recoverable-byte upper bound
-/// (Phase 6.4.2, Workstream C).
+/// (Phase 6.4.2, Workstream C). A separate name keeps the call sites
+/// readable and gives the column a relationship-specific home; the check
+/// itself is the shared optional-size helper.
 fn checked_recoverable_bytes(
     relationship: &coresight_identity::Relationship,
 ) -> Result<Option<i64>, StoreError> {
-    match relationship.recoverable_bytes {
-        None => Ok(None),
-        Some(v) => i64::try_from(v).map(Some).map_err(|_| StoreError::Corrupt {
-            table: "relationship_obs",
-            column: "recoverable",
-            run_id: None,
-            detail: format!(
-                "recoverable_bytes {v} exceeds the signed 64-bit INTEGER \
-                 store domain for relationship {}",
-                relationship.id
-            ),
-        }),
-    }
+    checked_optional_size(
+        relationship.recoverable_bytes,
+        "relationship_obs",
+        "recoverable",
+    )
 }
 
 /// True when the run is older than the retention age, WITHOUT narrowing
