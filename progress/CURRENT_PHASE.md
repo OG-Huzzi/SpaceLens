@@ -903,7 +903,8 @@ Baseline: `b35cdb45c14dfb652a87c4e80818f068bd4f1bf5` (the Phase 6.4.5
 verification-record commit). **Schema version stays 6** — no migration was
 added, and no migration v2–v6 SQL was edited.
 
-**Status: PENDING (committed below; exact-SHA CI recorded after the run)**
+**Status: VERIFIED** (documentation, tests, clean Git state, and
+exact-SHA CI all agree)
 
 ### The defect
 
@@ -1032,6 +1033,27 @@ are indistinguishable, and this phase does not pretend otherwise.
   builds, not in release.
 - All Phase 6.4 / 6.4.1 / 6.4.2 / 6.4.3 / 6.4.4 / 6.4.5 limitations
   remain in force.
+
+### CI verification (exact SHA)
+
+The Phase 6.4.6 implementation commit was verified on its OWN SHA, not
+on the branch:
+
+| Commit | Meaning | CI run | Result |
+|---|---|---|---|
+| `495e11ca9849e3ae816d2740e97fb9fe456054c4` | Phase 6.4.6 implementation | [38269912280](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38269912280) | all 4 jobs success |
+
+Queried through the GitHub Actions API: `head_sha` =
+`495e11ca9849e3ae816d2740e97fb9fe456054c4` (matches the commit),
+`event` = `push`, `run_attempt` = 1, `status` = `completed`,
+`conclusion` = `success`, with `frontend`, `rust (ubuntu-latest)`,
+`rust (windows-latest)` and `rust (macos-latest)` each `completed` /
+`success`. No runner-infrastructure failure occurred, so no retry was
+needed and no source change was made to work around a failure.
+
+Per the delivery instruction, the verification-record commit's OWN CI is
+reported in the terminal result rather than generating further commits
+solely to record the preceding record commit's run.
 
 `PHASE 6.5 — NOT STARTED.`
 
