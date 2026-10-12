@@ -665,7 +665,26 @@ Baseline: `408298d85583d7a1ad7d91d4bd5019c7606f9ca0` (the Phase 6.4.4
 verification-record commit). **Schema v6 remains unchanged** — no
 migration was added, and no migration v2–v6 SQL was edited.
 
-**Status: VERIFIED** (exact-SHA record below)
+**Status: VERIFIED**
+
+- **Implementation commit:** `359949e7e0b079e9e5796f03af4bf398597a6e0b`
+  ("feat: phase 6.4.5 timestamp error semantics and legacy history
+  compatibility"), pushed to `main`. Exact-SHA CI run
+  [38248576606](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38248576606),
+  event `push`, attempt 1, `head_sha` confirmed equal to the commit SHA,
+  conclusion **success**:
+
+  ```text
+  frontend               success
+  rust (ubuntu-latest)   success
+  rust (windows-latest)  success
+  rust (macos-latest)    success
+  ```
+
+  This run executed the full gate on all three platforms, including the
+  persistence performance suite (`cargo test -p coresight-history --
+  --ignored`). The verification-record commit is verified on its own
+  exact SHA below.
 
 ### Confirmed defects, fixes, and regression tests
 
@@ -760,8 +779,11 @@ existed. No schema change was needed and none was made.
 | `cargo fmt --all --check` | clean |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (0 warnings) |
 | `cargo test --workspace` | **889 passed, 0 failed** |
-| `cargo test --workspace --all-features` | 0 failed |
-| `cargo test --workspace -- --ignored` | 0 failed (all established performance suites, including the Phase 6.4 persistence suite) |
+| `cargo test --workspace --all-features` | 889 passed, 0 failed |
+| `cargo test --workspace -- --ignored` | 11 passed, 0 failed (all established performance suites, including the Phase 6.4 persistence suite) |
+| `npm ci` | ok (0 vulnerabilities) |
+| `npm audit --audit-level=high` | 0 vulnerabilities |
+| `npm run build` | ok |
 | `git diff --check` | clean |
 
 Baseline was 879 tests, so this phase adds 10 (`phase645_tests.rs`) and
