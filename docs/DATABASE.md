@@ -191,6 +191,45 @@ narrowed, saturated, or deferred until reload. Object identity is
 deliberately exempt: those columns are intentional bit-pattern storage, so
 `u64::MAX` identity components round-trip exactly.
 
+### Snapshot numeric rejections are caller-input errors (Phase 6.4.6)
+
+When one of those helpers rejects a value, the result is
+`StoreError::InvalidSnapshotInput { table, column, run_id, value }` —
+NOT `StoreError::Corrupt`. The rejected value is caller input (an
+`Inventory`/`FootprintReport` counter, an artifact `size`, an application
+`estimated_size_bytes`), so it is never evidence of database damage:
+reporting it as corruption would send an operator hunting for damage that
+does not exist. `value` is a `u128`, wide enough to report a `u64` domain
+value or a `usize` ordinal without narrowing, so `u64::MAX` is reported
+exactly rather than truncated.
+
+`Corrupt` remains reserved for genuinely malformed or impossible
+PERSISTED data: strict unsigned decode (`u64_nonneg`), identity decode
+(`snap_identity`), unknown-enum rejection, parallel-vector mismatch,
+footprint/app-attribution mismatch, inventory-vs-facts set mismatch,
+footprint-report mismatch, and `integrity_check`. The legacy run API keeps
+its own typed `InvalidRunCount` and `InvalidTimestamp` for the same
+caller-input reason; the families agree in policy and stay distinct types
+per API.
+
+### The snapshot preflight (Phase 6.4.6)
+
+`commit_system_snapshot` performs a true preflight. Every fallible numeric
+conversion — artifact sizes, estimated sizes, and every ordinal domain
+including nested collections (provenance, views, install roots, ownership
+evidence, footprint candidates and evidence, coverage, relationships and
+members, historical context) — is computed BEFORE the write transaction
+opens and before any `DELETE FROM app_snapshot_*` statement runs. A
+rejected replacement therefore never deletes or partially replaces a
+previously valid snapshot; it does not rely on rollback to preserve it.
+
+Ordinals are `0..len` of a caller-sized collection, so the preflight
+checks each collection's BOUND (`len - 1` fits, or `0` when empty), which
+covers every position the write loop can bind. The transaction then binds
+those pre-checked values verbatim: no checked value is converted a second
+time after mutation begins. Object identity (device / inode / high-bit
+columns) is deliberately not converted, preserving full-width round-trip.
+
 ### Footprint policy (Phase 6.4.1)
 
 Footprint candidates are keyed by `(path bytes, application, kind)` — one

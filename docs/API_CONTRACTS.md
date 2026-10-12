@@ -306,6 +306,40 @@ Phase 6.4.5 additions:
   rows ever existed. Schema v6 remains unchanged; no migration was
   added.
 
+Phase 6.4.6 additions:
+
+- **Caller numerics are invalid INPUT, not corruption.** An
+  unrepresentable caller-supplied application-snapshot value — an artifact
+  `size`, an application `estimated_size_bytes`, an `Inventory`
+  `records_truncated`/`records_rejected` counter, or a
+  `FootprintReport` counter — is rejected with
+
+  ```text
+  StoreError.InvalidSnapshotInput { table, column, run_id, value }
+  ```
+
+  and NEVER with `StoreError.Corrupt`. The value came from the caller, so
+  it is not evidence of database damage; reporting it as corruption would
+  point an operator at damage that does not exist. `value` is a `u128`,
+  wide enough to carry both a `u64` domain value and a `usize` ordinal
+  without narrowing, so a rejected `u64::MAX` is reported exactly.
+  `StoreError.Corrupt` is unchanged for genuinely malformed or impossible
+  PERSISTED data (strict unsigned decode, identity decode, unknown enums,
+  parallel-vector mismatch, footprint/app-attribution mismatch,
+  inventory-vs-facts mismatch, footprint-report mismatch, integrity check).
+- **The rejection is a PREFLIGHT, before the transaction opens.** Every
+  fallible conversion — sizes and every ordinal domain, including nested
+  collections (provenance, views, install roots, ownership evidence,
+  footprint candidates and evidence, coverage, relationships and members,
+  historical context) — is computed before the write transaction opens
+  and before any `DELETE FROM app_snapshot_*` runs. A rejected replacement
+  therefore cannot delete or partially replace a previously valid
+  snapshot; preservation does not depend on rollback. The transaction
+  binds the pre-checked values verbatim, so no value is converted twice
+  after mutation begins, and writes stay atomic for constraint or I/O
+  failures. The legacy run API keeps its own `InvalidRunCount` /
+  `InvalidTimestamp` for the same caller-input reason.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

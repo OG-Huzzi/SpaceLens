@@ -1746,7 +1746,7 @@ fn an_unrepresentable_size_is_rejected_at_commit_not_at_reload() {
             &snap.footprint,
         )
         .expect_err("an unrepresentable size must be rejected at commit");
-    assert_corrupt(&err, "app_snapshot_artifacts", "size");
+    assert_invalid_snapshot_input(&err, "app_snapshot_artifacts", "size", u64::MAX as u128);
     // Nothing was written: a rejected first commit creates no snapshot.
     assert!(!store.has_system_snapshot(&record.run_id).unwrap());
 }
@@ -1792,7 +1792,12 @@ fn an_unrepresentable_estimated_size_is_rejected_before_write() {
             &snap.footprint,
         )
         .expect_err("an unrepresentable estimated size must be rejected");
-    assert_corrupt(&err, "app_snapshot_apps", "estimated_size");
+    assert_invalid_snapshot_input(
+        &err,
+        "app_snapshot_apps",
+        "estimated_size",
+        u64::MAX as u128,
+    );
     assert!(!store.has_system_snapshot(&run.run_id).unwrap());
 }
 
@@ -1828,7 +1833,7 @@ fn a_rejected_replacement_preserves_the_previous_snapshot() {
             &bad.footprint,
         )
         .expect_err("an unrepresentable size must be rejected");
-    assert_corrupt(&err, "app_snapshot_artifacts", "size");
+    assert_invalid_snapshot_input(&err, "app_snapshot_artifacts", "size", u64::MAX as u128);
 
     // The previous snapshot is untouched: same model, same facts.
     let after = store
@@ -3907,6 +3912,32 @@ fn assert_corrupt(err: &StoreError, table: &str, column: &str) {
             assert_eq!(*c, column, "corruption must name the column (got {err})");
         }
         other => panic!("expected a typed corruption error, got {other:?}"),
+    }
+}
+
+fn assert_invalid_snapshot_input(err: &StoreError, table: &str, column: &str, value: u128) {
+    match err {
+        StoreError::InvalidSnapshotInput {
+            table: t,
+            column: c,
+            value: v,
+            ..
+        } => {
+            assert_eq!(*t, table, "rejection must name the table (got {err})");
+            assert_eq!(*c, column, "rejection must name the column (got {err})");
+            assert_eq!(
+                *v, value,
+                "rejection must report the rejected value exactly (got {err})"
+            );
+        }
+        // A caller value is never persisted corruption: reporting it as
+        // `Corrupt` would send callers hunting for database damage that
+        // does not exist. That misclassification is the defect this
+        // assertion guards.
+        StoreError::Corrupt { .. } => {
+            panic!("caller input must not be reported as corruption, got {err}")
+        }
+        other => panic!("expected a typed invalid-snapshot-input error, got {other:?}"),
     }
 }
 

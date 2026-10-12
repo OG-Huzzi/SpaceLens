@@ -148,6 +148,34 @@ pub enum StoreError {
         run_id: Option<String>,
         nanos: u128,
     },
+    /// A caller-supplied application-snapshot value does not fit the
+    /// store's signed 64-bit `INTEGER` domain. This is CALLER INPUT, not
+    /// persisted corruption — the same caller-input-vs-corruption
+    /// distinction [`StoreError::InvalidRunCount`] and
+    /// [`StoreError::InvalidTimestamp`] draw for the legacy run API: a
+    /// value the caller handed us is never evidence of database damage,
+    /// and mislabeling it as a corrupt store would send callers hunting
+    /// for damage that does not exist.
+    ///
+    /// `value` is a `u128`, wide enough to report both `u64` domain
+    /// values and `usize` ordinals on every supported platform without
+    /// narrowing or losing diagnostic information. (On supported
+    /// platforms `usize` fits in `u64` today, but recording the value in
+    /// the wider domain keeps the error honest if a future platform ever
+    /// widens it.) `run_id` names the run the value belonged to where one
+    /// is known.
+    ///
+    /// Checked in the snapshot PREFLIGHT (Phase 6.4.6), before the write
+    /// transaction opens or any destructive statement runs: a rejected
+    /// replacement cannot delete or partially replace a previously valid
+    /// snapshot. [`StoreError::Corrupt`] remains reserved for genuinely
+    /// malformed or impossible PERSISTED data.
+    InvalidSnapshotInput {
+        table: &'static str,
+        column: &'static str,
+        run_id: Option<String>,
+        value: u128,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -222,6 +250,25 @@ impl std::fmt::Display for StoreError {
                      store's signed 64-bit nanosecond domain (~year 2262 and later are \
                      unrepresentable); this is an unrepresentable value, not a corrupt store — \
                      refused rather than wrapped or clamped"
+                ),
+            },
+            StoreError::InvalidSnapshotInput {
+                table,
+                column,
+                run_id,
+                value,
+            } => match run_id {
+                Some(id) => write!(
+                    f,
+                    "{table}.{column} (run {id}): caller value {value} exceeds the store's \
+                     signed 64-bit INTEGER domain; this is invalid snapshot input, not a \
+                     corrupt store"
+                ),
+                None => write!(
+                    f,
+                    "{table}.{column}: value {value} exceeds the store's signed 64-bit \
+                     INTEGER domain — an unrepresentable input, refused rather than wrapped \
+                     or clamped"
                 ),
             },
         }

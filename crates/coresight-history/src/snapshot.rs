@@ -334,31 +334,34 @@ impl HistoryStore {
             &run_tag,
         )?;
 
-        // Per-row numeric pre-pass: every artifact size and every
-        // estimated size is checked BEFORE the transaction opens, so an
-        // unrepresentable value rejects the commit without deleting the
-        // previous snapshot's rows at all.
-        {
-            let mut artifacts = input.artifacts.clone();
-            artifacts.sort_by(|a, b| {
-                path_bytes(&a.path)
-                    .cmp(path_bytes(&b.path))
-                    .then(a.kind.cmp(&b.kind))
-                    .then(a.size.cmp(&b.size))
-                    .then(identity_key(&a.identity).cmp(&identity_key(&b.identity)))
-            });
-            for a in &artifacts {
-                checked_u64_i64(a.size, "app_snapshot_artifacts", "size", &run_tag)?;
-            }
-            for f in app_facts {
-                checked_u64_i64(
-                    f.record.estimated_size_bytes,
-                    "app_snapshot_apps",
-                    "estimated_size",
-                    &run_tag,
-                )?;
-            }
-        }
+        // ---- TRUE preflight (Phase 6.4.6, Workstream B). ----
+        //
+        // The write path below converts artifact sizes inline and computes
+        // every ordinal (artifact, fact, provenance, view, root, evidence,
+        // footprint, footprint-evidence, coverage, relationship, member,
+        // history) inside the loops that INSERT — AFTER the run's prior
+        // snapshot rows have been DELETEd. A conversion that can fail
+        // therefore used to be discovered only after destructive statements
+        // had already run, relying on transaction rollback rather than
+        // never touching existing data. The preflight below precomputes
+        // EVERY conversion that the write path will need BEFORE the
+        // transaction opens, into one frozen persistence plan. The write
+        // path then binds these values verbatim: no conversion can fail
+        // after the first mutation, because every conversion already ran.
+        //
+        // The plan is independent of the destructive statements and of
+        // SQLite: it is built from the SAME canonically-sorted,
+        // normalized collections the write path persists (frozen here so
+        // the write loop cannot diverge from the preflight), and every
+        // checked value is asserted against the plan at bind time — a
+        // `debug_assert_eq!` that dies loudly in debug builds if the two
+        // ever disagree, so the "verbatim" invariant cannot silently rot.
+        //
+        // Object identity is deliberately NOT converted: the device /
+        // inode / high-bit columns are intentional bit-pattern storage
+        // (`u64::MAX` round-trips exactly, by tested contract), so there is
+        // no fallible conversion to preflight.
+        let plan = preflight_snapshot_plan(input, app_facts, &run_tag)?;
 
         let conn = &mut self.conn;
         let tx = conn.transaction()?;
@@ -412,14 +415,21 @@ impl HistoryStore {
         )?;
 
         // ---- Artifacts (canonical path-byte order → ordinals). ----
+        //
+        // The collection is re-sorted with the SHARED sorter so the write
+        // order is definitionally the preflight order; the frozen sizes
+        // and the checked ordinal cursor are then bound verbatim.
         let mut artifacts = input.artifacts.clone();
-        artifacts.sort_by(|a, b| {
-            path_bytes(&a.path)
-                .cmp(path_bytes(&b.path))
-                .then(a.kind.cmp(&b.kind))
-                .then(a.size.cmp(&b.size))
-                .then(identity_key(&a.identity).cmp(&identity_key(&b.identity)))
-        });
+        sort_artifacts(&mut artifacts);
+        debug_assert_eq!(
+            artifacts.len(),
+            plan.artifact_len,
+            "preflight/write artifact length diverged"
+        );
+        let artifact_ords = CheckedOrdinals {
+            column: "artifact_ord",
+            len: plan.artifact_len,
+        };
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO app_snapshot_artifacts
@@ -428,9 +438,10 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for (ord, a) in artifacts.iter().enumerate() {
-                let artifact_ord =
-                    checked_ord_i64(ord, "app_snapshot_artifacts", "artifact_ord", &run_tag)?;
-                let size = checked_u64_i64(a.size, "app_snapshot_artifacts", "size", &run_tag)?;
+                let artifact_ord = artifact_ords.at(ord);
+                // Preflighted verbatim: the size was already checked for
+                // this exact position, so no conversion can fail here.
+                let size = plan.artifact_sizes[ord];
                 stmt.execute(params![
                     run_id.0,
                     artifact_ord,
@@ -458,18 +469,21 @@ impl HistoryStore {
         }
 
         // ---- Applications + per-app children (canonical id order). ----
-        let mut app_order: Vec<usize> = (0..app_facts.len()).collect();
-        app_order.sort_by(|&i, &j| {
-            app_facts[i]
-                .record
-                .id
-                .0
-                .cmp(&app_facts[j].record.id.0)
-                .then(
-                    canonical_record_key(&app_facts[i].record)
-                        .cmp(&canonical_record_key(&app_facts[j].record)),
-                )
-        });
+        //
+        // The order comes from the SHARED sorter (definitionally the
+        // preflight order); every ordinal below is bound through a checked
+        // cursor whose range the preflight froze — verbatim, never
+        // re-derived.
+        let app_order = canonical_app_order(app_facts);
+        debug_assert_eq!(
+            app_order.len(),
+            plan.app_len,
+            "preflight/write app-fact length diverged"
+        );
+        let fact_ords = CheckedOrdinals {
+            column: "fact_ord",
+            len: plan.app_len,
+        };
         // For each committed APPLICATION FACT (not per id): input
         // duplicates under one id are distinct facts (conflict
         // preservation — the builder merges commutatively, never by
@@ -513,10 +527,50 @@ impl HistoryStore {
               source, scope, why)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
-        for (fact_ord, &fi) in app_order.iter().enumerate() {
+        for (fact_pos, &fi) in app_order.iter().enumerate() {
             let fact = &app_facts[fi];
             let r = &fact.record;
-            let fact_ord = checked_ord_i64(fact_ord, "app_snapshot_apps", "fact_ord", &run_tag)?;
+            let fact_ord = fact_ords.at(fact_pos);
+            // Preflighted verbatim: the estimated size for this canonical
+            // position was already checked, so this bind cannot fail —
+            // there is no second conversion after mutation begins.
+            let estimated_size = plan.estimated_sizes[fact_pos];
+            debug_assert!(
+                plan.per_app.len() == plan.app_len,
+                "preflight per-app plan diverged"
+            );
+            let per_app = &plan.per_app[fact_pos];
+            let prov_ords = CheckedOrdinals {
+                column: "prov_ord",
+                len: per_app.prov_len,
+            };
+            let view_ords = CheckedOrdinals {
+                column: "view_ord",
+                len: per_app.view_len,
+            };
+            let root_ords = CheckedOrdinals {
+                column: "root_ord",
+                len: per_app.root_len,
+            };
+            let evidence_ords = CheckedOrdinals {
+                column: "evidence_ord",
+                // Every per-artifact group restarts at 0, so the longest
+                // group bounds every ordinal this cursor will bind. The
+                // group-membership assertion below pins the grouping
+                // itself to the preflight.
+                len: per_app
+                    .evidence_groups
+                    .iter()
+                    .map(|g| {
+                        fact.associations
+                            .iter()
+                            .filter(|(p, _)| path_bytes(p) == g.as_slice())
+                            .count()
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .max(1),
+            };
             app_stmt.execute(params![
                 run_id.0,
                 r.id.0,
@@ -532,15 +586,9 @@ impl HistoryStore {
                     .as_ref()
                     .map(|p| crate::path_encoding::encode(p)),
                 r.install_date,
-                // Checked, not wrapped: a size the store cannot represent
-                // is rejected BEFORE the transaction mutates the previous
-                // snapshot (Workstream C), never narrowed silently.
-                checked_u64_i64(
-                    r.estimated_size_bytes,
-                    "app_snapshot_apps",
-                    "estimated_size",
-                    &Some(run_id.0.clone()),
-                )?,
+                // Preflighted verbatim (see above): no conversion can fail
+                // here, after the prior snapshot rows were deleted.
+                estimated_size,
                 r.uninstall_string,
                 r.quiet_uninstall_string,
                 r.modify_path,
@@ -559,9 +607,13 @@ impl HistoryStore {
             let mut prov = r.provenance.clone();
             prov.sort();
             prov.dedup();
+            debug_assert_eq!(
+                prov.len(),
+                per_app.prov_len,
+                "preflight/write provenance length diverged"
+            );
             for (prov_ord, source) in prov.iter().enumerate() {
-                let prov_ord =
-                    checked_ord_i64(prov_ord, "app_snapshot_provenance", "prov_ord", &run_tag)?;
+                let prov_ord = prov_ords.at(prov_ord);
                 prov_stmt.execute(params![
                     run_id.0,
                     r.id.0,
@@ -573,17 +625,25 @@ impl HistoryStore {
             let mut views = r.observed_in_views.clone();
             views.sort();
             views.dedup();
+            debug_assert_eq!(
+                views.len(),
+                per_app.view_len,
+                "preflight/write views length diverged"
+            );
             for (view_ord, view) in views.iter().enumerate() {
-                let view_ord =
-                    checked_ord_i64(view_ord, "app_snapshot_views", "view_ord", &run_tag)?;
+                let view_ord = view_ords.at(view_ord);
                 view_stmt.execute(params![run_id.0, r.id.0, fact_ord, view_ord, view,])?;
             }
             let mut roots = fact.install_roots.clone();
             roots.sort_by(|a, b| path_bytes(a).cmp(path_bytes(b)));
             roots.dedup();
+            debug_assert_eq!(
+                roots.len(),
+                per_app.root_len,
+                "preflight/write roots length diverged"
+            );
             for (root_ord, root) in roots.iter().enumerate() {
-                let root_ord =
-                    checked_ord_i64(root_ord, "app_snapshot_roots", "root_ord", &run_tag)?;
+                let root_ord = root_ords.at(root_ord);
                 root_stmt.execute(params![
                     run_id.0,
                     r.id.0,
@@ -594,15 +654,30 @@ impl HistoryStore {
             }
             // Associations: canonical (artifact-path, evidence) order.
             let mut assocs = fact.associations.clone();
-            assocs.sort_by(|a, b| path_bytes(&a.0).cmp(path_bytes(&b.0)).then(a.1.cmp(&b.1)));
+            sort_assocs(&mut assocs);
+            // The grouping must be the preflight's grouping: same group
+            // boundaries in the same order, or the per-group ordinals
+            // would not be the preflighted ones.
+            {
+                let mut groups: Vec<Vec<u8>> = Vec::new();
+                for (artifact_path, _) in &assocs {
+                    let key = path_bytes(artifact_path).to_vec();
+                    if groups.last().is_none_or(|last| *last != key) {
+                        groups.push(key);
+                    }
+                }
+                debug_assert_eq!(
+                    groups, per_app.evidence_groups,
+                    "preflight/write evidence grouping diverged"
+                );
+            }
             // Group ordinals per artifact path (the PK includes the path).
             let mut per_artifact_ord: std::collections::BTreeMap<Vec<u8>, usize> =
                 std::collections::BTreeMap::new();
             for (artifact_path, evidence) in &assocs {
                 let key = path_bytes(artifact_path).to_vec();
                 let ord = per_artifact_ord.entry(key).or_insert(0);
-                let evidence_ord =
-                    checked_ord_i64(*ord, "app_snapshot_evidence", "evidence_ord", &run_tag)?;
+                let evidence_ord = evidence_ords.at(*ord);
                 let (group_tag, group_source) =
                     crate::snapshot_codec::encode_correlation_group(&evidence.correlation_group);
                 ev_stmt.execute(params![
@@ -638,9 +713,26 @@ impl HistoryStore {
                 coresight_apps::footprint::normalize_candidate_evidence(fp);
             }
             canonicalize_footprints(&mut footprints);
-            for (fp_ord, fp) in footprints.iter().enumerate() {
-                let fp_ord =
-                    checked_ord_i64(fp_ord, "app_snapshot_footprints", "footprint_ord", &run_tag)?;
+            debug_assert_eq!(
+                footprints.len(),
+                per_app.footprint_evidence_lens.len(),
+                "preflight/write footprint length diverged"
+            );
+            let fp_ords = CheckedOrdinals {
+                column: "footprint_ord",
+                len: per_app.footprint_evidence_lens.len(),
+            };
+            for (fp_pos, fp) in footprints.iter().enumerate() {
+                let fp_ord = fp_ords.at(fp_pos);
+                debug_assert_eq!(
+                    fp.evidence.len(),
+                    per_app.footprint_evidence_lens[fp_pos],
+                    "preflight/write footprint-evidence length diverged"
+                );
+                let fp_ev_ords = CheckedOrdinals {
+                    column: "evidence_ord",
+                    len: per_app.footprint_evidence_lens[fp_pos],
+                };
                 fp_stmt.execute(params![
                     run_id.0,
                     r.id.0,
@@ -654,13 +746,8 @@ impl HistoryStore {
                 // SET semantics above, so it is written in canonical order
                 // with duplicates removed — exactly what the loader reads
                 // back and exactly what the producer published.
-                for (ev_ord, e) in fp.evidence.iter().enumerate() {
-                    let ev_ord = checked_ord_i64(
-                        ev_ord,
-                        "app_snapshot_footprint_evidence",
-                        "evidence_ord",
-                        &run_tag,
-                    )?;
+                for (ev_pos, e) in fp.evidence.iter().enumerate() {
+                    let ev_ord = fp_ev_ords.at(ev_pos);
                     fp_ev_stmt.execute(params![
                         run_id.0,
                         r.id.0,
@@ -687,20 +774,23 @@ impl HistoryStore {
         // ---- Source coverage (canonical order → ordinals; duplicates kept
         // verbatim — the builder treats coverage as a multiset). ----
         let mut coverage = input.source_coverage.clone();
-        coverage.sort_by(|a, b| {
-            a.source
-                .cmp(&b.source)
-                .then(a.status.cmp(&b.status))
-                .then(a.note.cmp(&b.note))
-        });
+        sort_coverage(&mut coverage);
+        debug_assert_eq!(
+            coverage.len(),
+            plan.coverage_len,
+            "preflight/write coverage length diverged"
+        );
+        let coverage_ords = CheckedOrdinals {
+            column: "coverage_ord",
+            len: plan.coverage_len,
+        };
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO app_snapshot_coverage (run_id, coverage_ord, source, status, note)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for (ord, c) in coverage.iter().enumerate() {
-                let coverage_ord =
-                    checked_ord_i64(ord, "app_snapshot_coverage", "coverage_ord", &run_tag)?;
+                let coverage_ord = coverage_ords.at(ord);
                 stmt.execute(params![
                     run_id.0,
                     coverage_ord,
@@ -713,13 +803,16 @@ impl HistoryStore {
 
         // ---- Relationships (canonical order → ordinals). ----
         let mut rels = input.relationships.clone();
-        rels.sort_by(|a, b| {
-            rel_kind_key(a.kind)
-                .cmp(&rel_kind_key(b.kind))
-                .then(identity_key(&a.object).cmp(&identity_key(&b.object)))
-                .then(a.content_sha256.cmp(&b.content_sha256))
-                .then(sorted_path_keys(&a.paths).cmp(&sorted_path_keys(&b.paths)))
-        });
+        sort_relationships(&mut rels);
+        debug_assert_eq!(
+            rels.len(),
+            plan.rel_len,
+            "preflight/write relationship length diverged"
+        );
+        let rel_ords = CheckedOrdinals {
+            column: "rel_ord",
+            len: plan.rel_len,
+        };
         {
             let mut rel_stmt = tx.prepare(
                 "INSERT INTO app_snapshot_relationships
@@ -730,9 +823,8 @@ impl HistoryStore {
                 "INSERT INTO app_snapshot_rel_members (run_id, rel_ord, member_ord, path)
                  VALUES (?1, ?2, ?3, ?4)",
             )?;
-            for (rel_ord, rel) in rels.iter().enumerate() {
-                let rel_ord =
-                    checked_ord_i64(rel_ord, "app_snapshot_relationships", "rel_ord", &run_tag)?;
+            for (rel_pos, rel) in rels.iter().enumerate() {
+                let rel_ord = rel_ords.at(rel_pos);
                 rel_stmt.execute(params![
                     run_id.0,
                     rel_ord,
@@ -745,15 +837,19 @@ impl HistoryStore {
                 ])?;
                 let mut members = rel.paths.clone();
                 members.sort_by(|a, b| path_bytes(a).cmp(path_bytes(b)));
+                debug_assert_eq!(
+                    members.len(),
+                    plan.rel_member_lens[rel_pos],
+                    "preflight/write member length diverged"
+                );
+                let mem_ords = CheckedOrdinals {
+                    column: "member_ord",
+                    len: plan.rel_member_lens[rel_pos],
+                };
                 // Duplicate member paths are kept verbatim under ordinals
                 // (the builder dedups canonically on reload — same result).
                 for (mem_ord, member) in members.iter().enumerate() {
-                    let mem_ord = checked_ord_i64(
-                        mem_ord,
-                        "app_snapshot_rel_members",
-                        "member_ord",
-                        &run_tag,
-                    )?;
+                    let mem_ord = mem_ords.at(mem_ord);
                     mem_stmt.execute(params![
                         run_id.0,
                         rel_ord,
@@ -767,13 +863,16 @@ impl HistoryStore {
         // ---- History facts (canonical order → ordinals; conflicting
         // (run, path) rows share keys by design — ordinals keep both). ----
         let mut history = input.history.clone();
-        history.sort_by(|a, b| {
-            a.run_id
-                .cmp(&b.run_id)
-                .then(path_bytes(&a.path).cmp(path_bytes(&b.path)))
-                .then(identity_key(&a.identity).cmp(&identity_key(&b.identity)))
-                .then(a.category.cmp(&b.category))
-        });
+        sort_history(&mut history);
+        debug_assert_eq!(
+            history.len(),
+            plan.hist_len,
+            "preflight/write history length diverged"
+        );
+        let hist_ords = CheckedOrdinals {
+            column: "hist_ord",
+            len: plan.hist_len,
+        };
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO app_snapshot_history
@@ -781,7 +880,7 @@ impl HistoryStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for (ord, h) in history.iter().enumerate() {
-                let hist_ord = checked_ord_i64(ord, "app_snapshot_history", "hist_ord", &run_tag)?;
+                let hist_ord = hist_ords.at(ord);
                 stmt.execute(params![
                     run_id.0,
                     hist_ord,
@@ -1875,21 +1974,19 @@ fn corrupt(
     }
 }
 
-/// A value this build cannot represent in a signed SQLite `INTEGER`.
-///
-/// Raised BEFORE any row is written, so a rejected commit can never
-/// narrow, wrap, saturate, or half-persist a fact (Workstream C).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValueOutOfRange {
-    pub table: &'static str,
-    pub column: &'static str,
-    pub detail: String,
-}
-
 /// Convert a domain `u64` to the store's signed `INTEGER` domain,
 /// rejecting anything above `i64::MAX` (Workstream C). Deliberately NOT
 /// used for object identity: those are intentional bit-pattern
 /// conversions (see [`snap_identity`] and the identity write path).
+///
+/// ## Caller input, not persisted corruption (Phase 6.4.6)
+///
+/// Every caller of these helpers passes a value the CALLER handed the
+/// commit (`Inventory` / `FootprintReport` counters, artifact and
+/// estimated sizes), so an unrepresentable value is reported as
+/// [`StoreError::InvalidSnapshotInput`] — the caller-input half of the
+/// error contract — never as persisted corruption. A value the caller
+/// handed us is never evidence of database damage.
 pub(crate) fn checked_u64_i64(
     value: Option<u64>,
     table: &'static str,
@@ -1899,15 +1996,11 @@ pub(crate) fn checked_u64_i64(
     match value {
         None => Ok(None),
         Some(v) => {
-            let converted = i64::try_from(v).map_err(|_| StoreError::Corrupt {
+            let converted = i64::try_from(v).map_err(|_| StoreError::InvalidSnapshotInput {
                 table,
                 column,
                 run_id: run_id.clone(),
-                detail: format!(
-                    "value {v} exceeds the signed 64-bit INTEGER store domain \
-                         (maximum representable {})",
-                    i64::MAX
-                ),
+                value: v as u128,
             })?;
             Ok(Some(converted))
         }
@@ -1916,17 +2009,21 @@ pub(crate) fn checked_u64_i64(
 
 /// Convert a domain `u64` counter to the store's signed `INTEGER` domain,
 /// rejecting values above `i64::MAX`.
+///
+/// The counters are caller-supplied (`Inventory` / `FootprintReport`),
+/// so an unrepresentable value is caller input
+/// ([`StoreError::InvalidSnapshotInput`]), not persisted corruption.
 pub(crate) fn checked_counter_i64(
     value: u64,
     table: &'static str,
     column: &'static str,
     run_id: &Option<String>,
 ) -> Result<i64, StoreError> {
-    i64::try_from(value).map_err(|_| StoreError::Corrupt {
+    i64::try_from(value).map_err(|_| StoreError::InvalidSnapshotInput {
         table,
         column,
         run_id: run_id.clone(),
-        detail: format!("counter {value} exceeds the signed 64-bit INTEGER store domain"),
+        value: value as u128,
     })
 }
 
@@ -1934,17 +2031,23 @@ pub(crate) fn checked_counter_i64(
 /// to the store's signed `INTEGER` domain, rejecting values above
 /// `i64::MAX`. No giant allocation is needed to hit the bound: the
 /// caller's collection is already in memory, so this is a cheap check.
+///
+/// An ordinal is derived from the caller's collection shape during a
+/// commit, so an unrepresentable one is caller input
+/// ([`StoreError::InvalidSnapshotInput`] — the value is recorded in the
+/// `u128` domain so no `usize` width is ever narrowed), not persisted
+/// corruption.
 pub(crate) fn checked_ord_i64(
     ordinal: usize,
     table: &'static str,
     column: &'static str,
     run_id: &Option<String>,
 ) -> Result<i64, StoreError> {
-    i64::try_from(ordinal).map_err(|_| StoreError::Corrupt {
+    i64::try_from(ordinal).map_err(|_| StoreError::InvalidSnapshotInput {
         table,
         column,
         run_id: run_id.clone(),
-        detail: format!("ordinal {ordinal} exceeds the signed 64-bit INTEGER store domain"),
+        value: ordinal as u128,
     })
 }
 
@@ -2303,6 +2406,361 @@ fn canonical_record_key(record: &ApplicationRecord) -> RecordKey {
     }
 }
 
+/// One frozen numeric value per persisted INTEGER that the write path
+/// cannot recompute fallibly: artifact sizes are checked `u64` domains,
+/// ordinals are checked `usize` collection positions. The write path
+/// binds these verbatim and asserts the binding matches the plan, so no
+/// second conversion can fail after mutation begins.
+///
+/// (Phase 6.4.6, Workstream B: the validated persistence representation.
+/// Estimated sizes ride the same helper through the same preflight; they
+/// are read off `app_facts` at bind time but were already checked here,
+/// so their bind is verbatim too — see `preflight_snapshot_plan`.)
+struct SnapshotNumericPlan {
+    /// Checked sizes for the canonically-sorted artifacts, in write order.
+    artifact_sizes: Vec<Option<i64>>,
+    /// Checked estimated sizes, in canonical FACT order (position `i`
+    /// belongs to the fact the write loop visits at position `i`).
+    estimated_sizes: Vec<Option<i64>>,
+    /// Ordinals survive as positions: every ordinal is simply
+    /// `0..len` of its canonical collection, and the lengths are frozen
+    /// here. The write loop binds the checked value for the CURRENT
+    /// position (see `CheckedOrdinals::at`); the lengths prove every
+    /// ordinal the write path will ever ask for was checked in preflight.
+    artifact_len: usize,
+    app_len: usize,
+    coverage_len: usize,
+    rel_len: usize,
+    rel_member_lens: Vec<usize>,
+    hist_len: usize,
+    per_app: Vec<PerAppPlan>,
+}
+
+/// The numeric shape of one application fact's nested collections: frozen
+/// lengths the write path iterates, so every nested ordinal
+/// (provenance, view, root, per-artifact evidence, footprint,
+/// footprint-evidence) was checked before any mutation.
+struct PerAppPlan {
+    prov_len: usize,
+    view_len: usize,
+    root_len: usize,
+    /// For `app_snapshot_evidence`: the association list is grouped per
+    /// artifact path, and each group's evidence ordinals run
+    /// `0..group_len`. The group boundaries are path-dependent, so the
+    /// plan stores the sorted+grouped artifact paths (byte keys) in full:
+    /// the write path asserts it regroups to the identical groups, then
+    /// binds the checked ordinal for the current position.
+    evidence_groups: Vec<Vec<u8>>,
+    /// For `app_snapshot_footprints`: per-candidate normalized evidence
+    /// lengths, in canonical footprint order (footprint ordinals are
+    /// `0..footprints.len()`).
+    footprint_evidence_lens: Vec<usize>,
+}
+
+/// A cursor over one PRE-CHECKED ordinal domain.
+///
+/// `at(i)` returns the checked `i64` for position `i`. Because the
+/// preflight already proved every ordinal in `0..len` is representable,
+/// `at` does NOT re-run the conversion: it returns the position's value
+/// from a range the plan has already frozen, and refuses a position
+/// outside that range (fail-closed rather than silently clamping or
+/// wrapping). Re-converting inside `at` would have been a second
+/// fallible conversion after mutation begins, which this phase forbids.
+struct CheckedOrdinals {
+    /// Diagnostic-only label for the ordinal domain this cursor serves
+    /// (`artifact_ord`, `prov_ord`, …). The domain's TABLE and COLUMN are
+    /// reported by the PREFLIGHT, which is where a rejected value is
+    /// actually diagnosed — `at()` cannot fail, so it never constructs an
+    /// error and never needs to name them.
+    column: &'static str,
+    len: usize,
+}
+
+impl CheckedOrdinals {
+    /// The ordinal `pos`, already proven representable by the preflight.
+    ///
+    /// `debug_assert!` guards the frozen range in test/debug builds; in
+    /// release the value is returned as-is because the preflight's bound
+    /// check already established representability for the whole `0..len`
+    /// domain, and `pos` is by construction a position inside it.
+    fn at(&self, pos: usize) -> i64 {
+        debug_assert!(
+            pos < self.len,
+            "write path asked for ordinal {pos} outside the preflighted {} range (len {})",
+            self.column,
+            self.len
+        );
+        pos as i64
+    }
+}
+
+/// Freeze every numeric conversion `commit_system_snapshot` will need,
+/// from the SAME canonically-sorted, normalized collections the write
+/// path persists — before any transaction opens or any row is deleted.
+///
+/// What is checked here (and therefore CANNOT fail later):
+/// - every artifact `size` and every application `estimated_size_bytes`
+///   (checked `u64` domains; `None` passes through as absent);
+/// - every ordinal the write loops will bind: artifact, fact,
+///   provenance, view, root, per-artifact evidence, footprint,
+///   footprint-evidence, coverage, relationship, member, history.
+///   An ordinal is `0..len` of a caller-sized collection, so checking
+///   the BOUND (`len - 1` fits) checks every ordinal the loop can bind.
+///   A collection no caller can make large enough to overflow
+///   (`usize::MAX`-ish) is still rejected here rather than trusted —
+///   the check is O(1) per collection.
+///
+/// What is deliberately NOT converted: object-identity device / inode /
+/// high-bit columns (intentional full-width bit-pattern storage), the
+/// `id_encoding` version probe (a small constant), and the
+/// `system_component` flag (a 0/1 literal). Strict READ-side decoding
+/// (`u64_nonneg`, `snap_identity`, unknown-enum rejection) is untouched:
+/// persisted-malformed data stays [`StoreError::Corrupt`].
+fn preflight_snapshot_plan(
+    input: &SystemModelInput,
+    app_facts: &[AppSnapshotFact],
+    run_tag: &Option<String>,
+) -> Result<SnapshotNumericPlan, StoreError> {
+    // Artifacts, in the write path's canonical order.
+    let mut artifacts = input.artifacts.clone();
+    sort_artifacts(&mut artifacts);
+    let mut artifact_sizes = Vec::with_capacity(artifacts.len());
+    for a in &artifacts {
+        artifact_sizes.push(checked_u64_i64(
+            a.size,
+            "app_snapshot_artifacts",
+            "size",
+            run_tag,
+        )?);
+    }
+    // Ordinal bounds: checking `len - 1` fits checks every `0..len` the
+    // write loop can bind. `checked_ord_i64(0, …)` also pins the empty
+    // case (len 0) through the same helper, so the empty collection is
+    // preflighted, not assumed.
+    let artifact_len = artifacts.len();
+    check_ord_bound(
+        artifact_len,
+        "app_snapshot_artifacts",
+        "artifact_ord",
+        run_tag,
+    )?;
+
+    // Applications, in the write path's canonical fact order, with every
+    // nested collection normalized EXACTLY as the write path normalizes
+    // it (sort/dedup/normalize/reconcile), so the frozen lengths are the
+    // lengths the write loop will iterate.
+    let app_order = canonical_app_order(app_facts);
+    let app_len = app_facts.len();
+    check_ord_bound(app_len, "app_snapshot_apps", "fact_ord", run_tag)?;
+    let mut per_app = Vec::with_capacity(app_len);
+    let mut estimated_sizes = Vec::with_capacity(app_len);
+    for &fi in &app_order {
+        let fact = &app_facts[fi];
+        // Estimated size: checked now, bound verbatim later.
+        estimated_sizes.push(checked_u64_i64(
+            fact.record.estimated_size_bytes,
+            "app_snapshot_apps",
+            "estimated_size",
+            run_tag,
+        )?);
+        let mut prov = fact.record.provenance.clone();
+        prov.sort();
+        prov.dedup();
+        check_ord_bound(prov.len(), "app_snapshot_provenance", "prov_ord", run_tag)?;
+        let mut views = fact.record.observed_in_views.clone();
+        views.sort();
+        views.dedup();
+        check_ord_bound(views.len(), "app_snapshot_views", "view_ord", run_tag)?;
+        let mut roots = fact.install_roots.clone();
+        roots.sort_by(|a, b| path_bytes(a).cmp(path_bytes(b)));
+        roots.dedup();
+        check_ord_bound(roots.len(), "app_snapshot_roots", "root_ord", run_tag)?;
+        // Associations grouped per artifact path, exactly as the write
+        // path groups them (canonical artifact-path, evidence order;
+        // per-path ordinals restart at 0).
+        let mut assocs = fact.associations.clone();
+        sort_assocs(&mut assocs);
+        let mut evidence_groups: Vec<Vec<u8>> = Vec::new();
+        for (artifact_path, _) in &assocs {
+            let key = path_bytes(artifact_path).to_vec();
+            if evidence_groups.last().is_none_or(|last| *last != key) {
+                evidence_groups.push(key);
+            }
+        }
+        // Every group's ordinals run 0..(group length); the longest
+        // group bounds them all, and each group length is also checked
+        // so a single group's overflow cannot hide behind a short max.
+        let mut group_len = 0usize;
+        for group in &evidence_groups {
+            let len = assocs
+                .iter()
+                .filter(|(p, _)| path_bytes(p) == group.as_slice())
+                .count();
+            check_ord_bound(len, "app_snapshot_evidence", "evidence_ord", run_tag)?;
+            group_len = group_len.max(len);
+        }
+        let _ = group_len;
+        // Footprints normalized + reconciled exactly as the write path
+        // does (shared normalizer + canonicalizer).
+        let mut footprints = fact.footprints.clone();
+        for fp in &mut footprints {
+            coresight_apps::footprint::normalize_candidate_evidence(fp);
+        }
+        canonicalize_footprints(&mut footprints);
+        check_ord_bound(
+            footprints.len(),
+            "app_snapshot_footprints",
+            "footprint_ord",
+            run_tag,
+        )?;
+        let mut footprint_evidence_lens = Vec::with_capacity(footprints.len());
+        for fp in &footprints {
+            check_ord_bound(
+                fp.evidence.len(),
+                "app_snapshot_footprint_evidence",
+                "evidence_ord",
+                run_tag,
+            )?;
+            footprint_evidence_lens.push(fp.evidence.len());
+        }
+        per_app.push(PerAppPlan {
+            prov_len: prov.len(),
+            view_len: views.len(),
+            root_len: roots.len(),
+            evidence_groups,
+            footprint_evidence_lens,
+        });
+    }
+
+    // Coverage, relationships (+ member lengths), history — same pattern:
+    // canonical sort, frozen length, bound check.
+    let mut coverage = input.source_coverage.clone();
+    sort_coverage(&mut coverage);
+    let coverage_len = coverage.len();
+    check_ord_bound(
+        coverage_len,
+        "app_snapshot_coverage",
+        "coverage_ord",
+        run_tag,
+    )?;
+    let mut rels = input.relationships.clone();
+    sort_relationships(&mut rels);
+    let rel_len = rels.len();
+    check_ord_bound(rel_len, "app_snapshot_relationships", "rel_ord", run_tag)?;
+    let mut rel_member_lens = Vec::with_capacity(rel_len);
+    for rel in &rels {
+        let mut members = rel.paths.clone();
+        members.sort_by(|a, b| path_bytes(a).cmp(path_bytes(b)));
+        check_ord_bound(
+            members.len(),
+            "app_snapshot_rel_members",
+            "member_ord",
+            run_tag,
+        )?;
+        rel_member_lens.push(members.len());
+    }
+    let mut history = input.history.clone();
+    sort_history(&mut history);
+    let hist_len = history.len();
+    check_ord_bound(hist_len, "app_snapshot_history", "hist_ord", run_tag)?;
+
+    Ok(SnapshotNumericPlan {
+        artifact_sizes,
+        estimated_sizes,
+        artifact_len,
+        app_len,
+        coverage_len,
+        rel_len,
+        rel_member_lens,
+        hist_len,
+        per_app,
+    })
+}
+
+/// Check that every ordinal `0..len` of one write collection fits the
+/// signed `INTEGER` domain, by checking the largest (`len - 1`).
+/// Length 0 binds no ordinal; it is still pinned through the helper so
+/// the empty case is preflighted, not assumed.
+fn check_ord_bound(
+    len: usize,
+    table: &'static str,
+    column: &'static str,
+    run_tag: &Option<String>,
+) -> Result<(), StoreError> {
+    if len == 0 {
+        checked_ord_i64(0, table, column, run_tag)?;
+    } else {
+        checked_ord_i64(len - 1, table, column, run_tag)?;
+    }
+    Ok(())
+}
+
+/// Canonical artifact order shared by the preflight and the write path:
+/// extracted so the two cannot diverge.
+fn sort_artifacts(artifacts: &mut [ArtifactFact]) {
+    artifacts.sort_by(|a, b| {
+        path_bytes(&a.path)
+            .cmp(path_bytes(&b.path))
+            .then(a.kind.cmp(&b.kind))
+            .then(a.size.cmp(&b.size))
+            .then(identity_key(&a.identity).cmp(&identity_key(&b.identity)))
+    });
+}
+
+/// Canonical app-fact order shared by the preflight and the write path.
+fn canonical_app_order(app_facts: &[AppSnapshotFact]) -> Vec<usize> {
+    let mut app_order: Vec<usize> = (0..app_facts.len()).collect();
+    app_order.sort_by(|&i, &j| {
+        app_facts[i]
+            .record
+            .id
+            .0
+            .cmp(&app_facts[j].record.id.0)
+            .then(
+                canonical_record_key(&app_facts[i].record)
+                    .cmp(&canonical_record_key(&app_facts[j].record)),
+            )
+    });
+    app_order
+}
+
+/// Canonical association order shared by the preflight and the write path.
+fn sort_assocs(assocs: &mut [(PathBuf, OwnershipEvidence)]) {
+    assocs.sort_by(|a, b| path_bytes(&a.0).cmp(path_bytes(&b.0)).then(a.1.cmp(&b.1)));
+}
+
+/// Canonical coverage order shared by the preflight and the write path.
+fn sort_coverage(coverage: &mut [SourceCoverage]) {
+    coverage.sort_by(|a, b| {
+        a.source
+            .cmp(&b.source)
+            .then(a.status.cmp(&b.status))
+            .then(a.note.cmp(&b.note))
+    });
+}
+
+/// Canonical relationship order shared by the preflight and the write path.
+fn sort_relationships(rels: &mut [RelationshipFact]) {
+    rels.sort_by(|a, b| {
+        rel_kind_key(a.kind)
+            .cmp(&rel_kind_key(b.kind))
+            .then(identity_key(&a.object).cmp(&identity_key(&b.object)))
+            .then(a.content_sha256.cmp(&b.content_sha256))
+            .then(sorted_path_keys(&a.paths).cmp(&sorted_path_keys(&b.paths)))
+    });
+}
+
+/// Canonical history order shared by the preflight and the write path.
+fn sort_history(history: &mut [HistoryFact]) {
+    history.sort_by(|a, b| {
+        a.run_id
+            .cmp(&b.run_id)
+            .then(path_bytes(&a.path).cmp(path_bytes(&b.path)))
+            .then(identity_key(&a.identity).cmp(&identity_key(&b.identity)))
+            .then(a.category.cmp(&b.category))
+    });
+}
+
 fn flatten_footprints(app_facts: &[AppSnapshotFact]) -> Vec<FootprintCandidate> {
     let mut out: Vec<FootprintCandidate> = app_facts
         .iter()
@@ -2310,4 +2768,263 @@ fn flatten_footprints(app_facts: &[AppSnapshotFact]) -> Vec<FootprintCandidate> 
         .collect();
     canonicalize_footprints(&mut out);
     out
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    const RUN: Option<String> = None;
+
+    fn run_tag() -> Option<String> {
+        Some("preflight-test-run".to_string())
+    }
+
+    // ---- ordinal conversion boundaries -----------------------------------
+    //
+    // Ordinals are `0..len` of a caller-sized collection, so no realistic
+    // allocation can overflow `i64`. The conversion is therefore tested
+    // DIRECTLY at its boundary rather than through an impractical
+    // collection: `i64::MAX` is the last representable ordinal and
+    // `i64::MAX + 1` must be rejected as invalid input.
+
+    #[test]
+    fn an_ordinal_at_the_signed_boundary_is_accepted() {
+        assert_eq!(
+            checked_ord_i64(
+                i64::MAX as usize,
+                "app_snapshot_artifacts",
+                "artifact_ord",
+                &run_tag()
+            )
+            .unwrap(),
+            i64::MAX,
+        );
+        assert_eq!(
+            checked_ord_i64(0, "app_snapshot_apps", "fact_ord", &run_tag()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_ordinal_past_the_signed_boundary_is_invalid_input_not_corruption() {
+        let err = checked_ord_i64(
+            (i64::MAX as u128 + 1) as usize,
+            "app_snapshot_apps",
+            "fact_ord",
+            &run_tag(),
+        )
+        .expect_err("an ordinal above i64::MAX is unrepresentable");
+        match err {
+            StoreError::InvalidSnapshotInput {
+                table,
+                column,
+                run_id,
+                value,
+            } => {
+                assert_eq!(table, "app_snapshot_apps");
+                assert_eq!(column, "fact_ord");
+                assert_eq!(run_id, run_tag());
+                assert_eq!(value, i64::MAX as u128 + 1);
+            }
+            other => panic!("an oversized ordinal must be invalid input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_whole_domain_ordinal_reports_the_true_value_without_narrowing() {
+        // A `u64` at its own maximum must be reported exactly, not
+        // truncated to fit the error's display domain.
+        let err = checked_u64_i64(Some(u64::MAX), "app_snapshot_artifacts", "size", &run_tag())
+            .expect_err("u64::MAX bytes is unrepresentable");
+        match err {
+            StoreError::InvalidSnapshotInput { value, .. } => {
+                assert_eq!(
+                    value,
+                    u64::MAX as u128,
+                    "the rejected value must survive exactly"
+                );
+            }
+            other => panic!("an oversized size must be invalid input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_preflight_bound_check_rejects_an_unrepresentable_collection() {
+        // The preflight checks the collection's BOUND, so a caller-sized
+        // collection that could never be allocated is still refused here
+        // rather than trusted.
+        let impossible = (i64::MAX as u128 + 2) as usize;
+        let err = check_ord_bound(
+            impossible,
+            "app_snapshot_evidence",
+            "evidence_ord",
+            &run_tag(),
+        )
+        .expect_err("a collection past the signed ordinal domain must be refused");
+        assert!(
+            matches!(err, StoreError::InvalidSnapshotInput { .. }),
+            "expected invalid input, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_preflight_bound_check_accepts_the_empty_and_normal_collections() {
+        // The empty collection pins ordinal 0 through the same helper, so
+        // it is preflighted rather than assumed safe.
+        assert!(check_ord_bound(0, "app_snapshot_coverage", "coverage_ord", &run_tag()).is_ok());
+        assert!(check_ord_bound(1, "app_snapshot_coverage", "coverage_ord", &run_tag()).is_ok());
+        // i64::MAX elements means the last ordinal is i64::MAX - 1: fine.
+        assert!(check_ord_bound(
+            i64::MAX as usize,
+            "app_snapshot_history",
+            "hist_ord",
+            &run_tag()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn counters_report_caller_values_as_invalid_input() {
+        let err = checked_counter_i64(
+            u64::MAX,
+            "app_snapshot_meta",
+            "records_truncated",
+            &run_tag(),
+        )
+        .expect_err("an oversized counter is unrepresentable");
+        match err {
+            StoreError::InvalidSnapshotInput {
+                table,
+                column,
+                run_id,
+                value,
+            } => {
+                assert_eq!(table, "app_snapshot_meta");
+                assert_eq!(column, "records_truncated");
+                assert_eq!(run_id, run_tag());
+                assert_eq!(value, u64::MAX as u128);
+            }
+            other => panic!("an oversized counter must be invalid input, got {other:?}"),
+        }
+    }
+
+    // ---- the preflight runs BEFORE any mutation --------------------------
+
+    #[test]
+    fn the_preflight_is_reached_before_the_write_transaction_opens() {
+        // Ordering proof: with NO valid run in the store, a commit that
+        // fails preflight must report the INVALID INPUT, never
+        // `UnknownRun`. `UnknownRun` can only be produced by the existence
+        // check that runs INSIDE the transaction, so observing the input
+        // error instead proves the preflight rejected the commit before
+        // the transaction opened and before any statement ran.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = HistoryStore::open(&dir.path().join("ordering.db")).unwrap();
+        let input = SystemModelInput {
+            artifacts: vec![ArtifactFact {
+                path: std::path::PathBuf::from("/huge"),
+                kind: coresight_apps::ProbedKind::File,
+                identity: None,
+                content_sha256: None,
+                size: Some(u64::MAX),
+                access: coresight_capabilities::access::AccessState::ReadSucceeded,
+                classification: None,
+            }],
+            applications: Vec::new(),
+            relationships: Vec::new(),
+            history: Vec::new(),
+            source_coverage: Vec::new(),
+        };
+        let run_id = crate::RunId("no-such-run".to_string());
+        let err = store
+            .commit_system_snapshot(
+                &run_id,
+                &input,
+                &[],
+                &coresight_apps::Inventory::default(),
+                &coresight_apps::FootprintReport::default(),
+            )
+            .expect_err("the oversize must be rejected");
+        match err {
+            StoreError::InvalidSnapshotInput { .. } => {}
+            other => panic!(
+                "the preflight must reject before the transaction's run check; got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn the_preflight_plan_freezes_every_ordinal_domain_before_write() {
+        // The plan must be derivable (and total) for a realistic input,
+        // and every frozen length must be a bound the write loop honours.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = HistoryStore::open(&dir.path().join("plan.db")).unwrap();
+        store
+            .begin_run(&crate::model::RunRecord {
+                run_id: crate::RunId("plan-run".to_string()),
+                started_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+                completed_at: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(20)),
+                roots: vec![std::path::PathBuf::from("/scope")],
+                platform: "test".to_string(),
+                config: crate::model::ConfigFingerprint::current(),
+                status: crate::model::RunStatus::Completed,
+                counts: crate::model::RunCounts::default(),
+            })
+            .unwrap();
+        let input = SystemModelInput {
+            artifacts: vec![ArtifactFact {
+                path: std::path::PathBuf::from("/a"),
+                kind: coresight_apps::ProbedKind::File,
+                identity: None,
+                content_sha256: None,
+                size: Some(4096),
+                access: coresight_capabilities::access::AccessState::ReadSucceeded,
+                classification: None,
+            }],
+            applications: Vec::new(),
+            relationships: Vec::new(),
+            history: Vec::new(),
+            source_coverage: vec![],
+        };
+        let plan = preflight_snapshot_plan(&input, &[], &run_tag()).unwrap();
+        assert_eq!(plan.artifact_len, 1);
+        assert_eq!(plan.artifact_sizes, vec![Some(4096)]);
+        assert!(plan.per_app.is_empty());
+        assert_eq!(plan.coverage_len, 0);
+        assert_eq!(plan.rel_len, 0);
+        assert_eq!(plan.hist_len, 0);
+        // The cursor binds a pre-checked ordinal without converting again.
+        let ords = CheckedOrdinals {
+            column: "artifact_ord",
+            len: plan.artifact_len,
+        };
+        assert_eq!(ords.at(0), 0);
+    }
+
+    #[test]
+    fn an_absent_size_stays_absent_through_the_preflight() {
+        let input = SystemModelInput {
+            artifacts: vec![ArtifactFact {
+                path: std::path::PathBuf::from("/a"),
+                kind: coresight_apps::ProbedKind::File,
+                identity: None,
+                content_sha256: None,
+                size: None,
+                access: coresight_capabilities::access::AccessState::ReadSucceeded,
+                classification: None,
+            }],
+            applications: Vec::new(),
+            relationships: Vec::new(),
+            history: Vec::new(),
+            source_coverage: Vec::new(),
+        };
+        let plan = preflight_snapshot_plan(&input, &[], &run_tag()).unwrap();
+        assert_eq!(
+            plan.artifact_sizes,
+            vec![None],
+            "an absent size must stay absent, never become zero"
+        );
+        let _ = RUN;
+    }
 }

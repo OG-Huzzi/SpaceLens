@@ -830,6 +830,8 @@ narrow-phase discipline):**
   Workstream A.6 directs that oversized counts/sizes keep their existing
   policy. Recorded as a known limitation for a future contract phase;
   changing it here would be unrelated refactoring.
+  **[RESOLVED in Phase 6.4.6]** — these helpers now return
+  `StoreError::InvalidSnapshotInput`; see the Phase 6.4.6 record.
 - A non-integer stored in a timestamp column surfaces as an untyped
   `StoreError::Sqlite` conversion failure. It is NOT silently converted
   into a plausible date, so the "typed Corrupt" requirement (which is
@@ -846,8 +848,18 @@ merely on the branch:
 | `359949e7e0b079e9e5796f03af4bf398597a6e0b` | Phase 6.4.5 implementation | [38248576606](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38248576606) | all 4 jobs success |
 | `8976ef64a2ecffc393432ff9da7854f389c8c5e5` | verification record | [38249741039](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38249741039) | all 4 jobs success |
 | `1e1794a8413212c9f7822da034b1845771684bcb` | verification-record CI table | [38250759261](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38250759261) | all 4 jobs success |
+| `b35cdb45c14dfb652a87c4e80818f068bd4f1bf5` | final 6.4.5 record commit | [38251977507](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38251977507) | all 4 jobs success |
 
-Both runs reported `frontend`, `rust (ubuntu-latest)`,
+The last row closes a ledger gap: the final Phase 6.4.5 commit was pushed
+and verified but its run was never recorded here. It was re-queried
+through the GitHub Actions API rather than copied from the claim —
+`head_sha` = `b35cdb45c14dfb652a87c4e80818f068bd4f1bf5` (matches the
+commit), `event` = `push`, `run_attempt` = 1, `status` = `completed`,
+`conclusion` = `success`, and the four jobs
+`rust (ubuntu-latest)`, `frontend`, `rust (windows-latest)`,
+`rust (macos-latest)` were each `completed` / `success`.
+
+All runs reported `frontend`, `rust (ubuntu-latest)`,
 `rust (windows-latest)`, and `rust (macos-latest)` as **success** on
 attempt 1, with the run's `head_sha` confirmed equal to the commit SHA
 (queried through the GitHub Actions API). No runner-infrastructure
@@ -884,6 +896,142 @@ sync with `origin/main`.
   not unit-testable — it requires a defective platform clock — and is
   documented rather than faked.
 - All Phase 6.4/6.4.1/6.4.2/6.4.3/6.4.4 limitations remain in force.
+
+## Phase 6.4.6 — Application-Snapshot Input Errors & Preflight Closure
+
+Baseline: `b35cdb45c14dfb652a87c4e80818f068bd4f1bf5` (the Phase 6.4.5
+verification-record commit). **Schema version stays 6** — no migration was
+added, and no migration v2–v6 SQL was edited.
+
+**Status: PENDING (committed below; exact-SHA CI recorded after the run)**
+
+### The defect
+
+Phase 6.4.1 wrote every application-snapshot numeric through three checked
+helpers (`checked_u64_i64`, `checked_counter_i64`, `checked_ord_i64`).
+They refused an unrepresentable value correctly — refusing before any
+destructive statement — but they classified the refusal as
+`StoreError::Corrupt`, i.e. **persisted database corruption**. The value
+was caller input: an `Inventory` counter, an artifact `size`, an
+application `estimated_size_bytes`. Nothing about it was evidence of
+database damage, so a caller passing a merely-too-large `u64` was told
+its store was corrupt. Phase 6.4.5 recorded this as a known contract gap
+and deferred it; this phase closes it.
+
+### Workstream A — error classification
+
+`StoreError::InvalidSnapshotInput { table, column, run_id, value }` is
+the new typed rejection. It carries the actual table, the actual column,
+the affected run, and the rejected value in `u128` — wide enough to report
+both a `u64` domain value and a `usize` ordinal on every supported
+platform without narrowing, so `u64::MAX` is reported exactly rather than
+truncated to fit a display domain.
+
+`Corrupt` is unchanged for genuinely malformed or impossible PERSISTED
+data: strict `u64_nonneg` decoding, `snap_identity`, unknown-enum
+rejection, parallel-vector mismatch, footprint/app-attribution mismatch,
+inventory-vs-facts set mismatch, footprint-report mismatch,
+`integrity_check`, and `SchemaTooNew`.
+
+`InvalidRunCount` and `InvalidTimestamp` are deliberately UNCHANGED for
+the legacy run-persistence API — that contract is established, tested,
+and unaffected by this phase. The two families now agree in policy
+(caller input ≠ corruption) while remaining distinct types per API.
+
+### Workstream B — true preflight
+
+Before this phase, artifact sizes were converted in a pre-pass, but every
+ordinal was computed INSIDE the loop that INSERTs — after the run's prior
+snapshot rows had been DELETEd. A rejected value was therefore
+discovered only after destructive statements had run, and preservation
+rested on transaction rollback rather than on never touching the data.
+
+`preflight_snapshot_plan` now runs **before the transaction opens**
+(`snapshot.rs`, before `conn.transaction()` and before the
+`DELETE FROM app_snapshot_*` loop) and freezes, from the same
+canonically-sorted and normalized collections the write path persists:
+
+- every artifact `size` and every application `estimated_size_bytes`;
+- every ordinal domain — artifact, fact, provenance, view, root,
+  per-artifact evidence, footprint, footprint-evidence, coverage,
+  relationship, member, history — by checking each collection's BOUND
+  (`len - 1` fits, or `0` for the empty case), which checks every
+  position the loop can bind.
+
+The write path then binds these values verbatim. `CheckedOrdinals::at`
+returns a position from a range the preflight already proved
+representable instead of re-running the conversion, so **no checked value
+is converted a second time after mutation begins**. Object identity
+(device / inode / high-bit columns) is deliberately NOT converted: those
+are intentional bit-pattern storage whose `u64::MAX` round-trip is a
+tested contract.
+
+Writes remain atomic — a constraint or I/O failure after a valid preflight
+still rolls the whole transaction back.
+
+### Verification (local, Windows 11)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | pass (exit 0) |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | pass (exit 0) |
+| `cargo test --workspace` | **909 passed, 0 failed**, 11 ignored (exit 0) |
+| `cargo test --workspace --all-features` | **909 passed, 0 failed** (exit 0) |
+| `cargo test --workspace -- --ignored` | pass (exit 0) |
+| `npm ci` | pass (exit 0), 0 vulnerabilities |
+| `npm audit --audit-level=high` | pass (exit 0), 0 vulnerabilities |
+| `npm run build` | pass (exit 0), built in 1.28 s |
+| `git diff --check` | pass (no whitespace errors) |
+
+Test count moved **889 → 909** (+20): 11 integration tests in the new
+`crates/coresight-history/tests/phase646_tests.rs` and 9 unit tests in the
+`preflight_tests` module. No test was deleted, skipped, or weakened; three
+existing tests were RETYPED from `Corrupt` to `InvalidSnapshotInput`
+because the old assertion encoded the defect being fixed — their
+assertions are strictly stronger now (they additionally pin the rejected
+value and forbid a `Corrupt` classification).
+
+### Workstream C — nothing weakened
+
+Verified by the existing suites, all still passing unchanged: strict
+decoding still returns `Corrupt` for malformed stored facts (pinned
+directly by `tampering_with_a_stored_value_is_still_reported_as_corruption`);
+schema v6 readable with no migration; application ids and the v5→v6
+re-key intact; caps applied before normalization; query limits validated
+before SQL with exact `limit + 1`; footprint evidence set semantics
+unchanged; legacy `InvalidRunCount`/`InvalidTimestamp` intact; legacy
+negative numerics still round-trip; relationship nullability still
+strict; retention still protects the newest baseline; full-width identity
+including `u64::MAX` still round-trips exactly
+(`full_width_identity_round_trips_exactly`).
+
+The documented ambiguity of legacy signed bit patterns is **not** touched:
+without a format-level basis, a legacy wrapped value and a tampered one
+are indistinguishable, and this phase does not pretend otherwise.
+
+### Phase 6.4.6 limitations (honest)
+
+- **Ordinal rejection is unreachable through the public API.** Ordinals
+  are `0..len` of a caller-sized collection, so no realistic allocation
+  can overflow `i64`. The check is O(1) per collection and runs in
+  preflight, but its trigger is proven by testing the conversion helper
+  directly rather than by allocating `i64::MAX` elements.
+- **The preflight clones the input collections** to normalize them the
+  way the write path will. That is a real memory cost proportional to
+  snapshot size, paid to make the plan definitionally equal to what is
+  written. It is not free.
+- **Pre-mutation ordering is proven structurally, not at the SQL level.**
+  The regression test asserts the rejection is `InvalidSnapshotInput`
+  even for a run that does not exist — `UnknownRun` can only be produced
+  by the in-transaction existence check, so observing the input error
+  proves the preflight ran first. It does not instrument SQLite.
+- **`CheckedOrdinals::at` is guarded by `debug_assert!` in debug builds
+  and unchecked in release.** This is sound because the preflight proved
+  the whole `0..len` domain representable and `pos` is by construction
+  inside it; a future divergence would be caught in tests and debug
+  builds, not in release.
+- All Phase 6.4 / 6.4.1 / 6.4.2 / 6.4.3 / 6.4.4 / 6.4.5 limitations
+  remain in force.
 
 `PHASE 6.5 — NOT STARTED.`
 
