@@ -289,7 +289,7 @@ The name is validated AFTER normalization, so a whitespace-only name
 (non-empty as a raw string, empty after trimming) is rejected rather than
 collapsing onto a shared empty-named identity.
 
-### Numeric persistence and TRUE preflight (Phase 6.4.2 + 6.4.3 + 6.4.4)
+### Numeric persistence and TRUE preflight (Phase 6.4.2 + 6.4.3 + 6.4.4 + 6.4.5)
 
 - `commit_run` and `begin_run` perform a TRUE preflight: every
   caller-controlled conversion that can fail is computed BEFORE the
@@ -303,9 +303,12 @@ collapsing onto a shared empty-named identity.
   caller-supplied timestamp (`started_at`, `completed_at`, and each
   observation's `modified`).
 - **Invalid CALLER input is a distinct typed error from persisted
-  corruption**: `StoreError::InvalidRunCount { table, column, value }`.
-  Mislabeling valid caller data as a corrupt store would send callers
-  looking for database damage that does not exist.
+  corruption**: `StoreError::InvalidRunCount { table, column, value }`
+  for counts/sizes and `StoreError::InvalidTimestamp { table, column,
+  run_id, nanos }` for timestamps. Mislabeling valid caller data as a
+  corrupt store would send callers looking for database damage that does
+  not exist. Timestamps additionally carry the run they belonged to and
+  the offending nanosecond count, so the rejection is diagnosable.
 - Every checked value is BOUND VERBATIM after the preflight succeeds, so
   no second conversion can fail between the UPDATE and the INSERTs.
 - Timestamps convert through `checked_timestamp`, which names the ACTUAL
@@ -313,14 +316,67 @@ collapsing onto a shared empty-named identity.
   - `scan_runs.started_at`
   - `scan_runs.completed_at`
   - `observations.modified`
+- The store's own clock reading (`SystemTime::now()`, written to
+  `scan_runs.completed_at` by `recover_stale_runs` and `abandon_run`) is
+  checked the same way and propagates a typed error instead of panicking:
+  a defective platform clock can never crash a caller mid-operation.
 - Full-width `ObjectIdentity` components keep their intentional
   bit-pattern conversions, documented and tested separately — `u64::MAX`
   identity components round-trip exactly and are deliberately NOT
   range-checked.
 - `Duration::as_nanos()` is a `u128` wider than `i64`, so narrowing it
-  wraps any timestamp above ~2262 CE into a NEGATIVE number; the reader
-  clamps negatives to the epoch, so the original time would be silently
-  corrupted. Unrepresentable timestamps therefore fail loudly.
+  wraps any timestamp above ~2262 CE into a NEGATIVE number. Unrepresentable
+  timestamps therefore fail loudly on write; what the reader does with a
+  negative it finds in an OLD database is a separate, documented policy
+  (below).
+
+### Persisted timestamp decoding — legacy compatibility policy (Phase 6.4.5)
+
+Every writer generation encodes a timestamp as **nanoseconds since the
+Unix epoch in a signed `INTEGER`**, and every one of them maps a
+PRE-EPOCH time to `0` (the documented pre-epoch convention). The writers
+differ only in how they narrow the wider `u128` nanosecond count:
+
+- **v2 through pre-6.4.2**: an UNCHECKED `u128 as i64` truncation. A time
+  from ~year 2262 up to ~year 2554 wrapped into the negative half of the
+  signed domain; a time beyond ~year 2554 wrapped modulo 2^64 (bits above
+  64 are discarded).
+- **6.4.2 onward**: `checked_timestamp` — a pre-epoch time is stored as
+  `0`, an in-domain time is stored exactly, and an out-of-domain time is
+  REJECTED before any mutation. No new write can store a negative value.
+
+The read policy (`time_from_nanos`), proven by direct tamper tests
+across every read path:
+
+| Stored value | Reading | Why |
+|---|---|---|
+| `0` | the Unix epoch | the pre-epoch convention, producible by every writer |
+| `1 … i64::MAX` | epoch + that many nanoseconds | the exact time for every writer |
+| negative | epoch + the stored bits read as an UNSIGNED nanosecond count | the exact inverse of the legacy unchecked write |
+
+A negative value is therefore a **legitimate legacy bit pattern, not
+corruption**: it reconstructs the original time exactly for any time the
+old writer could produce below 2^64 nanoseconds (~year 2554). It is
+neither rejected (a supported writer produced it — a value safely
+rejected on new writes is not necessarily corrupt in an older database)
+nor clamped to the epoch (the previous reader's silent conversion into
+the plausible date 1970-01-01, which erased the far-future signal).
+
+**Documented limitations (not claimed capabilities):**
+
+- A negative stored value is AMBIGUOUS: a legacy wrapped far-future time
+  and a tampered value are indistinguishable in the stored format. The
+  store does not claim to tell them apart; it applies the one reading
+  that preserves every historical value the old writer could produce.
+- The reconstruction is lossy for originals at or past ~year 2554: the
+  truncation discarded the bits above 64, so such a value reads back as
+  epoch + (low 64 bits) — roughly 584 years early — and an original whose
+  wrapped bits happen to be non-negative is indistinguishable from an
+  ordinary timestamp. No read policy can repair that.
+- A Windows `SystemTime` is 100-nanosecond FILETIME-based, so a
+  sub-100ns remainder truncates on every conversion — the same
+  granularity every timestamp read on that platform has always had,
+  positive values included.
 
 ### Relationship report metadata contract (Phase 6.4.4)
 
@@ -349,10 +405,25 @@ completeness the run never recorded. What IS preserved is the distinction
 between "no report was recorded" (both NULL) and "a report was recorded
 with zero truncations" (status present, count `0`).
 
+**What (NULL, NULL) means — and what it does NOT mean (Phase 6.4.5,
+Workstream C).** The relationship TABLES predate v4, while the metadata
+columns were introduced by the v4 migration. A legacy database can
+therefore contain `relationship_obs` / `relationship_members` rows while
+both metadata columns are NULL. `(NULL, NULL)` states only that no
+relationship-report status or truncation metadata was recorded for the
+run — it does NOT prove that no relationship rows ever existed. A
+genuine pre-v4 fixture (a real v2 database carrying relationship rows)
+migrates through the actual v2 → v6 chain with both columns still NULL,
+both rows retained, and no fabricated completeness: `load_run_snapshot`
+attaches no report, while the retained facts stay queryable through the
+public `relationship_history` query. The migration itself adds the
+columns as nullable with no default and touches no relationship row.
+
 **Legacy counters keep their faithful signed→unsigned reconstruction**, per
 the Phase 6.4.3 compatibility policy: a negative stored value round-trips
 exactly, and the store does not claim to distinguish a legacy-wrapped
-counter from tampering.
+counter from tampering. The same policy and the same honest limitation
+now apply to persisted timestamps (see above).
 
 ### Retention policy (Phase 6.4.3)
 

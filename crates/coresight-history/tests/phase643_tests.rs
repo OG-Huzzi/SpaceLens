@@ -447,13 +447,24 @@ fn an_invalid_observation_modified_timestamp_preserves_all_committed_data() {
     let err = store
         .commit_run(&record, &bad, None)
         .expect_err("an unrepresentable observation timestamp must be rejected");
-    // The error must name the OWNING table and column of the field.
+    // The error must name the OWNING table and column of the field, and it
+    // is typed CALLER INPUT — not persisted corruption (Phase 6.4.5).
     match &err {
-        StoreError::Corrupt { table, column, .. } => {
+        StoreError::InvalidTimestamp {
+            table,
+            column,
+            run_id,
+            nanos,
+        } => {
             assert_eq!(*table, "observations", "the field's owning table");
             assert_eq!(*column, "modified", "the actual column");
+            assert_eq!(run_id.as_deref(), Some("preflight-ts-run"));
+            assert_eq!(
+                *nanos,
+                far_future().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            );
         }
-        other => panic!("expected typed corruption, got {other:?}"),
+        other => panic!("expected InvalidTimestamp for caller input, got {other:?}"),
     }
 
     // Not one row changed: same status, same timestamps, same observations.
@@ -571,7 +582,9 @@ fn empty_snapshot(run_id: &RunId) -> Snapshot {
     SnapshotBuilder::new().build(run_id.clone()).unwrap()
 }
 
-/// Each timestamp field names ITSELF in the error.
+/// Each timestamp field names ITSELF in the error, and the error is typed
+/// caller input (`InvalidTimestamp`), not persisted corruption — Phase
+/// 6.4.5 completes the contract Phase 6.4.4 established for counts.
 #[test]
 fn timestamp_errors_identify_the_actual_field() {
     let dir = tempfile::tempdir().unwrap();
@@ -582,7 +595,8 @@ fn timestamp_errors_identify_the_actual_field() {
     let mut r = run_record("ts-started");
     r.started_at = far_future();
     let err = store.begin_run(&r).unwrap_err();
-    assert_eq!(corrupt_column(&err), "started_at");
+    assert_eq!(invalid_column(&err), "started_at");
+    assert_eq!(invalid_run(&err).as_deref(), Some("ts-started"));
 
     // completed_at (falls back to started_at, both unrepresentable).
     let mut r = run_record("ts-completed");
@@ -590,13 +604,21 @@ fn timestamp_errors_identify_the_actual_field() {
     store.begin_run(&r).unwrap();
     let s = empty_snapshot(&r.run_id);
     let err = store.commit_run(&r, &s, None).unwrap_err();
-    assert_eq!(corrupt_column(&err), "completed_at");
+    assert_eq!(invalid_column(&err), "completed_at");
+    assert_eq!(invalid_run(&err).as_deref(), Some("ts-completed"));
 }
 
-fn corrupt_column(err: &StoreError) -> &'static str {
+fn invalid_column(err: &StoreError) -> &'static str {
     match err {
-        StoreError::Corrupt { column, .. } => column,
-        other => panic!("expected typed corruption, got {other:?}"),
+        StoreError::InvalidTimestamp { column, .. } => column,
+        other => panic!("expected InvalidTimestamp for caller input, got {other:?}"),
+    }
+}
+
+fn invalid_run(err: &StoreError) -> Option<String> {
+    match err {
+        StoreError::InvalidTimestamp { run_id, .. } => run_id.clone(),
+        other => panic!("expected InvalidTimestamp for caller input, got {other:?}"),
     }
 }
 

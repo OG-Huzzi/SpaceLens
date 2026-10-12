@@ -12,10 +12,11 @@ PHASE 6.4.3 — Read-Side Integrity & Exact Boundary Semantics
 
 PHASE 6.4.4 — Numeric Preflight Closure & Relationship Metadata Consistency
 
+PHASE 6.4.5 — Timestamp Error Semantics & Legacy History Compatibility
+
 **Status: Phase 6.4 VERIFIED ** — exact-SHA record below. Phase 6.4.1,
-6.4.2 and 6.4.3 are IMPLEMENTED and VERIFIED with their own exact-SHA CI
-records. Phase 6.4.4 is IMPLEMENTED and VERIFIED with its own exact-SHA CI
-record.
+6.4.2, 6.4.3, 6.4.4 and 6.4.5 are IMPLEMENTED and VERIFIED, each with
+its own exact-SHA CI record.
 
 - **Final verified commit (Phase 6.4):**
   `e05177bb2dca8a60007ba994c3a3acd62ba1edd4`
@@ -657,6 +658,191 @@ caller-input-vs-corruption distinction.
 - Full-width object identity remains intentionally exempt from range
   checks. Callers MUST NOT rely on the same policy for other fields.
 - All Phase 6.4/6.4.1/6.4.2/6.4.3 limitations remain in force.
+
+## Phase 6.4.5 — Timestamp Error Semantics & Legacy History Compatibility
+
+Baseline: `408298d85583d7a1ad7d91d4bd5019c7606f9ca0` (the Phase 6.4.4
+verification-record commit). **Schema v6 remains unchanged** — no
+migration was added, and no migration v2–v6 SQL was edited.
+
+**Status: VERIFIED** (exact-SHA record below)
+
+### Confirmed defects, fixes, and regression tests
+
+**D1. Invalid CALLER timestamps were reported as persisted CORRUPTION
+(Workstream A).** `checked_timestamp()` mapped an unrepresentable caller
+timestamp to `StoreError::Corrupt`, which conflicts with Phase 6.4.4's
+explicit distinction between invalid caller input and invalid stored
+data: a caller is sent hunting for database damage that does not exist.
+Fix: the typed `StoreError::InvalidTimestamp { table, column, run_id,
+nanos }` — the caller-input half of the contract, carrying the field's
+owning table and column, the run where known, and the offending
+nanosecond count — applied consistently in `begin_run()`
+(`scan_runs.started_at`) and `commit_run()` (`scan_runs.completed_at`,
+`observations.modified`), with the preflight still running BEFORE the
+transaction opens. Every pre-6.4.5 timestamp call site was searched;
+the pre-epoch convention (stored as `0`) is preserved, and a future time
+outside the signed nanosecond domain is refused — never wrapped,
+clamped, or panicked over.
+- `phase645_tests::unrepresentable_started_at_is_caller_input_before_any_write`
+- `phase645_tests::unrepresentable_completed_at_is_caller_input_before_the_transaction`
+- `phase645_tests::unrepresentable_observation_modified_is_caller_input_before_the_transaction`
+- Existing tests re-classified to the stricter contract (assertions
+  strengthened, none weakened):
+  `phase642_tests::an_unrepresentable_timestamp_is_rejected_not_wrapped`,
+  `phase642_tests::an_unrepresentable_completed_at_preserves_the_run_row`,
+  `phase643_tests::timestamp_errors_identify_the_actual_field`,
+  `phase643_tests::an_invalid_observation_modified_timestamp_preserves_all_committed_data`,
+  `phase644_tests::an_observation_timestamp_error_names_its_owning_table`,
+  `phase644_tests::begin_run_validates_started_at_before_its_transaction`.
+
+**D2. The store's own clock reading could PANIC (Workstream A).**
+`now_nanos()` ended in `.expect(...)`, so a platform clock outside the
+representable domain would panic inside `recover_stale_runs` — which
+`HistoryStore::open` calls — as well as in `abandon_run` and
+`apply_retention`. Fix: the clock now propagates the typed
+`InvalidTimestamp` error; no timestamp path in the store can panic. (Not
+unit-testable — it requires a defective platform clock — and documented
+as such rather than faked.)
+
+**D3. The persisted-timestamp reader silently clamped negative values to
+the Unix epoch (Workstream B).** The audit traced the full writer
+history: every generation encodes a timestamp as *nanoseconds since the
+Unix epoch, narrowed to `i64`*, and every one maps a pre-epoch time to
+`0`; the pre-6.4.2 writer narrowed the wider `u128` with an UNCHECKED
+`as i64`, so any caller time from ~year 2262 up to ~year 2554 wrapped
+into the negative half of the signed domain. The clamp therefore
+converted a legitimate legacy bit pattern — or a tampered value — into
+the plausible date 1970-01-01, silently erasing the far-future signal.
+Fix: `time_from_nanos` reconstructs the stored bits as an UNSIGNED
+nanosecond count, the exact inverse of the legacy write, preserving
+every historical value the old writer could produce below 2^64
+nanoseconds. The value is neither rejected (a supported writer produced
+it — a value safely rejected on new writes is not necessarily corrupt in
+an older database) nor clamped.
+- `phase645_tests::stored_timestamps_follow_the_documented_compatibility_policy`
+  (negative, zero, ordinary and `i64::MAX` values, tampered directly
+  into every timestamp column, proven across `get_run`, `list_runs`,
+  `load_run_snapshot`, `history_for_path` and `relationship_history`)
+- `phase645_tests::negative_stored_timestamps_are_reconstructed_not_clamped_or_rejected`
+- `phase645_tests::legacy_wrapped_timestamps_survive_the_real_migration_path`
+  (a genuine v2 database written with the legacy expression, opened
+  through the real v2 → v6 chain)
+- `phase645_tests::non_integer_stored_timestamps_fail_closed` (a value
+  no writer can produce errors instead of returning a plausible date)
+
+**D4. The legacy relationship-row contract was unproven (Workstream C).**
+The relationship tables predate v4 while the metadata columns arrived
+with v4, so a legacy database can carry `relationship_obs` /
+`relationship_members` rows with both metadata columns NULL — and
+`(NULL, NULL)` was documented only as "no report was recorded", which
+reads as if it also meant "no rows existed". Fix: a genuine pre-v4
+fixture (a real v2 database carrying relationship rows) is now opened
+through the repository's actual migration chain to v6 and proves the
+rows are retained, both metadata columns stay NULL,
+`load_run_snapshot` manufactures no report, and the retained facts stay
+queryable through `relationship_history`. Documentation (code, DATABASE.md,
+API_CONTRACTS.md) now states that `(NULL, NULL)` means no status/
+truncation metadata was recorded — not that no relationship rows ever
+existed. No schema change was needed and none was made.
+- `phase645_tests::legacy_relationship_rows_survive_the_migration_without_fabricated_completeness`
+- `phase645_tests::metadata_nullability_checks_remain_intact_after_the_migration`
+  (both mixed-nullability combinations still rejected after the real
+  v2 → v6 migration)
+- `phase645_tests::legacy_negative_counter_round_trips_after_the_migration`
+  (the Phase 6.4.3 faithful-round-trip policy for a negative
+  `rel_truncated`, proven through the real migration path)
+
+### Local verification (all executed, results checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (0 warnings) |
+| `cargo test --workspace` | **889 passed, 0 failed** |
+| `cargo test --workspace --all-features` | 0 failed |
+| `cargo test --workspace -- --ignored` | 0 failed (all established performance suites, including the Phase 6.4 persistence suite) |
+| `git diff --check` | clean |
+
+Baseline was 879 tests, so this phase adds 10 (`phase645_tests.rs`) and
+updates six existing timestamp tests to the stricter error contract —
+every update keeps its state-preservation assertions and adds run-id /
+nanosecond assertions. No assertion was weakened and no failing test was
+skipped or deleted.
+
+### Second adversarial audit (Workstream D, 19 claims)
+
+Every claim was checked against code, tests, or `git diff` — several
+with a purpose-built probe:
+
+| # | Claim | Evidence |
+|---|---|---|
+| 1 | Invalid caller timestamps never use the corruption variant | D1; `checked_timestamp` is the only caller-timestamp conversion and maps to `InvalidTimestamp` |
+| 2 | Persisted malformed timestamps fail closed | `non_integer_stored_timestamps_fail_closed`; a non-integer cannot be produced by any writer and errors rather than converting |
+| 3 | Every timestamp read path follows the documented policy | `time_from_nanos` is the single decode used by `map_run_row`, `map_obs_row`, `map_history_point` and `relationship_history`; the matrix test covers all of them |
+| 4 | Timestamp failures preserve state and precede writes | D1/D2 tests (db-dump comparisons, run stays RUNNING); `now_nanos()?` placed before each execute |
+| 5 | Error contexts name the real table/column and run | asserted per field in every new and updated test |
+| 6 | v3→v6 migration tests start from the real legacy schema | the fixture is a genuine v2 database (pre-v4, exercising MORE of the real chain), never an already-v6 fixture |
+| 7 | NULL metadata never manufactures report completeness | `legacy_relationship_rows_survive_the_migration_without_fabricated_completeness` asserts `relationships.is_none()` |
+| 8 | Both mixed-nullability combinations remain rejected | phase644 tests plus the migration-path variant |
+| 9 | Negative legacy counters round-trip faithfully | phase644 test plus the migration-path variant |
+| 10 | Numeric preflight remains intact for counts, sizes, counters, timestamps | phase644 tests all pass unchanged in behaviour |
+| 11 | Full-width identities still round-trip | `full_width_identity_is_not_range_checked` passes |
+| 12 | Query limits still validate before SQL with exact probing | phase643 tests pass; `QueryLimits` untouched |
+| 13 | Footprint evidence stays a set with the cap first | phase643_footprint_tests pass; footprint code untouched |
+| 14 | Retention still protects the newest baseline and extreme durations | phase642/643 retention tests pass; only the clock conversion propagates instead of panicking |
+| 15 | Historical migrations v2–v6 untouched | `git diff` shows no migration SQL and no `HISTORY_SCHEMA_VERSION` change |
+| 16 | `coresight-system-model` remains pure | zero diff; no new dependency |
+| 17 | No persisted fact manufactures authorization | no new claims/insights/candidates persisted |
+| 18 | No GUI, IPC, orchestration, subprocess, network or destructive execution | diff touches only `coresight-history` and docs |
+| 19 | Docs, tests and records match the implementation and CI | this record; CI table below |
+
+**Audit observations recorded, not changed (out of this phase's scope,
+narrow-phase discipline):**
+
+- The Phase 6.4.1 `app_snapshot_*` write path reports out-of-range
+  numerics as `StoreError::Corrupt` (`checked_u64_i64`,
+  `checked_counter_i64`, `checked_ord_i64` in `snapshot.rs`). That is
+  caller input classified as corruption — the same class of contract gap
+  D1 fixes for timestamps — but it is NUMERIC, pre-dates this phase, and
+  Workstream A.6 directs that oversized counts/sizes keep their existing
+  policy. Recorded as a known limitation for a future contract phase;
+  changing it here would be unrelated refactoring.
+- A non-integer stored in a timestamp column surfaces as an untyped
+  `StoreError::Sqlite` conversion failure. It is NOT silently converted
+  into a plausible date, so the "typed Corrupt" requirement (which is
+  conditioned on silent conversion) does not apply; the fail-closed
+  behaviour is proven by test.
+
+### Phase 6.4.5 limitations (honest)
+
+- **A negative persisted timestamp is AMBIGUOUS and NOT detected.** A
+  legacy wrapped far-future time and a tampered value are
+  indistinguishable in the stored format. The store reconstructs the
+  round-tripped value — the only reading that preserves every historical
+  value the old writer could produce — and does not claim to tell them
+  apart.
+- **The reconstruction is lossy beyond ~year 2554.** The legacy
+  truncation discarded the bits above 64, so an original at or past
+  ~year 2554 reads back as epoch + (low 64 bits), roughly 584 years
+  early; an original whose wrapped bits are non-negative is
+  indistinguishable from an ordinary timestamp. No read policy can
+  repair that.
+- **Windows `SystemTime` granularity.** A Windows `SystemTime` is
+  100-nanosecond FILETIME-based, so a sub-100ns remainder truncates on
+  every conversion — the same granularity every timestamp read on that
+  platform has always had, positive values included. Empirically
+  observed while building the compatibility tests (a `-1` timestamp
+  decoded 15 ns short of `u64::MAX`).
+- **Retention's age rule treats a non-positive stored timestamp as
+  epoch 0** (unchanged, Phase 6.4.2 rule). For a legacy wrapped
+  far-future run this can only OVERSTATE the run's age, never fabricate
+  freshness, and the always-keep floor still protects the newest
+  committed baselines.
+- The store-clock error path (`InvalidTimestamp` from `now_nanos`) is
+  not unit-testable — it requires a defective platform clock — and is
+  documented rather than faked.
+- All Phase 6.4/6.4.1/6.4.2/6.4.3/6.4.4 limitations remain in force.
 
 `PHASE 6.5 — NOT STARTED.`
 

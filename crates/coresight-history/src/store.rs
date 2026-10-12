@@ -123,6 +123,31 @@ pub enum StoreError {
         column: &'static str,
         value: u64,
     },
+    /// A timestamp lies outside the store's signed 64-bit nanosecond
+    /// storage domain. This is CALLER INPUT, not persisted corruption —
+    /// the same distinction [`StoreError::InvalidRunCount`] draws: a value
+    /// the caller handed us is never evidence of database damage, and
+    /// mislabeling it as a corrupt store would send callers hunting for
+    /// damage that does not exist.
+    ///
+    /// `nanos` is the rejected time expressed as nanoseconds after the
+    /// Unix epoch (a `u128`, because `Duration::as_nanos()` is wider than
+    /// `i64`), so the rejection is diagnosable without re-deriving which
+    /// value failed. `run_id` names the run the value belonged to where
+    /// one is known.
+    ///
+    /// Checked in the numeric PREFLIGHT (Phase 6.4.4, Workstream A;
+    /// completed for timestamps in Phase 6.4.5), before any transaction
+    /// opens, so a rejected value cannot partially mutate existing data.
+    /// The one caller-less use is the store's own clock reading, whose
+    /// failure would be a platform defect rather than caller data — it is
+    /// surfaced as this typed error instead of a panic.
+    InvalidTimestamp {
+        table: &'static str,
+        column: &'static str,
+        run_id: Option<String>,
+        nanos: u128,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -179,6 +204,26 @@ impl std::fmt::Display for StoreError {
                 "{table}.{column}: caller value {value} exceeds the store's signed 64-bit \
                  INTEGER domain; this is invalid input, not a corrupt store"
             ),
+            StoreError::InvalidTimestamp {
+                table,
+                column,
+                run_id,
+                nanos,
+            } => match run_id {
+                Some(id) => write!(
+                    f,
+                    "{table}.{column} (run {id}): caller timestamp {nanos} ns after the Unix \
+                     epoch exceeds the store's signed 64-bit nanosecond domain (~year 2262 and \
+                     later are unrepresentable); this is invalid input, not a corrupt store"
+                ),
+                None => write!(
+                    f,
+                    "{table}.{column}: timestamp {nanos} ns after the Unix epoch exceeds the \
+                     store's signed 64-bit nanosecond domain (~year 2262 and later are \
+                     unrepresentable); this is an unrepresentable value, not a corrupt store — \
+                     refused rather than wrapped or clamped"
+                ),
+            },
         }
     }
 }
@@ -651,10 +696,11 @@ impl HistoryStore {
             .map(RunId)
             .collect();
         drop(stmt);
+        let now = now_nanos()?;
         self.conn.execute(
             "UPDATE scan_runs SET status = 'FAILED', completed_at = COALESCE(completed_at, ?1)
              WHERE status = 'RUNNING'",
-            params![now_nanos()],
+            params![now],
         )?;
         Ok(ids)
     }
@@ -665,7 +711,8 @@ impl HistoryStore {
         // Checked timestamp BEFORE the transaction opens (Phase 6.4.4,
         // Workstream A): a caller-supplied time outside the representable
         // domain rejects the run without even beginning an INSERT.
-        let started_at = checked_run_timestamp(record.started_at, "started_at")?;
+        let started_at =
+            checked_run_timestamp(record.started_at, "started_at", Some(&record.run_id.0))?;
         let conn = &mut self.conn;
         let tx = conn.transaction()?;
         tx.execute(
@@ -741,13 +788,14 @@ impl HistoryStore {
         let completed_at = checked_run_timestamp(
             record.completed_at.unwrap_or(record.started_at),
             "completed_at",
+            Some(&record.run_id.0),
         )?;
         // Every observation's modification time (owned by `observations`).
         let entry_timestamps: Vec<Option<i64>> = snapshot
             .entries
             .iter()
             .map(|e| match e.modified {
-                Some(t) => checked_observation_timestamp(t).map(Some),
+                Some(t) => checked_observation_timestamp(t, Some(&record.run_id.0)).map(Some),
                 None => Ok(None),
             })
             .collect::<Result<_, _>>()?;
@@ -894,10 +942,11 @@ impl HistoryStore {
         if status == RunStatus::Running {
             return Err(StoreError::AlreadyCommitted(run_id.clone()));
         }
+        let completed_at = now_nanos()?;
         let updated = self.conn.execute(
             "UPDATE scan_runs SET status = ?2, completed_at = ?3
              WHERE run_id = ?1 AND status = 'RUNNING'",
-            params![run_id.0, serde_status(status), now_nanos()],
+            params![run_id.0, serde_status(status), completed_at],
         )?;
         if updated == 0 {
             return Err(StoreError::UnknownRun(run_id.clone()));
@@ -1050,10 +1099,14 @@ impl HistoryStore {
             detail,
         })?;
         // A run with NO persisted relationship status either never ran
-        // the relationship layer, or was written before v4. Absence is
+        // the relationship layer, or was written before v4 (when the
+        // metadata columns did not exist — see
+        // [`HistoryStore::rel_status_for_run`]). Absence is
         // not `Completed`: the report is only attached when the store
         // actually recorded one, so comparisons cannot fabricate
-        // relationship completeness.
+        // relationship completeness. The relationship ROWS themselves are
+        // unaffected — they predate v4 and are migrated and retained
+        // verbatim; they stay queryable through `relationship_history`.
         let relationships = rel_status.status.map(|_| relationships);
         Ok(Some(RunSnapshot {
             run,
@@ -1097,6 +1150,20 @@ impl HistoryStore {
     /// the distinction between "no report was recorded" and "a report was
     /// recorded with zero truncations", which the pair of NULLs vs a present
     /// `0` encodes exactly.
+    ///
+    /// ## What (NULL, NULL) does and does NOT mean (Phase 6.4.5, Workstream C)
+    ///
+    /// `(NULL, NULL)` means only that no relationship-report status or
+    /// truncation METADATA was recorded for this run — either the run
+    /// predates the v4 metadata columns, or it never ran the relationship
+    /// layer. It does NOT prove that no relationship rows ever existed: the
+    /// `relationship_obs` / `relationship_members` tables predate v4, so a
+    /// pre-v4 database can carry relationship rows while both metadata
+    /// columns are NULL. Those rows are migrated and retained verbatim, and
+    /// the reader neither discards them nor manufactures a completeness
+    /// claim for them: `load_run_snapshot` attaches no report when no
+    /// status was recorded, and the retained facts stay queryable through
+    /// `relationship_history`.
     fn rel_status_for_run(&self, run_id: &RunId) -> Result<RelStatusRow, StoreError> {
         let row = self
             .conn
@@ -1306,7 +1373,7 @@ impl HistoryStore {
             .collect();
         drop(stmt);
 
-        let now = now_nanos();
+        let now = now_nanos()?;
         let mut keep = 0usize;
         let mut removed = Vec::new();
         for (run_id, started, status) in &rows {
@@ -2206,38 +2273,47 @@ use coresight_identity::StorageAccounting;
 ///
 /// `Duration::as_nanos()` returns a `u128` wider than `i64`, so an
 /// unchecked cast wraps any timestamp past ~2262 CE into a NEGATIVE
-/// number. The reader (`time_from_nanos`) clamps negatives to the epoch,
-/// so the original time would be silently corrupted rather than
-/// rejected — hence the checked conversion.
+/// number — which the reader would then have to interpret (see
+/// [`time_from_nanos`]). The checked conversion REJECTS such a time
+/// instead, so no new write can ever store a wrapped value.
+///
+/// ## Caller input, not persisted corruption (Phase 6.4.5)
+///
+/// An unrepresentable time is reported as [`StoreError::InvalidTimestamp`]
+/// — the caller-input half of the error contract Phase 6.4.4 established
+/// for counts and sizes. `run_id` carries the run the value belonged to
+/// wherever one is known.
 ///
 /// A time BEFORE the epoch is stored as 0 rather than a negative, which
-/// the reader clamps to the epoch anyway. That is a documented,
-/// lossless-enough convention for pre-epoch clocks.
+/// is the documented, lossless-enough convention for pre-epoch clocks —
+/// preserved from every writer generation (v2 onward).
 fn checked_timestamp(
     t: SystemTime,
     table: &'static str,
     column: &'static str,
+    run_id: Option<&str>,
 ) -> Result<i64, StoreError> {
     let duration = t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    i64::try_from(duration.as_nanos()).map_err(|_| StoreError::Corrupt {
+    i64::try_from(duration.as_nanos()).map_err(|_| StoreError::InvalidTimestamp {
         table,
         column,
-        run_id: None,
-        detail: format!(
-            "{column} timestamp {t:?} lies outside the store's signed 64-bit \
-             nanosecond domain (year ~2262 and later are unrepresentable)"
-        ),
+        run_id: run_id.map(|r| r.to_string()),
+        nanos: duration.as_nanos(),
     })
 }
 
 /// The run-level timestamps (`scan_runs`).
-fn checked_run_timestamp(t: SystemTime, column: &'static str) -> Result<i64, StoreError> {
-    checked_timestamp(t, "scan_runs", column)
+fn checked_run_timestamp(
+    t: SystemTime,
+    column: &'static str,
+    run_id: Option<&str>,
+) -> Result<i64, StoreError> {
+    checked_timestamp(t, "scan_runs", column, run_id)
 }
 
 /// An observation's modification timestamp (`observations.modified`).
-fn checked_observation_timestamp(t: SystemTime) -> Result<i64, StoreError> {
-    checked_timestamp(t, "observations", "modified")
+fn checked_observation_timestamp(t: SystemTime, run_id: Option<&str>) -> Result<i64, StoreError> {
+    checked_timestamp(t, "observations", "modified", run_id)
 }
 
 /// Convert a public `SystemTime` to the store's signed nanosecond domain.
@@ -2245,28 +2321,64 @@ fn checked_observation_timestamp(t: SystemTime) -> Result<i64, StoreError> {
 /// `SystemTime::now()` is always within the representable nanosecond
 /// domain on any real platform (year 2262 is far in the future), so this
 /// cannot fail in practice; a failure would be a platform defect rather
-/// than caller data.
-fn time_nanos(t: SystemTime) -> Result<i64, StoreError> {
-    checked_run_timestamp(t, "started_at")
+/// than caller data. Both callers write it to `scan_runs.completed_at`,
+/// and a failure is surfaced as the typed
+/// [`StoreError::InvalidTimestamp`] rather than a panic, so even a
+/// defective clock can never crash a caller mid-operation.
+fn now_nanos() -> Result<i64, StoreError> {
+    checked_run_timestamp(SystemTime::now(), "completed_at", None)
 }
 
+/// Decode a persisted nanosecond timestamp (Phase 6.4.5, Workstream B).
+///
+/// ## The compatibility policy
+///
+/// Every writer generation this store has shipped — the Phase 5 v2
+/// writer through the pre-6.4.2 `time_nanos` — encoded a time as
+/// "nanoseconds since the Unix epoch, narrowed to `i64`", and every one
+/// of them mapped a PRE-EPOCH time to `0` (the documented pre-epoch
+/// convention). A NON-NEGATIVE value (`0` … `i64::MAX`) is therefore the
+/// exact time for every writer and round-trips unchanged; `0` is the
+/// honest pre-epoch convention, not a corrupted value.
+///
+/// A NEGATIVE value is a legitimate legacy bit pattern, not corruption:
+/// the pre-6.4.2 writer narrowed `Duration::as_nanos()` (a `u128`) with
+/// an unchecked `as i64`, so any caller time from ~year 2262 up to
+/// ~year 2554 wrapped into the negative half of the signed domain. The
+/// faithful reading is the exact inverse of that legacy write — the
+/// stored bits reinterpreted as an unsigned nanosecond count — which
+/// reconstructs the original time for every value the old writer could
+/// produce below 2^64 nanoseconds.
+///
+/// ## A documented limitation, not a claimed capability
+///
+/// A negative stored value is AMBIGUOUS by construction: "a legacy
+/// wrapped far-future time" and "a tampered value that never came from
+/// any writer" are indistinguishable in the stored format. This code
+/// deliberately does not pretend to tell them apart; it applies the one
+/// reading that preserves every historical value the old writer could
+/// produce. The reconstruction is exact for originals below 2^64
+/// nanoseconds (~year 2554) and lossy beyond — the truncation discards
+/// the bits above 64, so an original at or past ~year 2554 reads back as
+/// epoch + (low 64 bits), roughly 584 years early. The previous
+/// clamp-to-epoch, by contrast, silently presented EVERY such value as
+/// the plausible date 1970-01-01.
+///
+/// The reconstruction honours the platform's own `SystemTime` granularity:
+/// a Windows `SystemTime` is 100-nanosecond FILETIME-based, so a
+/// sub-100ns remainder truncates on every conversion — the same
+/// granularity every timestamp read on that platform has always had,
+/// positive values included. New writes can never create a negative
+/// value: [`checked_timestamp`] rejects an unrepresentable time before
+/// any mutation.
 fn time_from_nanos(n: i64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_nanos(n.max(0) as u64)
+    UNIX_EPOCH + Duration::from_nanos(n as u64)
 }
 
 fn time_from_nanos_opt(n: Option<i64>) -> Option<SystemTime> {
     n.map(time_from_nanos)
 }
 
-/// The store's clock reading. `SystemTime::now()` is always within the
-/// representable nanosecond domain on any real platform (year 2262 is far
-/// in the future), so the checked conversion cannot fail in practice; the
-/// `expect` documents that a failure would be a platform defect rather
-/// than caller data, so no caller-supplied value is ever silently clamped.
-fn now_nanos() -> i64 {
-    time_nanos(SystemTime::now())
-        .expect("SystemTime::now() must lie within the store's nanosecond domain")
-}
 /// Reinterpret a stored signed `INTEGER` counter as its unsigned domain
 /// value.
 ///

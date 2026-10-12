@@ -304,7 +304,9 @@ fn an_unrepresentable_observation_size_is_caller_input() {
 }
 
 /// The observation `modified` timestamp must be rejected with the OWNING
-/// table named (`observations.modified`), not `scan_runs`.
+/// table named (`observations.modified`), not `scan_runs`. Phase 6.4.5
+/// completes the contract: the error is typed CALLER INPUT
+/// (`InvalidTimestamp`), not persisted corruption.
 #[test]
 fn an_observation_timestamp_error_names_its_owning_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -320,11 +322,21 @@ fn an_observation_timestamp_error_names_its_owning_table() {
         .commit_run(&record, &snap, None)
         .expect_err("an unrepresentable observation timestamp must be rejected");
     match &err {
-        StoreError::Corrupt { table, column, .. } => {
+        StoreError::InvalidTimestamp {
+            table,
+            column,
+            run_id,
+            nanos,
+        } => {
             assert_eq!(*table, "observations");
             assert_eq!(*column, "modified");
+            assert_eq!(run_id.as_deref(), Some("obs-ts-run"));
+            assert_eq!(
+                *nanos,
+                far_future().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            );
         }
-        other => panic!("expected typed corruption, got {other:?}"),
+        other => panic!("expected InvalidTimestamp for caller input, got {other:?}"),
     }
     assert!(store
         .load_run_snapshot(&record.run_id)
@@ -336,7 +348,9 @@ fn an_observation_timestamp_error_names_its_owning_table() {
 }
 
 /// `begin_run` validates `started_at` BEFORE opening its transaction:
-/// no row is created and no partial state exists.
+/// no row is created and no partial state exists. The rejection is typed
+/// caller input (`InvalidTimestamp`), not persisted corruption (Phase
+/// 6.4.5).
 #[test]
 fn begin_run_validates_started_at_before_its_transaction() {
     let dir = tempfile::tempdir().unwrap();
@@ -348,11 +362,17 @@ fn begin_run_validates_started_at_before_its_transaction() {
         .begin_run(&record)
         .expect_err("an unrepresentable started_at must be rejected");
     match &err {
-        StoreError::Corrupt { table, column, .. } => {
+        StoreError::InvalidTimestamp {
+            table,
+            column,
+            run_id,
+            ..
+        } => {
             assert_eq!(*table, "scan_runs");
             assert_eq!(*column, "started_at");
+            assert_eq!(run_id.as_deref(), Some("begin-run"));
         }
-        other => panic!("expected typed corruption, got {other:?}"),
+        other => panic!("expected InvalidTimestamp for caller input, got {other:?}"),
     }
     // No row at all.
     assert!(store.get_run(&record.run_id).unwrap().is_none());

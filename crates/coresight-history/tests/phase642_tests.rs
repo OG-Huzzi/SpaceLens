@@ -750,6 +750,9 @@ fn retention_max_runs_prunes_beyond_the_protected_baseline() {
 /// A timestamp beyond the store's nanosecond domain is rejected, not
 /// silently wrapped into a plausible past date (Phase 6.4.2, Workstream C:
 /// `Duration::as_nanos()` is `u128`, wider than `i64`).
+///
+/// Phase 6.4.5 completes the error contract: the rejection is typed as
+/// CALLER INPUT (`InvalidTimestamp`), not as persisted corruption.
 #[test]
 fn an_unrepresentable_timestamp_is_rejected_not_wrapped() {
     let dir = tempfile::tempdir().unwrap();
@@ -765,8 +768,21 @@ fn an_unrepresentable_timestamp_is_rejected_not_wrapped() {
         .begin_run(&record)
         .expect_err("an unrepresentable timestamp must be rejected");
     match err {
-        StoreError::Corrupt { column, .. } => assert_eq!(column, "started_at"),
-        other => panic!("expected typed corruption, got {other:?}"),
+        StoreError::InvalidTimestamp {
+            table,
+            column,
+            run_id,
+            nanos,
+        } => {
+            assert_eq!(table, "scan_runs");
+            assert_eq!(column, "started_at");
+            assert_eq!(run_id.as_deref(), Some("timestamp-run"));
+            assert_eq!(
+                nanos,
+                far_future.duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            );
+        }
+        other => panic!("expected InvalidTimestamp for caller input, got {other:?}"),
     }
     // No row was written, so a prior snapshot for the same run cannot be
     // damaged by a later failed commit.
@@ -787,18 +803,30 @@ fn an_unrepresentable_completed_at_preserves_the_run_row() {
     assert_eq!(before.status, RunStatus::Running);
 
     let mut terminal = record.clone();
-    terminal.completed_at = Some(UNIX_EPOCH + Duration::from_secs(32503680000));
+    let far_future = UNIX_EPOCH + Duration::from_secs(32503680000);
+    terminal.completed_at = Some(far_future);
     let snapshot = SnapshotBuilder::new().build(record.run_id.clone()).unwrap();
     let err = store
         .commit_run(&terminal, &snapshot, None)
         .expect_err("an unrepresentable completed_at must be rejected");
-    // The error must name the ACTUAL field, not a generic timestamp.
+    // The error must name the ACTUAL field, not a generic timestamp, and it
+    // is typed CALLER INPUT — not persisted corruption (Phase 6.4.5).
     match err {
-        StoreError::Corrupt { column, detail, .. } => {
+        StoreError::InvalidTimestamp {
+            table,
+            column,
+            run_id,
+            nanos,
+        } => {
+            assert_eq!(table, "scan_runs");
             assert_eq!(column, "completed_at");
-            assert!(detail.contains("completed_at"), "{detail}");
+            assert_eq!(run_id.as_deref(), Some("preserve2-run"));
+            assert_eq!(
+                nanos,
+                far_future.duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            );
         }
-        other => panic!("expected typed corruption, got {other:?}"),
+        other => panic!("expected InvalidTimestamp for caller input, got {other:?}"),
     }
     let after = store.get_run(&record.run_id).unwrap().unwrap();
     assert_eq!(after.status, RunStatus::Running, "the run row must survive");

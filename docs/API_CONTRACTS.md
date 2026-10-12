@@ -265,6 +265,47 @@ Phase 6.4.4 additions:
   never causes a missing count to be inferred as zero, so "no report
   recorded" and "recorded with zero truncations" stay distinct.
 
+Phase 6.4.5 additions:
+
+- **Timestamps complete the caller-input error contract.** An
+  unrepresentable caller timestamp (started_at / completed_at /
+  observations.modified, and the store's own clock) is rejected BEFORE
+  the write transaction opens with the typed
+  StoreError.InvalidTimestamp { table, column, run_id, nanos } — the
+  caller-input half of the contract, carrying the owning table/column,
+  the run where known, and the offending nanosecond count. Invalid
+  caller timestamps never use the persisted-corruption variant, and the
+  rejection leaves existing committed state byte-for-byte unchanged. The
+  pre-epoch convention (stored as 0) is preserved; future values that
+  cannot fit the signed nanosecond domain are refused, never wrapped,
+  clamped, or panicked over — the store clock now propagates a typed
+  error instead of panicking on a defective platform clock.
+- **Persisted timestamps decode by one documented compatibility
+  policy.** Non-negative stored values round-trip exactly (0 is the
+  pre-epoch convention; i64::MAX is the last representable nanosecond,
+  ~2262 CE). A NEGATIVE value is a legitimate legacy bit pattern — the
+  pre-6.4.2 writer's unchecked u128-as-i64 wrap of a far-future time —
+  and is reconstructed as the stored bits read unsigned, exactly
+  recovering the original for any time below ~year 2554. It is neither
+  rejected (a supported writer produced it) nor clamped to the epoch
+  (which silently presented it as the plausible date 1970-01-01). A
+  negative is ambiguous by construction — legacy-wrapped and tampered
+  values are indistinguishable — and that limitation is documented, not
+  claimed as detection. The policy is proven by direct SQL tampering
+  across get_run, list_runs, load_run_snapshot, history_for_path and
+  relationship_history, and by a genuine v2 fixture migrated through the
+  real v2 → v6 chain.
+- **Legacy relationship rows survive the migration without fabricated
+  completeness.** The relationship tables predate v4; the metadata
+  columns arrived with v4. A genuine pre-v4 database carrying
+  relationship_obs / relationship_members rows migrates through the real
+  chain to v6 with the rows retained, both metadata columns still NULL,
+  and no report manufactured by load_run_snapshot. The retained facts
+  stay queryable through relationship_history. (NULL, NULL) means no
+  status/truncation metadata was recorded — not that no relationship
+  rows ever existed. Schema v6 remains unchanged; no migration was
+  added.
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).
