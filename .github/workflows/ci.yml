@@ -57,7 +57,7 @@ jobs:
         run: cargo test -j 2 -p coresight-identity -- --ignored --nocapture --skip huge_file_streams_beyond_4gib
 
       - name: Phase 5 perf smoke (history comparison scaling; O(n+m) guard)
-        run: cargo test -j 2 -p coresight-history -- --ignored --nocapture
+        run: cargo test -j 2 -p coresight-history -- --ignored --nocapture --test-threads=1
 
       - name: Phase 3 >4 GiB streaming proof (release mode, real-speed SHA-256 over 10 GiB virtual content)
         run: cargo test -j 2 -p coresight-identity --release --test perf_tests huge_file_streams_beyond_4gib -- --ignored --nocapture
