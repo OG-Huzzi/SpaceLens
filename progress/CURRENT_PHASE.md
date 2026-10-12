@@ -836,6 +836,24 @@ narrow-phase discipline):**
   conditioned on silent conversion) does not apply; the fail-closed
   behaviour is proven by test.
 
+### CI verification (exact SHA)
+
+Both commits of this phase were verified on their own SHAs — never
+merely on the branch:
+
+| Commit | Meaning | CI run | Result |
+|---|---|---|---|
+| `359949e7e0b079e9e5796f03af4bf398597a6e0b` | Phase 6.4.5 implementation | [38248576606](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38248576606) | all 4 jobs success |
+| `8976ef64a2ecffc393432ff9da7854f389c8c5e5` | verification record | [38249741039](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38249741039) | all 4 jobs success |
+
+Both runs reported `frontend`, `rust (ubuntu-latest)`,
+`rust (windows-latest)`, and `rust (macos-latest)` as **success** on
+attempt 1, with the run's `head_sha` confirmed equal to the commit SHA
+(queried through the GitHub Actions API). No runner-infrastructure
+failure occurred, so no retry was needed and no source change was ever
+made to work around a failure. The worktree is clean and `main` is in
+sync with `origin/main`.
+
 ### Phase 6.4.5 limitations (honest)
 
 - **A negative persisted timestamp is AMBIGUOUS and NOT detected.** A
