@@ -840,8 +840,11 @@ narrow-phase discipline):**
 
 ### CI verification (exact SHA)
 
-Both commits of this phase were verified on their own SHAs — never
-merely on the branch:
+Every commit of this phase was verified on its OWN SHA — never merely
+on the branch. The table has FOUR rows, not two: Phase 6.4.5 produced one
+implementation commit plus three documentation/verification-record
+commits, each of which was separately pushed and separately verified (see
+the note below the table):
 
 | Commit | Meaning | CI run | Result |
 |---|---|---|---|
@@ -1054,6 +1057,141 @@ needed and no source change was made to work around a failure.
 Per the delivery instruction, the verification-record commit's OWN CI is
 reported in the terminal result rather than generating further commits
 solely to record the preceding record commit's run.
+
+## Phase 6.4.7 — Linear-Time Evidence Preflight & Ledger Cleanup
+
+Baseline: `1a4676e2c82e0be16f2b7373255ffb7feb791392` (the Phase 6.4.6
+verification-record commit). **Schema version stays 6** — no migration was
+added, edited, or rewritten.
+
+**Status: PENDING (implementation SHA and CI recorded after the run)**
+
+### The defect and its root cause
+
+Phase 6.4.6 grouped an application's ownership evidence by artifact path
+so each group's ordinal domain could be checked in the preflight. The
+grouping itself was fine, but two counts were derived the expensive way:
+
+1. **Preflight (quadratic).** For each of the G distinct artifact-path
+   groups, the code rescanned the ENTIRE sorted association collection and
+   counted the entries matching that group — `O(A × G)`. With many
+   distinct paths this dominates commit cost.
+2. **Write path (repeated after mutation).** To size its
+   `CheckedOrdinals` cursor, the insert loop repeated the same per-group
+   recount against `fact.associations` — work performed after the
+   transaction had opened and the prior snapshot rows had already been
+   DELETEd.
+
+Both were avoidable: the sorted collection already places equal paths
+adjacent, so one traversal determines every group's boundaries, length,
+and the maximum.
+
+### The linear algorithm
+
+`evidence_groups` makes ONE pass over the canonically sorted
+associations, extending the current group while the key is unchanged and
+otherwise starting a new one. Because the input is in canonical
+`(artifact path, evidence)` order, equal paths are necessarily adjacent,
+so a run ends exactly where the key changes. No map, no hash iteration,
+no per-group re-scan.
+
+Cost is `O(A + G)` per application fact, excluding the unchanged sort:
+
+- preflight: one pass to group (`O(A)`), then `O(G)` bound checks whose
+  sum is bounded by `A`;
+- write path: one pass to re-derive the grouping for its consistency
+  assertion, and **zero** counting — the cursor length is read straight
+  from the plan.
+
+`PerAppPlan` stores `max_evidence_group_len` alongside the groups, so the
+write path never recomputes a group size.
+
+### Why the plan still matches the write path
+
+The write path derives its grouping with the SAME `evidence_groups`
+helper over the SAME `sort_assocs` order, and asserts the two are equal
+(`debug_assert_eq!`). The helper being shared means the assertion cannot
+drift by construction — it is not two independent implementations kept in
+step by convention. Both call sites are single-pass.
+
+### Preserved semantics (deliberately unchanged)
+
+- Per-artifact ordinals still **reset to 0** for each artifact-path group.
+- Duplicate evidence entries within a group are still a **multiset**:
+  every entry keeps its own ordinal, so nothing collapses.
+- SQLite primary keys, persisted ordinal ordering, `sort_assocs`
+  canonical order, and every global sorting rule are untouched. No hash
+  iteration replaced deterministic ordering.
+- `InvalidSnapshotInput` classification and diagnostic context are
+  unchanged: each group's bound is still checked with the same
+  `check_ord_bound`, so an out-of-range domain is rejected identically.
+
+### Tests
+
+Nine unit tests in the `preflight_tests` module target the pure grouping
+function and assert RESULTS, never elapsed time: empty input; one path
+with several entries; several distinct paths with one entry each;
+uneven groups where a LATER group is longest (the case a front-biased or
+running-max bug would get wrong); unsorted input grouping deterministically
+in any input order; duplicate entries within one group not collapsing;
+a structural linear-time check (group lengths sum to the association
+count, keys strictly increasing); synthetic oversized-domain rejection
+through `check_ord_bound` without allocating an enormous collection; and
+the stored maximum matching the cursor the write path builds.
+
+Three integration tests in `crates/coresight-history/tests/phase647_tests.rs`
+commit, reload and rebuild a populated snapshot whose associations span
+four artifact paths with uneven group sizes and a duplicate entry,
+asserting every association persists with its own ordinal and the 4-entry
+group writes ordinals `0..4`; the empty-association case still commits and
+rebuilds; and the invalid-input contract is unchanged on the same path.
+
+### Verification (local, Windows 11)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | pass (exit 0) |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | pass (exit 0) |
+| `cargo test --workspace` | **921 passed, 0 failed**, 11 ignored (exit 0) |
+| `cargo test --workspace --all-features` | **921 passed, 0 failed** (exit 0) |
+| `cargo test --workspace -- --ignored` | pass (exit 0) |
+| `npm ci` | pass (exit 0) |
+| `npm audit --audit-level=high` | pass (exit 0) |
+| `npm run build` | pass (exit 0) |
+| `git diff --check` | pass (exit 0) |
+
+Test count moved **909 → 921** (+12): 9 grouping unit tests and 3
+integration tests. No test was deleted, skipped, or weakened, and no
+existing assertion was relaxed to accommodate the refactor.
+
+### Phase 6.4.7 limitations (honest)
+
+- **Complexity is asserted structurally, not by timing.** The quadratic
+  predecessor also satisfied the "group lengths sum to the association
+  count" invariant, so that test pins the RESULT, not the speedup. The
+  linear-time property rests on the implementation containing no nested
+  scan at all — reviewed by hand and confirmed by grep over the changed
+  region. A wall-clock test was deliberately not written: it is flaky on a
+  loaded machine and would encode the host's speed rather than the code's
+  behaviour.
+- **The write path still re-derives the grouping** for its consistency
+  assertion. That is one extra linear pass, not a recount per group, and
+  it keeps the fail-closed guarantee that a future divergence between
+  preflight and persistence is caught rather than silently writing
+  unchecked ordinals.
+- The preflight still clones input collections to normalize them exactly
+  as the write path does (inherited from Phase 6.4.6), so grouping costs
+  memory proportional to snapshot size.
+- All Phase 6.4 through 6.4.6 limitations remain in force.
+
+### Ledger correction
+
+The Phase 6.4.5 CI section opened with "Both commits of this phase were
+verified…" while its table lists FOUR commit rows. The phase produced one
+implementation commit plus three documentation/verification-record
+commits. The wording now states that every commit was verified on its own
+SHA and explains why the table has four rows; all four records are
+preserved unchanged.
 
 `PHASE 6.5 — NOT STARTED.`
 

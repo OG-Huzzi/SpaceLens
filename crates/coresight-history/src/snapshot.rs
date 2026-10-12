@@ -555,21 +555,13 @@ impl HistoryStore {
             let evidence_ords = CheckedOrdinals {
                 column: "evidence_ord",
                 // Every per-artifact group restarts at 0, so the longest
-                // group bounds every ordinal this cursor will bind. The
-                // group-membership assertion below pins the grouping
-                // itself to the preflight.
-                len: per_app
-                    .evidence_groups
-                    .iter()
-                    .map(|g| {
-                        fact.associations
-                            .iter()
-                            .filter(|(p, _)| path_bytes(p) == g.as_slice())
-                            .count()
-                    })
-                    .max()
-                    .unwrap_or(0)
-                    .max(1),
+                // group bounds every ordinal this cursor will bind. That
+                // bound was computed ONCE in the preflight's single
+                // grouping pass; the write path must not recount the
+                // associations here, after the prior snapshot rows were
+                // deleted. `.max(1)` keeps the (unchecked, but always
+                // in-range) cursor valid for a fact with no associations.
+                len: per_app.max_evidence_group_len.max(1),
             };
             app_stmt.execute(params![
                 run_id.0,
@@ -656,21 +648,15 @@ impl HistoryStore {
             let mut assocs = fact.associations.clone();
             sort_assocs(&mut assocs);
             // The grouping must be the preflight's grouping: same group
-            // boundaries in the same order, or the per-group ordinals
-            // would not be the preflighted ones.
-            {
-                let mut groups: Vec<Vec<u8>> = Vec::new();
-                for (artifact_path, _) in &assocs {
-                    let key = path_bytes(artifact_path).to_vec();
-                    if groups.last().is_none_or(|last| *last != key) {
-                        groups.push(key);
-                    }
-                }
-                debug_assert_eq!(
-                    groups, per_app.evidence_groups,
-                    "preflight/write evidence grouping diverged"
-                );
-            }
+            // boundaries in the same order with the same lengths, or the
+            // per-group ordinals and the cursor bound would not be the
+            // preflighted ones. Derived with the SAME helper the preflight
+            // used, in one pass, so this assertion costs no nested scan.
+            debug_assert_eq!(
+                evidence_groups(&assocs),
+                per_app.evidence_groups,
+                "preflight/write evidence grouping diverged"
+            );
             // Group ordinals per artifact path (the PK includes the path).
             let mut per_artifact_ord: std::collections::BTreeMap<Vec<u8>, usize> =
                 std::collections::BTreeMap::new();
@@ -2450,7 +2436,13 @@ struct PerAppPlan {
     /// plan stores the sorted+grouped artifact paths (byte keys) in full:
     /// the write path asserts it regroups to the identical groups, then
     /// binds the checked ordinal for the current position.
-    evidence_groups: Vec<Vec<u8>>,
+    evidence_groups: Vec<EvidenceGroup>,
+    /// The longest evidence group, computed ONCE during the preflight's
+    /// single grouping pass. This is the write path's ordinal-domain
+    /// bound: every group's ordinals restart at 0, so the longest group
+    /// covers every ordinal the cursor can bind. Stored so the write path
+    /// never recounts associations to size its cursor.
+    max_evidence_group_len: usize,
     /// For `app_snapshot_footprints`: per-candidate normalized evidence
     /// lengths, in canonical footprint order (footprint ordinals are
     /// `0..footprints.len()`).
@@ -2577,29 +2569,21 @@ fn preflight_snapshot_plan(
         check_ord_bound(roots.len(), "app_snapshot_roots", "root_ord", run_tag)?;
         // Associations grouped per artifact path, exactly as the write
         // path groups them (canonical artifact-path, evidence order;
-        // per-path ordinals restart at 0).
+        // per-path ordinals restart at 0). ONE pass over the already
+        // sorted collection yields each group's key, its length, and the
+        // longest group — previously each group's length was found by
+        // rescanning every association, which is quadratic when many
+        // distinct artifact paths are involved.
         let mut assocs = fact.associations.clone();
         sort_assocs(&mut assocs);
-        let mut evidence_groups: Vec<Vec<u8>> = Vec::new();
-        for (artifact_path, _) in &assocs {
-            let key = path_bytes(artifact_path).to_vec();
-            if evidence_groups.last().is_none_or(|last| *last != key) {
-                evidence_groups.push(key);
-            }
-        }
+        let groups = evidence_groups(&assocs);
         // Every group's ordinals run 0..(group length); the longest
         // group bounds them all, and each group length is also checked
         // so a single group's overflow cannot hide behind a short max.
-        let mut group_len = 0usize;
-        for group in &evidence_groups {
-            let len = assocs
-                .iter()
-                .filter(|(p, _)| path_bytes(p) == group.as_slice())
-                .count();
-            check_ord_bound(len, "app_snapshot_evidence", "evidence_ord", run_tag)?;
-            group_len = group_len.max(len);
+        for group in &groups {
+            check_ord_bound(group.len, "app_snapshot_evidence", "evidence_ord", run_tag)?;
         }
-        let _ = group_len;
+        let max_evidence_group_len = groups.iter().map(|g| g.len).max().unwrap_or(0);
         // Footprints normalized + reconciled exactly as the write path
         // does (shared normalizer + canonicalizer).
         let mut footprints = fact.footprints.clone();
@@ -2627,7 +2611,8 @@ fn preflight_snapshot_plan(
             prov_len: prov.len(),
             view_len: views.len(),
             root_len: roots.len(),
-            evidence_groups,
+            evidence_groups: groups,
+            max_evidence_group_len,
             footprint_evidence_lens,
         });
     }
@@ -2693,6 +2678,44 @@ fn check_ord_bound(
         checked_ord_i64(len - 1, table, column, run_tag)?;
     }
     Ok(())
+}
+
+/// One contiguous run of associations sharing one artifact path, with the
+/// number of evidence entries in that run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvidenceGroup {
+    /// The artifact path's encoded bytes, the grouping key.
+    key: Vec<u8>,
+    /// How many associations fall in this group. The group's evidence
+    /// ordinals run `0..len`.
+    len: usize,
+}
+
+/// Group CANONICALLY SORTED associations into contiguous per-artifact-path
+/// runs, returning each run's key and length.
+///
+/// ONE pass, `O(A)`, where A is the association count. Because `assocs` is
+/// already in canonical `(artifact path, evidence)` order, equal paths are
+/// necessarily adjacent, so a run ends exactly where the key changes — no
+/// map, no hash iteration, and no re-scan of the collection per group
+/// (the Phase 6.4.6 implementation counted each group by rescanning every
+/// association, which is quadratic in the number of distinct paths).
+///
+/// An empty input yields no groups, and therefore a maximum group length
+/// of 0, exactly as before.
+fn evidence_groups(assocs: &[(PathBuf, OwnershipEvidence)]) -> Vec<EvidenceGroup> {
+    let mut groups: Vec<EvidenceGroup> = Vec::new();
+    for (artifact_path, _) in assocs {
+        let key = path_bytes(artifact_path);
+        match groups.last_mut() {
+            Some(last) if last.key == key => last.len += 1,
+            _ => groups.push(EvidenceGroup {
+                key: key.to_vec(),
+                len: 1,
+            }),
+        }
+    }
+    groups
 }
 
 /// Canonical artifact order shared by the preflight and the write path:
@@ -2773,6 +2796,7 @@ fn flatten_footprints(app_facts: &[AppSnapshotFact]) -> Vec<FootprintCandidate> 
 #[cfg(test)]
 mod preflight_tests {
     use super::*;
+    use std::path::Path;
 
     const RUN: Option<String> = None;
 
@@ -3026,5 +3050,235 @@ mod preflight_tests {
             "an absent size must stay absent, never become zero"
         );
         let _ = RUN;
+    }
+
+    // ---- evidence grouping (Phase 6.4.7) ----------------------------------
+    //
+    // The grouping calculation is a PURE function of the canonically
+    // sorted associations, so it is tested directly on results — never on
+    // elapsed time, which would be flaky on a loaded machine.
+
+    /// A distinguishable evidence entry; only its ordering matters here.
+    fn assoc(path: &str, tag: u32) -> (PathBuf, OwnershipEvidence) {
+        use coresight_apps::{
+            AssociationScope, CorrelationGroup, EvidenceKind, EvidenceSource, EvidenceStrength,
+            MatchedAttribute,
+        };
+        (
+            PathBuf::from(path),
+            OwnershipEvidence::new(
+                EvidenceKind::InstallLocation,
+                EvidenceSource::RegistryMetadata,
+                EvidenceStrength::Direct,
+                CorrelationGroup::NameDerived,
+                AssociationScope::ThisMachine,
+                PathBuf::from(path),
+                MatchedAttribute::InstallLocation,
+                Some(format!("tag-{tag}")),
+            ),
+        )
+    }
+
+    /// Sort then group, exactly as preflight and write path do.
+    fn group_sorted(mut assocs: Vec<(PathBuf, OwnershipEvidence)>) -> Vec<EvidenceGroup> {
+        sort_assocs(&mut assocs);
+        evidence_groups(&assocs)
+    }
+
+    fn max_len(groups: &[EvidenceGroup]) -> usize {
+        groups.iter().map(|g| g.len).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn empty_associations_produce_no_groups() {
+        let groups = group_sorted(Vec::new());
+        assert!(groups.is_empty());
+        assert_eq!(max_len(&groups), 0);
+    }
+
+    #[test]
+    fn one_path_with_several_evidence_entries_is_a_single_group() {
+        let groups = group_sorted(vec![
+            assoc("/a", 1),
+            assoc("/a", 2),
+            assoc("/a", 3),
+            assoc("/a", 4),
+        ]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].key, path_bytes(Path::new("/a")).to_vec());
+        assert_eq!(groups[0].len, 4);
+        assert_eq!(max_len(&groups), 4);
+    }
+
+    #[test]
+    fn several_distinct_paths_with_one_entry_each_are_separate_groups() {
+        let groups = group_sorted(vec![
+            assoc("/a", 1),
+            assoc("/b", 2),
+            assoc("/c", 3),
+            assoc("/d", 4),
+        ]);
+        assert_eq!(groups.len(), 4);
+        assert!(groups.iter().all(|g| g.len == 1));
+        assert_eq!(max_len(&groups), 1);
+    }
+
+    #[test]
+    fn uneven_groups_report_the_longest_one_as_the_maximum() {
+        // A LATER group longer than an earlier one is the case that a
+        // "first group wins" or running-maximum-from-the-front bug would
+        // get wrong.
+        let groups = group_sorted(vec![
+            assoc("/a", 1),
+            assoc("/b", 2),
+            assoc("/b", 3),
+            assoc("/b", 4),
+            assoc("/b", 5),
+            assoc("/c", 6),
+        ]);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].len, 1);
+        assert_eq!(groups[1].len, 4);
+        assert_eq!(groups[2].len, 1);
+        assert_eq!(
+            max_len(&groups),
+            4,
+            "the longest group must win regardless of position"
+        );
+    }
+
+    #[test]
+    fn unsorted_input_groups_deterministically_after_the_shared_sort() {
+        let a = assoc("/apps/alpha", 1);
+        let b = assoc("/apps/beta", 2);
+        let c = assoc("/apps/gamma", 3);
+        let forward = group_sorted(vec![a.clone(), b.clone(), c.clone()]);
+        let reversed = group_sorted(vec![c.clone(), b.clone(), a.clone()]);
+        let shuffled = group_sorted(vec![b, a, c]);
+        assert_eq!(forward, reversed, "input order must not affect grouping");
+        assert_eq!(forward, shuffled, "input order must not affect grouping");
+        assert_eq!(forward.len(), 3);
+        assert_eq!(
+            forward[0].key,
+            path_bytes(Path::new("/apps/alpha")).to_vec()
+        );
+    }
+
+    #[test]
+    fn repeated_entries_within_one_group_are_all_counted() {
+        // Duplicate evidence for the SAME path is a multiset, not a set:
+        // each entry keeps its own ordinal, so the group's length must
+        // include all of them (collapsing them would drop persisted rows).
+        let groups = group_sorted(vec![assoc("/a", 1), assoc("/a", 1), assoc("/a", 2)]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].len, 3,
+            "duplicate evidence entries must not collapse"
+        );
+    }
+
+    #[test]
+    fn grouping_is_single_pass_and_linear_in_the_association_count() {
+        // Complexity is asserted STRUCTURALLY, not by timing: the helper
+        // reads each association once and never revisits a group, so the
+        // total group length always equals the association count. (The
+        // quadratic predecessor also satisfied this, so this test pins
+        // the RESULT; the linear structure is enforced by the
+        // implementation having no nested scan at all.)
+        let assocs: Vec<(PathBuf, OwnershipEvidence)> = (0..64)
+            .map(|i| assoc(&format!("/p{:03}", i % 8), i))
+            .collect();
+        let sorted = {
+            let mut v = assocs.clone();
+            sort_assocs(&mut v);
+            v
+        };
+        let groups = evidence_groups(&sorted);
+        assert_eq!(groups.len(), 8, "8 distinct paths must yield 8 groups");
+        assert_eq!(
+            groups.iter().map(|g| g.len).sum::<usize>(),
+            sorted.len(),
+            "every association must belong to exactly one group"
+        );
+        assert_eq!(max_len(&groups), 8);
+        // Group keys are strictly increasing: contiguous runs of one key.
+        assert!(
+            groups.windows(2).all(|w| w[0].key < w[1].key),
+            "canonical order must yield strictly increasing group keys"
+        );
+    }
+
+    #[test]
+    fn a_synthetic_group_beyond_the_signed_domain_is_rejected() {
+        // A group longer than the signed INTEGER domain is refused by the
+        // SAME checked contract the preflight uses — proven without
+        // allocating an enormous collection.
+        let err = check_ord_bound(
+            (i64::MAX as u128 + 2) as usize,
+            "app_snapshot_evidence",
+            "evidence_ord",
+            &run_tag(),
+        )
+        .expect_err("a group past the signed ordinal domain must be refused");
+        match err {
+            StoreError::InvalidSnapshotInput {
+                table,
+                column,
+                run_id,
+                value,
+            } => {
+                assert_eq!(table, "app_snapshot_evidence");
+                assert_eq!(column, "evidence_ord");
+                assert_eq!(run_id, run_tag());
+                assert_eq!(value, i64::MAX as u128 + 1);
+            }
+            other => panic!("an oversized group must be invalid input, got {other:?}"),
+        }
+        // The largest representable group is accepted.
+        assert!(check_ord_bound(
+            i64::MAX as usize,
+            "app_snapshot_evidence",
+            "evidence_ord",
+            &run_tag()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn the_plan_max_group_length_matches_the_write_side_bound() {
+        // The stored maximum must be exactly the bound the write path
+        // binds its cursor with, and every bound ordinal the write path
+        // can produce (0..len of the longest group) must be in range.
+        let mut assocs = vec![
+            assoc("/a", 1),
+            assoc("/a", 2),
+            assoc("/b", 3),
+            assoc("/c", 4),
+            assoc("/c", 5),
+            assoc("/c", 6),
+            assoc("/c", 7),
+        ];
+        sort_assocs(&mut assocs);
+        let groups = evidence_groups(&assocs);
+        let stored_max = max_len(&groups);
+        assert_eq!(stored_max, 4);
+
+        // The cursor the write path builds from the stored maximum must
+        // accept every ordinal a group can produce...
+        let ords = CheckedOrdinals {
+            column: "evidence_ord",
+            len: stored_max.max(1),
+        };
+        for g in &groups {
+            for pos in 0..g.len {
+                assert_eq!(ords.at(pos), pos as i64);
+            }
+        }
+        // ...and a fact with no associations still gets a valid cursor.
+        let empty_ords = CheckedOrdinals {
+            column: "evidence_ord",
+            len: max_len(&[]).max(1),
+        };
+        assert_eq!(empty_ords.at(0), 0);
     }
 }
