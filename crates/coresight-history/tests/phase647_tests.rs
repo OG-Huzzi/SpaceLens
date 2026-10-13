@@ -356,6 +356,225 @@ fn evidence_grouping_does_not_change_the_invalid_input_contract() {
     );
 }
 
+/// Proof that two COMPLETELY identical ownership-evidence associations for
+/// the same artifact path survive a real SQLite commit and reload with their
+/// multiplicity intact. Unlike
+/// [`associations_across_many_paths_round_trip_with_group_semantics`], the
+/// duplicate entries here share every field — including the evidence tag — so
+/// nothing distinguishes them but their ordinal position.
+#[test]
+fn identical_duplicate_associations_survive_commit_reload_with_multiplicity() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("exact-dup.db");
+    let mut store = HistoryStore::open(&db).unwrap();
+    let run = run_record("exact-dup-run", 1);
+    store.begin_run(&run).unwrap();
+
+    let app = app_record("Widget", Some("Maker"));
+
+    // One evidence value, byte-for-byte identical across both associations.
+    // No distinguishing tag, timestamp or other field is introduced.
+    let identical_evidence = evidence("same-duplicate-evidence");
+
+    let dup_path = PathBuf::from("/apps/Widget/dup.exe");
+    let other_path = PathBuf::from("/apps/Widget/other.exe");
+
+    let assocs = vec![
+        (dup_path.clone(), identical_evidence.clone()),
+        (dup_path.clone(), identical_evidence.clone()),
+        (other_path.clone(), evidence("unrelated-group")),
+    ];
+    let artifacts: Vec<ArtifactFact> = [dup_path.clone(), other_path.clone()]
+        .iter()
+        .map(|p| artifact(p.to_str().unwrap()))
+        .collect();
+
+    let input = SystemModelInput {
+        artifacts,
+        applications: vec![coresight_system_model::ApplicationFact {
+            record: app.clone(),
+            install_roots: vec![PathBuf::from("/apps/Widget")],
+            executable: None,
+            associations: assocs.clone(),
+        }],
+        relationships: Vec::new(),
+        history: Vec::new(),
+        source_coverage: vec![SourceCoverage::complete("win32-uninstall")],
+    };
+    let app_facts = vec![AppSnapshotFact {
+        record: app.clone(),
+        install_roots: vec![PathBuf::from("/apps/Widget")],
+        executable: None,
+        associations: assocs.clone(),
+        footprints: Vec::new(),
+    }];
+    let inventory = coresight_apps::Inventory {
+        records: vec![app.clone()],
+        ..Default::default()
+    };
+
+    store
+        .commit_system_snapshot(
+            &run.run_id,
+            &input,
+            &app_facts,
+            &inventory,
+            &coresight_apps::FootprintReport::default(),
+        )
+        .expect("an association set containing exact duplicates must commit");
+
+    // --- SQLite preserves multiplicity -------------------------------------
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let encoded_dup = coresight_history::encode_path(&dup_path);
+    let encoded_other = coresight_history::encode_path(&other_path);
+
+    // Exactly two rows for the duplicated (path, identical payload).
+    let dup_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_snapshot_evidence \
+             WHERE run_id = ?1 AND artifact_path = ?2",
+            rusqlite::params![run.run_id.0, encoded_dup],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        dup_count, 2,
+        "the identical evidence must persist as two distinct rows"
+    );
+
+    // Their ordinals are exactly 0 and 1; payloads are equal apart from the
+    // ordinal (and the necessarily-differing primary-key ordinal column).
+    #[allow(clippy::type_complexity)]
+    let mut stmt = conn
+        .prepare(
+            "SELECT evidence_ord, kind, source, strength, group_tag, group_source, \
+                    scope, observed_path, matched_attribute, matched_value, \
+                    matched_path \
+             FROM app_snapshot_evidence \
+             WHERE run_id = ?1 AND artifact_path = ?2 \
+             ORDER BY evidence_ord",
+        )
+        .unwrap();
+    let collected: Vec<(i64, String)> = stmt
+        .query_map(rusqlite::params![run.run_id.0, encoded_dup], |r| {
+            // Re-encode the payload columns (everything but the ordinal) as one
+            // comparable string, so the duplicate pair can be compared as a
+            // single value.
+            let payload = format!(
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+            );
+            Ok((r.get::<_, i64>(0)?, payload))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(collected.len(), 2);
+    assert_eq!(collected[0].0, 0, "first duplicate must carry ordinal 0");
+    assert_eq!(collected[1].0, 1, "second duplicate must carry ordinal 1");
+    assert_eq!(
+        collected[0].1, collected[1].1,
+        "the persisted payloads of the identical pair must be equal"
+    );
+
+    // The other artifact-path group starts its ordinals at zero.
+    let other_ords: Vec<i64> = {
+        let mut s = conn
+            .prepare(
+                "SELECT evidence_ord FROM app_snapshot_evidence \
+                 WHERE run_id = ?1 AND artifact_path = ?2 ORDER BY evidence_ord",
+            )
+            .unwrap();
+        let mapped = s
+            .query_map(rusqlite::params![run.run_id.0, encoded_other], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        mapped.map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(other_ords, vec![0]);
+
+    // --- Reload preserves both entries -------------------------------------
+    let loaded = store
+        .load_system_snapshot(&run.run_id, &QueryLimits::default())
+        .unwrap()
+        .expect("the snapshot must reload");
+    assert_eq!(loaded.input.applications.len(), 1);
+    let reloaded_assocs = &loaded.input.applications[0].associations;
+    let dup_tuple = (dup_path.clone(), identical_evidence.clone());
+    let identical_count = reloaded_assocs.iter().filter(|a| **a == dup_tuple).count();
+    assert_eq!(
+        identical_count, 2,
+        "the identical tuple must occur exactly twice after reload"
+    );
+    // Sanity: nothing was silently dropped and no phantom entry appeared.
+    assert_eq!(reloaded_assocs.len(), assocs.len());
+
+    // --- Rebuild remains usable -------------------------------------------
+    let model = store
+        .rebuild_system_model(
+            &run.run_id,
+            &QueryLimits::default(),
+            &SystemModelLimits::default(),
+        )
+        .unwrap()
+        .expect("the model must rebuild after the duplicate commit");
+    assert_eq!(model.applications().len(), 1);
+
+    // --- Rejected replacement keeps the original duplicate rows -------------
+    let mut inventory_bad = inventory.clone();
+    inventory_bad.records_truncated = u64::MAX;
+    let err = store
+        .commit_system_snapshot(
+            &run.run_id,
+            &input,
+            &app_facts,
+            &inventory_bad,
+            &coresight_apps::FootprintReport::default(),
+        )
+        .expect_err("an oversized counter must be rejected");
+    match &err {
+        StoreError::InvalidSnapshotInput { table, column, .. } => {
+            assert_eq!(*table, "app_snapshot_meta");
+            assert_eq!(*column, "records_truncated");
+        }
+        other => panic!("expected invalid snapshot input, got {other:?}"),
+    }
+
+    let dup_count_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_snapshot_evidence \
+             WHERE run_id = ?1 AND artifact_path = ?2",
+            rusqlite::params![run.run_id.0, encoded_dup],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        dup_count_after, 2,
+        "the original duplicate rows must remain after a rejected replacement"
+    );
+
+    let reloaded_again = store
+        .load_system_snapshot(&run.run_id, &QueryLimits::default())
+        .unwrap()
+        .expect("the original duplicate rows must still reload");
+    let still_two = reloaded_again.input.applications[0]
+        .associations
+        .iter()
+        .filter(|a| **a == dup_tuple)
+        .count();
+    assert_eq!(still_two, 2);
+}
+
 // Keep the unused-import checker honest about the confidence type used by
 // the association fixtures above.
 #[allow(dead_code)]
