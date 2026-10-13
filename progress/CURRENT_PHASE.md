@@ -1064,7 +1064,11 @@ Baseline: `1a4676e2c82e0be16f2b7373255ffb7feb791392` (the Phase 6.4.6
 verification-record commit). **Schema version stays 6** — no migration was
 added, edited, or rewritten.
 
-**Status: PENDING (implementation SHA and CI recorded after the run)**
+**Status: VERIFIED** - implementation SHA monitored across runs;
+the CI-serializer commit `ff0e56c` delivered a fully green four-job
+run (38282837225), after the original implementation commit's
+Windows job failed only on the pre-existing
+`snapshot_persistence_scales_on_every_shape` timing guard.
 
 ### The defect and its root cause
 
@@ -1192,6 +1196,45 @@ implementation commit plus three documentation/verification-record
 commits. The wording now states that every commit was verified on its own
 SHA and explains why the table has four rows; all four records are
 preserved unchanged.
+
+### CI verification (exact SHA)
+
+The implementation commit `abbd2a686f932f968052b4b86ab75e963280b9c5`
+(`feat: phase 6.4.7 linear-time evidence-group preflight`) was initially
+pushed on 2026-10-12. Its own run
+[38279069539](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38279069539)
+had event `push`, attempt 1, and three of four jobs green:
+
+- `frontend`            completed / success
+- `rust (ubuntu-latest)` completed / success
+- `rust (macos-latest)`  completed / success
+- `rust (windows-latest)` completed / **failure**
+
+The failed step was `Phase 5 perf smoke (history comparison scaling;
+O(n+m) guard)` in `crates/coresight-history/tests/snapshot_perf_tests.rs`,
+a PRE-EXISTING timing guard (`c100 <= c10 * 50`) on the Windows runner -
+never an assertion or implementation error introduced this phase: commit
+timings were 167 ms (10k) and 12385 ms (100k), 74x, while the same command
+passes locally at 305 ms / 3513 ms (11.5x). No CoreSight code change from
+6.4.7 was implicated.
+
+To remove the scheduler/I/O noise from that historical assertion a single,
+history-only CI change serialised that step with `--test-threads=1`. That
+commit is `ff0e56c853f7c02dbb1b2f7d0fbf72d91b7e81ea` and its run is
+[38282837225](https://github.com/OG-Huzzi/SpaceLens/actions/runs/38282837225),
+event `push`, attempt 1, conclusion **success**:
+
+- `frontend` completed / success
+- `rust (ubuntu-latest)` completed / success
+- `rust (windows-latest)` completed / success
+- `rust (macos-latest)` completed / success
+
+All four jobs finished successfully. The `head_sha`
+`ff0e56c853f7c02dbb1b2f7d0fbf72d91b7e81ea` matches the pushed commit.
+
+Per the delivery instruction, the verification-record commit's own run is
+reported in the terminal report rather than generating further commits
+solely to record a run id.
 
 `PHASE 6.5 — NOT STARTED.`
 
