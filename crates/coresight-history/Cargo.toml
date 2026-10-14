@@ -13,7 +13,11 @@ crate-type = ["lib"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-rusqlite = { version = "0.32", features = ["bundled"] }
+# `backup` enables SQLite's Online Backup API (rusqlite::backup) — the
+# Phase 6.5 pre-migration safety copy. It is a feature of the ALREADY
+# VENDORED rusqlite dependency, not a new dependency, and the bundled
+# SQLite build carries the API natively. No network, no new crate.
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 coresight-core = { path = "../coresight-core" }
 coresight-engine = { path = "../coresight-engine" }
 coresight-classifier = { path = "../coresight-classifier" }

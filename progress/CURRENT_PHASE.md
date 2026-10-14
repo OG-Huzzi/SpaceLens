@@ -1,5 +1,14 @@
 # CoreSight — Current State
 
+PHASE 6.5 — SQLite Pre-Migration Backup & Corrupt-Store Quarantine
+
+**Status: Phase 6.5 AUTHORIZED / IN PROGRESS** — started from baseline
+`5da54e9cd57b15c4bbdde8a4c175ce9dc66477b4`. Schema version stays 6; no schema
+migration is added and migration SQL v2–v6 is untouched. Scope is the
+history-store open path (safe pre-migration backup, corrupt-store
+quarantine), its regression tests, and truthful project records. Phase 6.6 and
+later phases are NOT authorized.
+
 PHASE 6.4 — Persistent Application Intelligence + System-Model Snapshot
 Integration
 

@@ -46,6 +46,7 @@ pub mod path_encoding;
 pub mod snapshot;
 pub mod snapshot_codec;
 pub mod store;
+pub mod store_safety;
 
 pub use compare::{
     compare, ChangeCounts, ChangeEvent, ChangeSet, CompareError, CompareOptions,
@@ -60,3 +61,4 @@ pub use snapshot::{AppSnapshotFact, LoadedApplications, SnapshotSummary, SystemS
 pub use store::{
     HistoryStore, PathHistoryPoint, QueryLimits, RetentionPolicy, RetentionReport, StoreError,
 };
+pub use store_safety::{Hazard, Quarantine};
