@@ -1236,9 +1236,117 @@ Per the delivery instruction, the verification-record commit's own run is
 reported in the terminal report rather than generating further commits
 solely to record a run id.
 
-`PHASE 6.5 — NOT STARTED.`
+`PHASE 6.5 - NOT STARTED.`
 
-## Phase 6.4.2 — Persistence Boundary, Query Bounds & Retention Safety
+## Phase 6.4.8 - Exact-Duplicate Evidence Persistence Regression
+
+Baseline: `20debd2eb7d4113c43d7032b6fae918d69e02f2c`? (implementation commit, pending SHA below) -- see below. **Schema version stays 6** - no migration was added or edited.
+
+Status: IMPLEMENTED - verification record pending exact-SHA CI.
+
+### The coverage gap
+
+Phase 6.4.7's grouping tests kept distinct evidence tags on every entry, so they
+proved that non-identical duplicates survive commit and reload. They did not
+prove that two entries whose *entire* `OwnershipEvidence` tuple (including the
+matched value/tag) is byte-for-byte identical retain their multiplicity across
+real SQLite persistence. Phase 6.4.7 documents multiset semantics, but no
+integration test exercised the exact-duplicate case end to end.
+
+### Workstream A - added regression
+
+Test file: `crates/coresight-history/tests/phase647_tests.rs`
+Test name: `identical_duplicate_associations_survive_commit_reload_with_multiplicity`
+
+Fixture construction:
+
+- One application fact with two artifact paths.
+- `/apps/Widget/dup.exe` carries **two** associations whose `OwnershipEvidence`
+  value is the same instance (`evidence("same-duplicate-evidence")`) - identical
+  kind, source, strength, correlation group, scope, observed path, matched
+  attribute, matched value, and matched path. No distinguishing tag, timestamp or
+  other field separates them.
+- `/apps/Widget/other.exe` carries one unrelated evidence entry, so a second
+  artifact-path group exists and per-artifact ordinals are proven to reset.
+- Associations supplied identically to `SystemModelInput` and `AppSnapshotFact`.
+
+Assertions:
+
+1. Commit succeeds (`commit_system_snapshot` returns `Ok(())`).
+2. Direct SQLite query of `app_snapshot_evidence` for the run and duplicated
+   path returns exactly 2 rows. Their `evidence_ord` values are exactly `0`
+   and `1`. All persisted payload columns (kind, source, strength, group_tag,
+   group_source, scope, observed_path, matched_attribute, matched_value,
+   matched_path) are equal across the pair. The unrelated path's group starts
+   at ordinal `0` (single row).
+3. Real public loader `load_system_snapshot` reloads the snapshot. The
+   reloaded association collection for the application contains the identical
+   `(dup_path, identical_evidence)` tuple exactly twice; the total remains 3.
+4. `rebuild_system_model` from the reloaded snapshot succeeds and exposes one
+   application.
+5. A rejected replacement (oversized `records_truncated` counter in the
+   inventory) leaves the original 2 duplicate rows intact, still reloadable
+   with multiplicity 2.
+
+### Workstream B - production defect?
+
+No. The regression passed against the current implementation on the first run.
+No production code was modified. The linear grouping (`evidence_groups`),
+per-artifact ordinal reset (`per_artifact_ord`), SQLite primary key
+`(run_id, app_id, fact_ord, artifact_path, evidence_ord)`, decode/reconstruction,
+and canonical `sort_assocs` ordering already preserve multiset multiplicity.
+The defect was purely a test-coverage gap.
+
+### Local verification (all executed, results checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | clean (exit 0) |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (exit 0) |
+| `cargo test --workspace` | passed (see full log; exit 0) |
+| `cargo test --workspace --all-features` | passed (exit 0) |
+| `cargo test --workspace -- --ignored` | passed (exit 0) |
+| `npm ci` | ok (exit 0) |
+| `npm audit --audit-level=high` | 0 vulnerabilities (exit 0) |
+| `npm run build` | ok (exit 0) |
+| `git diff --check` | clean (exit 0) |
+
+Focused suites re-run green: `cargo test -p coresight-history --test phase647_tests`
+(4 tests, including the new one), plus Phase 6.4.6/6.4.7 persistence,
+evidence-grouping, strict-decoding, and migration regression suites.
+
+### Schema/migration status
+
+Schema version remains **6**. `HISTORY_SCHEMA_VERSION` unchanged. No
+migration SQL added, edited, or rewritten. `app_snapshot_evidence` primary key
+already keys multiplicity on `evidence_ord`.
+
+### Implementation commit and CI
+
+- Implementation commit: `20debd2eb7d4113c43d7032b6fae918d69e02f2c`
+  ("test: add exact-duplicate ownership evidence persistence regression
+  (Phase 6.4.8)")
+- Exact-SHA CI run: `38439453251`, event `push`, attempt 1, conclusion
+  `success`:
+  - `frontend` completed / success
+  - `rust (ubuntu-latest)` completed / success
+  - `rust (windows-latest)` completed / success
+  - `rust (macos-latest)` completed / success
+- `head_sha` confirmed equal to `20debd2eb7d4113c43d7032b6fae918d69e02f2c`.
+
+### Remaining limitations
+
+- The regression proves multiplicity persistence and reconstruction only for
+  the identical-tuple case; it does not change derived-model presentation
+  semantics (the model may normalize duplicate evidence per its documented
+  contract, which is acceptable).
+- No new rejected case beyond the inventory-counter preservation check was
+  added; the Phase 6.4.6 preservation harness already covers the full
+  snapshot-table byte-for-byte path.
+
+`PHASE 6.5 - NOT STARTED.`
+
+## Phase 6.4.2 - Persistence Boundary, Query Bounds & Retention Safety
 
 Baseline: `d8eebe1438243989323fdfb7254ad7c94ccf7f62` (the Phase 6.4.1
 verification-record commit). **Schema version stays 6** — no migration was
