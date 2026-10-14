@@ -18,8 +18,12 @@ added, and migration SQL v2–v6 is byte-identical to the baseline (verified by
 extracting and comparing every `MIGRATION_V*` constant against `HEAD`
 before commit).
 
-**Status: VERIFIED — implementation, tests, phase ledger, clean Git state,
-and exact-SHA CI all agree.**
+**Status: VERIFIED — implementation, tests, phase ledger, and the
+implementation commit's exact-SHA CI all agree.** The verification-record
+commit triggered three CI runs: two fully green, one RED on the PRE-EXISTING
+Windows timing guard (`snapshot_perf_tests`, documented below with evidence).
+That flake also failed in Phase 6.4.7, is not caused by this phase, and no
+threshold was weakened in response.
 
 ### Baseline reconciliation (what was found, and what I did)
 
@@ -140,6 +144,47 @@ Windows-only defect above would have hidden.
 
 This verification-record commit's own CI is reported in the terminal result
 rather than generating further commits solely to record a run id.
+
+### Verification-record CI — one run was RED, reported here in full
+
+GitHub queued **three** CI runs for the verification-record commit
+`0701ca02063b5b7ef6fda563957468f3bcdf9034`, all on that exact SHA. Two were
+fully green and **one failed**:
+
+| Run | head_sha | event | attempt | conclusion | frontend | ubuntu | windows | macos |
+|---|---|---|---|---|---|---|---|---|
+| 38575016033 | matches | push | 1 | **failure** | success | success | **FAILURE** | success |
+| 38575012233 | matches | push | 1 | success | success | success | success | success |
+| 38575009867 | matches | push | 1 | success | success | success | success | success |
+
+The failing step was step 11, `Phase 5 perf smoke (history comparison
+scaling; O(n+m) guard)` in the `rust (windows-latest)` job
+(`Process completed with exit code 1`). Every other step in that job,
+including Format, Clippy, the full test suite, and the other three perf
+smokes, passed.
+
+**This is the pre-existing Windows timing flake, not a Phase 6.5
+regression.** The evidence, stated rather than assumed:
+
+- The failing assertion is the long-standing loose scaling guard in
+  `snapshot_perf_tests::snapshot_persistence_scales_on_every_shape`
+  (`c100 <= c10 * 50`), whose own comment says it exists loose because
+  wall-clock timings on a busy runner carry scheduler noise.
+- **The same step failed identically in Phase 6.4.7**, before this phase, at
+  commit `abbd2a6` (run 38279069539, 10k = 167 ms vs 100k = 12385 ms = 74x).
+- Phase 6.5 adds no cost to that path: the test opens a FRESH database file
+  per slot (`perf-10k.db`, `perf-100k.db`), so the new preflight returns on
+  its first `path.is_file()` check and does no integrity scan, version read,
+  or backup. It cannot scale with artifact count.
+- Locally the same command passes with margin: 10k commit 187 ms, 100k commit
+  1846 ms (about 10x, against a 50x bound).
+- Two of the three runs of this identical commit passed all four jobs.
+
+The guard was **not** loosened, widened, or skipped, and no threshold was
+changed to obtain green CI. Three full CI runs executing concurrently for the
+same commit is itself contention of exactly the kind the test's comment warns
+about. The implementation commit `ebd957c` itself was fully green on its own
+exact SHA (run 38573598536, all four jobs).
 
 ### Independent audit of the final diff
 
