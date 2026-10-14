@@ -442,9 +442,31 @@ fn identical_duplicate_associations_survive_commit_reload_with_multiplicity() {
         "the identical evidence must persist as two distinct rows"
     );
 
-    // Their ordinals are exactly 0 and 1; payloads are equal apart from the
-    // ordinal (and the necessarily-differing primary-key ordinal column).
-    #[allow(clippy::type_complexity)]
+    // Their ordinals are exactly 0 and 1; every OTHER evidence column is
+    // compared as a TYPED value, field by field. Nullable columns keep their
+    // real `Option<String>` type, so a stored SQL `NULL` is never silently
+    // equated with an empty string, and no delimiter-joined string can hide a
+    // difference behind a column value that happens to contain the separator.
+    /// One persisted evidence row: the ordinal plus every non-ordinal payload
+    /// column, each in the column's actual SQLite type.
+    #[derive(Debug, PartialEq, Eq)]
+    struct EvidenceRow {
+        evidence_ord: i64,
+        kind: String,
+        source: String,
+        strength: String,
+        group_tag: String,
+        /// Nullable correlation-group source.
+        group_source: Option<String>,
+        scope: String,
+        observed_path: String,
+        matched_attribute: String,
+        /// Nullable matched metadata text.
+        matched_value: Option<String>,
+        /// Nullable matched path.
+        matched_path: Option<String>,
+    }
+
     let mut stmt = conn
         .prepare(
             "SELECT evidence_ord, kind, source, strength, group_tag, group_source, \
@@ -455,35 +477,79 @@ fn identical_duplicate_associations_survive_commit_reload_with_multiplicity() {
              ORDER BY evidence_ord",
         )
         .unwrap();
-    let collected: Vec<(i64, String)> = stmt
+    let collected: Vec<EvidenceRow> = stmt
         .query_map(rusqlite::params![run.run_id.0, encoded_dup], |r| {
-            // Re-encode the payload columns (everything but the ordinal) as one
-            // comparable string, so the duplicate pair can be compared as a
-            // single value.
-            let payload = format!(
-                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
-                r.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(10)?.unwrap_or_default(),
-            );
-            Ok((r.get::<_, i64>(0)?, payload))
+            // Column order matches the SELECT list exactly. Column 5
+            // (`group_source`), 9 (`matched_value`) and 10 (`matched_path`)
+            // are read as `Option<String>` so SQL NULL stays `None` instead of
+            // being flattened to an empty string.
+            Ok(EvidenceRow {
+                evidence_ord: r.get::<_, i64>(0)?,
+                kind: r.get::<_, String>(1)?,
+                source: r.get::<_, String>(2)?,
+                strength: r.get::<_, String>(3)?,
+                group_tag: r.get::<_, String>(4)?,
+                group_source: r.get::<_, Option<String>>(5)?,
+                scope: r.get::<_, String>(6)?,
+                observed_path: r.get::<_, String>(7)?,
+                matched_attribute: r.get::<_, String>(8)?,
+                matched_value: r.get::<_, Option<String>>(9)?,
+                matched_path: r.get::<_, Option<String>>(10)?,
+            })
         })
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
     assert_eq!(collected.len(), 2);
-    assert_eq!(collected[0].0, 0, "first duplicate must carry ordinal 0");
-    assert_eq!(collected[1].0, 1, "second duplicate must carry ordinal 1");
+    // `evidence_ord` is the ONLY column that legitimately differs between the
+    // two identical rows; it is compared separately so the payload comparison
+    // below is a whole-struct equality over the ten remaining fields.
     assert_eq!(
-        collected[0].1, collected[1].1,
-        "the persisted payloads of the identical pair must be equal"
+        collected[0].evidence_ord, 0,
+        "first duplicate must carry ordinal 0"
+    );
+    assert_eq!(
+        collected[1].evidence_ord, 1,
+        "second duplicate must carry ordinal 1"
+    );
+    let first_payload = (
+        &collected[0].kind,
+        &collected[0].source,
+        &collected[0].strength,
+        &collected[0].group_tag,
+        &collected[0].group_source,
+        &collected[0].scope,
+        &collected[0].observed_path,
+        &collected[0].matched_attribute,
+        &collected[0].matched_value,
+        &collected[0].matched_path,
+    );
+    let second_payload = (
+        &collected[1].kind,
+        &collected[1].source,
+        &collected[1].strength,
+        &collected[1].group_tag,
+        &collected[1].group_source,
+        &collected[1].scope,
+        &collected[1].observed_path,
+        &collected[1].matched_attribute,
+        &collected[1].matched_value,
+        &collected[1].matched_path,
+    );
+    assert_eq!(
+        first_payload, second_payload,
+        "every persisted payload column of the identical pair must be equal"
+    );
+    // The nullable columns are genuinely exercised as nullable: this fixture's
+    // evidence carries a matched value but no matched path, so `matched_path`
+    // round-trips as SQL NULL (`None`) and `matched_value` as SQL text.
+    assert_eq!(
+        collected[0].matched_path, None,
+        "a fixture with no matched path must persist SQL NULL, not an empty string"
+    );
+    assert!(
+        collected[0].matched_value.is_some(),
+        "the fixture's matched value must be present"
     );
 
     // The other artifact-path group starts its ordinals at zero.

@@ -1236,13 +1236,18 @@ Per the delivery instruction, the verification-record commit's own run is
 reported in the terminal report rather than generating further commits
 solely to record a run id.
 
-`PHASE 6.5 - NOT STARTED.`
+`PHASE 6.5 — NOT STARTED.`
 
 ## Phase 6.4.8 - Exact-Duplicate Evidence Persistence Regression
 
-Baseline: `20debd2eb7d4113c43d7032b6fae918d69e02f2c`? (implementation commit, pending SHA below) -- see below. **Schema version stays 6** - no migration was added or edited.
+Baseline: `5c39d299705c00c55d3cb1c1663970fc5e5b8584` (the Phase 6.4.7
+verification-record commit). **Schema version stays 6** - no migration was
+added or edited.
 
-Status: IMPLEMENTED - verification record pending exact-SHA CI.
+Status: VERIFIED - both the implementation commit and the verification-record
+commit were each pushed and confirmed green on their own exact SHA. Corrected
+in Phase 6.4.9, which repaired the stale baseline placeholder, the pending-CI
+status line, and the canonical Phase 6.5 marker byte form.
 
 ### The coverage gap
 
@@ -1321,18 +1326,33 @@ Schema version remains **6**. `HISTORY_SCHEMA_VERSION` unchanged. No
 migration SQL added, edited, or rewritten. `app_snapshot_evidence` primary key
 already keys multiplicity on `evidence_ord`.
 
-### Implementation commit and CI
+### Commits and CI (each verified on its own exact SHA)
 
 - Implementation commit: `20debd2eb7d4113c43d7032b6fae918d69e02f2c`
   ("test: add exact-duplicate ownership evidence persistence regression
   (Phase 6.4.8)")
-- Exact-SHA CI run: `38439453251`, event `push`, attempt 1, conclusion
-  `success`:
+- Exact-SHA CI run: `38439453251`, event `push`, attempt 1, status
+  `completed`, conclusion `success`:
   - `frontend` completed / success
   - `rust (ubuntu-latest)` completed / success
   - `rust (windows-latest)` completed / success
   - `rust (macos-latest)` completed / success
 - `head_sha` confirmed equal to `20debd2eb7d4113c43d7032b6fae918d69e02f2c`.
+
+- Verification-record commit: `f0515e8d51159c543e4a37890dab713a27335d1c`
+  ("docs: record Phase 6.4.8 verification (implementation SHA 20debd2)")
+- Verification-record exact-SHA CI run: `38536994209`, event `push`, attempt 1,
+  status `completed`, conclusion `success`:
+  - `frontend` completed / success
+  - `rust (ubuntu-latest)` completed / success
+  - `rust (windows-latest)` completed / success
+  - `rust (macos-latest)` completed / success
+- `head_sha` confirmed equal to `f0515e8d51159c543e4a37890dab713a27335d1c`.
+
+Both runs were re-queried through the GitHub Actions API in Phase 6.4.9 rather
+than copied from the claim: the reported `head_sha` values above are the API
+values and match the commits exactly. The full 40-character SHAs are recorded;
+no abbreviated form is used.
 
 ### Remaining limitations
 
@@ -1344,9 +1364,153 @@ already keys multiplicity on `evidence_ord`.
   added; the Phase 6.4.6 preservation harness already covers the full
   snapshot-table byte-for-byte path.
 
-`PHASE 6.5 - NOT STARTED.`
+`PHASE 6.5 — NOT STARTED.`
 
-## Phase 6.4.2 - Persistence Boundary, Query Bounds & Retention Safety
+## Phase 6.4.9 — Verification Record & Assertion Precision
+
+Baseline: `f0515e8d51159c543e4a37890dab713a27335d1c` (the Phase 6.4.8
+verification-record commit). **Schema version stays 6** — no migration was
+added, edited, or rewritten.
+
+**Status: IMPLEMENTED — pending the exact-SHA CI record below.**
+
+This phase is **test and documentation only**. No production code, migration,
+schema definition, CI threshold, or unrelated test was changed.
+
+### The two audit findings
+
+**F1 — the Phase 6.4.8 record was incomplete and partly wrong.** Three defects,
+all in wording rather than substance:
+
+1. The baseline line was an unfinished placeholder that quoted the
+   *implementation* SHA with a dangling question mark
+   (`` `20debd2eb7d4113c43d7032b6fae918d69e02f2c`? (implementation commit,
+   pending SHA below) -- see below. ``). The real starting baseline was
+   `5c39d299705c00c55d3cb1c1663970fc5e5b8584`.
+2. The status line still read `IMPLEMENTED - verification record pending
+   exact-SHA CI` even though that CI had already been run and was green.
+3. The canonical `PHASE 6.5 — NOT STARTED.` marker had been silently
+   rewritten to an ASCII hyphen-minus (`U+002D`) by the earlier edit, because
+   the editing tool normalises dash characters. The repository's established
+   form is a real U+2014 EM DASH (`e2 80 94`); the Phase 6.4.7 section above
+   and every other phase heading still carry it, so the Phase 6.4.8 marker was
+   the odd one out. Both markers are now byte-identical to the baseline form,
+   verified with a byte-level comparison rather than a visual one.
+
+**F2 — the duplicate-payload assertion compared a formatted string.** The
+Phase 6.4.8 test read the ten non-ordinal evidence columns and joined them
+with `|` into one `String`, flattening the three nullable columns with
+`unwrap_or_default()`. That is weaker than the contract for two independent
+reasons: a payload value containing `|` could alias a different field
+boundary, and SQL `NULL` became indistinguishable from the empty string.
+
+### Workstream A — phase record corrected
+
+- Baseline corrected to `5c39d299705c00c55d3cb1c1663970fc5e5b8584`.
+- Status corrected to VERIFIED, naming both exact-SHA runs.
+- The verification-record commit `f0515e8d51159c543e4a37890dab713a27335d1c`
+  and its CI run `38536994209` are now recorded in the Phase 6.4.8 section,
+  which previously listed only the implementation commit.
+- Both markers restored to the canonical em-dash form, verified byte-precisely.
+  A line-by-line comparison against baseline `5c39d29` confirms **zero**
+  baseline lines were lost: no earlier phase record was rewritten, reordered,
+  or removed. The Phase 6.4.2 heading, which the same dash-normalising edit had
+  also damaged, was restored to match the baseline exactly.
+
+### Workstream B — typed payload comparison
+
+In `identical_duplicate_associations_survive_commit_reload_with_multiplicity`
+the row shape is now a local `EvidenceRow` struct carrying the ordinal plus all
+ten non-ordinal columns at their real SQLite types:
+
+```text
+evidence_ord: i64
+kind / source / strength / group_tag / scope / observed_path /
+matched_attribute:                      String
+group_source / matched_value / matched_path:  Option<String>
+```
+
+- The three nullable columns are read with `r.get::<_, Option<String>>(..)` and
+  stored as `Option<String>`, so a stored `NULL` stays `None` and is never
+  equated with `Some("")`.
+- `evidence_ord` is compared separately (`0` and `1`), and payload equality is
+  a tuple comparison over the ten remaining fields — no `format!`, no
+  delimiter, no `Debug` rendering, no field dropped to make it pass.
+- The fixture already exercises both nullable states: `matched_value` is
+  present (`Some`), while `matched_path` is absent (`None`, i.e. SQL `NULL`),
+  and both are asserted directly. No database corruption was introduced to
+  manufacture a nullable value.
+- **Non-vacuity was proven, not assumed.** A temporary probe compared
+  `matched_path` against `Some("SENTINEL-SHOULD-FAIL")` and the test failed
+  with `left: None`, demonstrating the typed comparison distinguishes `NULL`
+  from a present value. The probe was reverted immediately; the committed
+  suite passes.
+
+### Production defect?
+
+**None.** The test passed against the current implementation both before and
+after the assertion change, so no production layer was at fault and no
+production code was touched. The Phase 6.4.6–6.4.8 guarantees are unchanged:
+multiset multiplicity survives persistence and reload, per-artifact ordinals
+reset, `evidence_groups` stays single-pass with the precomputed
+`max_evidence_group_len`, the numeric preflight still runs before the
+transaction opens, `InvalidSnapshotInput` stays distinct from `Corrupt`, and
+schema v6 plus all migration SQL are untouched. `coresight-system-model` was
+not modified. The CI serializer's `--test-threads=1` setting is intact. No
+test was deleted, skipped, or loosened.
+
+### Local verification (all executed, results checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | pass (exit 0) |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | pass (exit 0) |
+| `cargo test --workspace` | pass (exit 0) |
+| `cargo test --workspace --all-features` | pass (exit 0) |
+| `cargo test --workspace -- --ignored` | pass (exit 0) |
+| `npm ci` | pass (exit 0) |
+| `npm audit --audit-level=high` | pass (exit 0) |
+| `npm run build` | pass (exit 0) |
+| `git diff --check` | pass (exit 0) |
+
+Focused runs: the exact-duplicate regression directly
+(`cargo test -p coresight-history --test phase647_tests
+identical_duplicate_associations_survive_commit_reload_with_multiplicity`, 1
+passed), the complete `phase647_tests` suite (4 passed), and the Phase
+6.4.6/6.4.7 snapshot, evidence-grouping, strict-decoding, and migration
+regression suites.
+
+### Prior Phase 6.4.8 CI runs rechecked
+
+Re-queried through the GitHub Actions API, not copied from the prior claim:
+
+| Commit | CI run | head_sha | event | attempt | conclusion |
+|---|---|---|---|---|---|
+| `20debd2eb7d4113c43d7032b6fae918d69e02f2c` (implementation) | 38439453251 | matches | push | 1 | success |
+| `f0515e8d51159c543e4a37890dab713a27335d1c` (verification record) | 38536994209 | matches | push | 1 | success |
+
+Both runs report `frontend`, `rust (ubuntu-latest)`, `rust (windows-latest)`,
+and `rust (macos-latest)` as completed / success. The verification-record SHA
+recorded in this file is the exact full SHA GitHub reports, not an abbreviated
+or mistyped variant.
+
+### Phase 6.4.9 limitations (honest)
+
+- The typed comparison covers the `app_snapshot_evidence` payload only. Other
+  snapshot tables keep their existing coverage; this phase did not extend the
+  pattern repo-wide, which would be unrelated scope.
+- `matched_path` is `NULL` for this fixture, so the `Some(path)` branch of
+  that column is exercised by other suites rather than here. Both branches of
+  `matched_value` (`Some` present, `None` absent) are covered across the
+  snapshot suites.
+- The pre-existing `phase647_tests::evidence_grouping_does_not_change_the_invalid_input_contract`
+  helper reference to the confidence type remains as it was; it was not in
+  scope.
+- All Phase 6.4 through 6.4.8 limitations remain in force.
+
+`PHASE 6.5 — NOT STARTED.`
+
+## Phase 6.4.2 — Persistence Boundary, Query Bounds & Retention Safety
 
 Baseline: `d8eebe1438243989323fdfb7254ad7c94ccf7f62` (the Phase 6.4.1
 verification-record commit). **Schema version stays 6** — no migration was
