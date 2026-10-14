@@ -1372,7 +1372,8 @@ Baseline: `f0515e8d51159c543e4a37890dab713a27335d1c` (the Phase 6.4.8
 verification-record commit). **Schema version stays 6** — no migration was
 added, edited, or rewritten.
 
-**Status: IMPLEMENTED — pending the exact-SHA CI record below.**
+**Status: VERIFIED — implementation, tests, phase ledger, clean Git state, and
+exact-SHA CI all agree.**
 
 This phase is **test and documentation only**. No production code, migration,
 schema definition, CI threshold, or unrelated test was changed.
@@ -1507,6 +1508,20 @@ or mistyped variant.
   helper reference to the confidence type remains as it was; it was not in
   scope.
 - All Phase 6.4 through 6.4.8 limitations remain in force.
+
+### Commits and CI (exact SHA)
+
+| Commit | Meaning | CI run | head_sha | event | attempt | conclusion |
+|---|---|---|---|---|---|---|
+| `8b8121f338460d16fbcf0a0f74c1f7f6707b9a7e` | Phase 6.4.9 implementation | 38545123577 | matches | push | 1 | success |
+
+The implementation run was queried through the GitHub Actions API and its
+reported `head_sha` equals the commit exactly. All four jobs —
+`frontend`, `rust (ubuntu-latest)`, `rust (windows-latest)`,
+`rust (macos-latest)` — reported completed / success.
+
+This verification-record commit's own CI is reported in the terminal result
+rather than generating further commits solely to record a run id.
 
 `PHASE 6.5 — NOT STARTED.`
 
