@@ -2,12 +2,194 @@
 
 PHASE 6.5 — SQLite Pre-Migration Backup & Corrupt-Store Quarantine
 
-**Status: Phase 6.5 AUTHORIZED / IN PROGRESS** — started from baseline
-`5da54e9cd57b15c4bbdde8a4c175ce9dc66477b4`. Schema version stays 6; no schema
-migration is added and migration SQL v2–v6 is untouched. Scope is the
-history-store open path (safe pre-migration backup, corrupt-store
-quarantine), its regression tests, and truthful project records. Phase 6.6 and
-later phases are NOT authorized.
+**Status: Phase 6.5 VERIFIED** — started from baseline
+`5da54e9cd57b15c4bbdde8a4c175ce9dc66477b4`; implementation commit and
+exact-SHA CI recorded below. Schema version stays 6; no schema migration was
+added and migration SQL v2–v6 is byte-identical to the baseline. Scope was
+the history-store open path (safe pre-migration backup, corrupt-store
+quarantine), its regression tests, and truthful project records. **Phase 6.6
+and later phases are NOT authorized and were NOT started.**
+
+## Phase 6.5 — SQLite Pre-Migration Backup & Corrupt-Store Quarantine
+
+Baseline: `5da54e9cd57b15c4bbdde8a4c175ce9dc66477b4` (the Phase 6.4.9
+verification-record commit). **Schema version stays 6** — no migration was
+added, and migration SQL v2–v6 is byte-identical to the baseline (verified by
+extracting and comparing every `MIGRATION_V*` constant against `HEAD`
+before commit).
+
+**Status: VERIFIED — implementation, tests, phase ledger, clean Git state,
+and exact-SHA CI all agree.**
+
+### Baseline reconciliation (what was found, and what I did)
+
+The working tree at the required baseline HEAD was **not clean**. It contained
+uncommitted work that I did not create: a modified
+`crates/coresight-history/Cargo.toml` (adding the `backup` feature to the
+already-vendored `rusqlite` — no new dependency) and an untracked
+`src/store_safety.rs` draft. The draft was inspected rather than discarded.
+It was incomplete and would not have compiled if wired in (not declared in
+`lib.rs`; it referenced `StoreError::BackupFailed` / `QuarantineFailed`,
+which did not exist), and it carried three real defects that I fixed rather
+than inherited:
+
+1. It removed the temporary backup file **before** attempting to rename it
+   into place, so publication could never succeed.
+2. `exclusive_path` built its collision counter from a stale candidate with
+   dead code, rather than from the base name.
+3. `time_stamp()` was unused.
+
+Nothing else was reset, discarded, or overwritten.
+
+### What changed
+
+- `crates/coresight-history/src/store_safety.rs` (new) — the backup and
+  quarantine implementation, plus the `Hazard` test seam.
+- `crates/coresight-history/src/store.rs` — `StoreError::BackupFailed` /
+  `QuarantineFailed`; an opaque `Debug` for `HistoryStore` (so tests can use
+  `expect_err` without a `Debug` that could render paths); the preflight;
+  and `apply_migrations`, extracted so `open` and the test seam take one path.
+- `crates/coresight-history/src/lib.rs` — declares and re-exports the module.
+- `crates/coresight-history/tests/phase65_tests.rs` (new) — 14 tests.
+- `crates/coresight-history/Cargo.toml` — `rusqlite` `backup` feature only.
+- `docs/DATABASE.md` — the two PLANNED paragraphs replaced with the
+  implemented behaviour, its failure semantics, and its limitations.
+
+### The ordering defect that made this necessary
+
+`coresight_core::db::open` runs `PRAGMA journal_mode=WAL` and the v1
+bootstrap — **both write**. The old `HistoryStore::open` therefore checked
+integrity and read the schema version *after* it had already modified the
+file, so "check before anything reads or migrates it" was not actually true
+at the file level. `open` now inspects an EXISTING store through a
+`SQLITE_OPEN_READ_ONLY` connection first, and only then calls the mutating
+helper.
+
+The read-only handle is **closed before** any backup or relocation. This was
+found by test, not by reading: the first quarantine implementation failed on
+Windows with "could not move corrupt.db into quarantine" because the
+inspection connection was still alive, while the same code would have
+succeeded on Unix — a platform-dependent safety guarantee. The inspection
+now returns owned data (`enum Inspection`), never a `Connection`.
+
+### Safety properties and the tests that prove them
+
+| # | Test | Property |
+|---|---|---|
+| 1 | `a_new_database_creates_no_backup` | a new store is not backed up (nothing to protect) |
+| 2 | `a_current_schema_creates_no_backup` | an up-to-date store is not backed up |
+| 3+4 | `an_older_schema_is_backed_up_before_it_migrates` | a v2 store is backed up, verified readable, and the backup keeps version 2 and its rows after the source migrated to 6 |
+| 5 | `a_second_backup_cannot_overwrite_an_existing_one` | a second attempt publishes a distinct name; the first backup stays byte-identical |
+| 6 | `a_backup_failure_prevents_migration_and_preserves_the_source` | copy/verify/publish failures each abort the open; version and bytes unchanged; nothing published |
+| 7 | `a_failed_migration_keeps_the_pre_migration_state_and_the_backup` | a failed migration rolls back and the verified backup is retained |
+| 8 | `a_corrupt_store_is_quarantined_and_reported` | corruption yields typed `Corrupt` naming the quarantine directory |
+| 9 | `quarantine_preserves_wal_and_shm_sidecars` | `-wal`/`-shm` are relocated byte-for-byte, never dropped |
+| 10 | `a_quarantined_store_is_not_replaced_by_an_empty_store` | no fresh store inherits the path; the corrupt data is not claimed recovered |
+| 11 | `a_quarantine_collision_cannot_overwrite_existing_artifacts` | a second quarantine gets its own directory and leaves the first artifact untouched |
+| 12 | `a_relocation_failure_restores_the_store_and_reports_honestly` | rollback restores the file byte-identically and the error says it was NOT moved |
+| 13 | `a_non_corruption_open_failure_does_not_quarantine` | a directory at the store path moves nothing and is not called corruption |
+| 14 | `a_newer_schema_is_refused_and_left_untouched` | `SchemaTooNew` store is byte-identical, un-backed-up, un-quarantined |
+| + | `a_backup_captures_data_held_only_in_the_uncheckpointed_wal` | the backup is SQLite-consistent, not a file copy |
+
+Two of these deserve emphasis because they are the properties most likely to
+be claimed and least likely to be true:
+
+- **The WAL test is not incidental.** The fixture deliberately leaves a row
+  living only in an uncheckpointed `-wal`. A raw file copy of the main
+  database would publish a "backup" that silently omits committed history;
+  this test fails if anyone replaces the Online Backup API with a copy.
+- **Failure paths are injected, not described.** `Hazard` models a disk that
+  cannot be written, an unverifiable artifact, a failed rename, and a failed
+  publication. An untested failure path is a claim, not a guarantee.
+
+Only `SQLITE_CORRUPT` and `SQLITE_NOTADB` establish corruption. Permission
+denial, busy/locked, cannot-open, read-only, disk-full, locking-protocol and
+operation-interrupted are explicitly asserted NOT to trigger quarantine,
+because moving a healthy file aside would be worse than doing nothing.
+
+### Local verification (all executed, exit status checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | exit 0 |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| `cargo test --workspace` | exit 0 |
+| `cargo test --workspace --all-features` | exit 0 |
+| `cargo test --workspace -- --ignored` | exit 0 |
+| `npm ci` | exit 0 |
+| `npm audit --audit-level=high` | exit 0, 0 vulnerabilities |
+| `npm run build` | exit 0 |
+| `git diff --check` | exit 0 |
+
+Focused runs: `cargo test -p coresight-history --test phase65_tests` (14
+passed), the full `-p coresight-history` suite (exit 0, including the legacy
+v2 migration, migration-atomicity, newer-schema and corruption suites), and
+`cargo fmt`/`clippy` over the workspace with `--all-targets --all-features`.
+
+### CI verification (exact SHA)
+
+| Commit | Meaning | CI run | head_sha | event | attempt | conclusion |
+|---|---|---|---|---|---|---|
+| `ebd957ce56dd462864d0dfd757b423c8c9fc0dc2` | Phase 6.5 implementation | 38573598536 | matches | push | 1 | success |
+
+All four required jobs reported completed / success: `frontend`,
+`rust (ubuntu-latest)`, `rust (windows-latest)`, `rust (macos-latest)`.
+Queried through the GitHub Actions API; the reported `head_sha` equals the
+commit exactly. The macOS and Linux jobs exercise the rename path that the
+Windows-only defect above would have hidden.
+
+This verification-record commit's own CI is reported in the terminal result
+rather than generating further commits solely to record a run id.
+
+### Independent audit of the final diff
+
+Reviewed for the risks named in the phase brief; each was checked against
+the code and, where behavioural, by test:
+
+- **Data loss** — quarantine only ever renames into a directory created
+  exclusively for that attempt; a partial failure restores what it moved.
+- **WAL mistakes** — the backup goes through the Online Backup API and is
+  proven against uncheckpointed WAL data.
+- **Overwritten backups** — `create_new` reservation; proven by tests 5 and 11.
+- **False-positive quarantine** — only two SQLite codes qualify; proven by
+  test 13 and the negative `ErrorCode` assertions.
+- **Failure paths that mutate the source** — preflight runs before
+  `coresight_core::db::open`; proven by test 6 asserting byte-identical source.
+- **Incomplete rollback** — test 12; the partial-restore error names what
+  could not be restored rather than claiming success.
+- **Path collisions** — tested for both backup and quarantine.
+- **Swallowed errors** — `integrity_problems` uses `collect::<Result<..>>()`,
+  so a row that cannot be read is a failure to decide, never "healthy".
+  (This is also a fix: the previous code used `filter_map(|r| r.ok())`,
+  which silently discarded unreadable integrity rows.)
+- **Misleading documentation** — `docs/DATABASE.md`'s two PLANNED paragraphs
+  were replaced, not appended to.
+- **Platform assumptions** — the Windows rename constraint is handled
+  explicitly and was found by a real Windows failure, not assumed.
+
+Defect found and fixed during this audit: a failed backup attempt left the
+EMPTY reserved file behind, so a name that means "a backup exists" could
+point at 0 bytes. The reservation is now removed on every failure path.
+
+### Limitations (honest)
+
+- Quarantine **preserves**; it does not repair or recover. No replacement
+  database is created and nothing claims the history was recovered.
+- Publication is `remove` + `rename`, not one atomic step, so a crash in
+  between can leave a stray EMPTY file under the backup name.
+  `renameat2(RENAME_NOREPLACE)` would close that window but is not portable
+  to Windows/macOS and no dependency was added for it.
+- The quarantine/backup window is safe against concurrent CoreSight
+  processes (names are reserved exclusively), but a non-CoreSight writer
+  deliberately targeting the exact backup path in that single-rename window
+  is not defended against.
+- A corrupt store is relocated next to the original. If the volume is
+  failing, a copy-out would be safer than a rename; this phase does rename.
+- Backup and quarantine are filesystem-local: no encryption, no network, no
+  subprocess, and the crate still has no logging or telemetry — paths reach
+  only the returned error.
+- The backup is taken per open that needs a migration, not on a schedule;
+  a store that is already current is never backed up.
 
 PHASE 6.4 — Persistent Application Intelligence + System-Model Snapshot
 Integration

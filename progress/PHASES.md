@@ -105,7 +105,7 @@ current-state claims. Current-state documents use CoreSight.
     (ubuntu/windows/macos/frontend all SUCCESS). Status:
     `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 6.5 — SQLite pre-migration backup & corrupt-store quarantine.**
-  AUTHORIZED / IN PROGRESS (started from `5da54e9cd57b15c4bbdde8a4c175ce9dc66477b4`).
+  IMPLEMENTED + VERIFIED (from `5da54e9cd57b15c4bbdde8a4c175ce9dc66477b4`).
   A verified, SQLite-consistent backup of an existing healthy store is completed
   and published before any forward migration mutates it; a store whose
   corruption is positively established is relocated to a collision-safe
