@@ -113,7 +113,8 @@ current-state claims. Current-state documents use CoreSight.
   deleted. Schema stays v6; migration SQL v2–v6 unchanged. Status:
   `progress/CURRENT_PHASE.md`.
   - [ ] **PHASE 6.5.1 — safety closure of the 6.5 open path.**
-    AUTHORIZED / IN PROGRESS (started from `1b458e82095e51031da46978d94f7f282ebb3297`).
+    IMPLEMENTED + VERIFIED (from `1b458e82095e51031da46978d94f7f282ebb3297`,
+    implementation CI run 38722753282 all four jobs green).
     Concurrent backup attempts own their artifact names and never adopt or
     delete another attempt's; a valid SQLite file this build cannot recognize
     is refused with its database file and `-wal` byte-identical instead of

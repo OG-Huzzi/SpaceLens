@@ -2,9 +2,9 @@
 
 PHASE 6.5.1 — Safety Closure for the Phase 6.5 Open Path (concurrent backups, unrecognized schemas, post-bootstrap quarantine, rollback honesty)
 
-**Status: Phase 6.5.1 IMPLEMENTED — every local gate executed and green
-(table below); the exact-SHA CI is recorded by the immediate
-verification-record commit.** Started from baseline
+**Status: Phase 6.5.1 IMPLEMENTED + VERIFIED — every local gate executed
+and green (table below), and the implementation commit's exact-SHA CI is
+green on all four required jobs (table below).** Started from baseline
 `1b458e82095e51031da46978d94f7f282ebb3297` (the Phase 6.5 red-run record).
 **Schema version stays 6** — no migration was added, and migration SQL v2–v6
 is byte-identical to the baseline (all five `MIGRATION_V*` constants
@@ -146,9 +146,21 @@ case-sensitively against the working tree: all five constants byte-identical
 
 ### CI verification (exact SHA)
 
-Recorded by the immediate verification-record commit: the implementation
-commit's run id, `head_sha` match, attempt, and the four required job
-conclusions, followed by that verification commit's own CI.
+| Commit | Meaning | CI run | head_sha | event | attempt | conclusion |
+|---|---|---|---|---|---|---|
+| `188ac27e37dddc9699db7e321197c2c49b2bd2b2` | Phase 6.5.1 implementation | 38722753282 | matches | push | 1 | success |
+
+All four required jobs reported completed / success: `frontend`,
+`rust (ubuntu-latest)`, `rust (windows-latest)`, `rust (macos-latest)`.
+Queried through the GitHub Actions API; the reported `head_sha` equals the
+commit exactly, and no other run was created for this SHA. The macOS and
+Linux jobs exercise the rename and rollback paths on their platforms; the
+Windows job exercises the close-before-rename constraint the preflight
+depends on.
+
+This verification-record commit's own CI is verified through the same API
+and reported in the terminal result; a further record commit is created only
+if a run is red or needs correcting.
 
 ### Limitations (honest)
 
