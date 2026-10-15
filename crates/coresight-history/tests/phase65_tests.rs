@@ -28,22 +28,36 @@
 //! - **A file this build cannot recognize is refused without being
 //!   written** (`UnrecognizedSchema`): a foreign SQLite database, unusable
 //!   `schema_version` metadata, a recorded version of 0, or a recorded
-//!   version whose core tables are absent never reaches the mutating
-//!   bootstrap. Before, a foreign database was called "current" (it
-//!   records no version), and the bootstrap ADDED CoreSight tables to it.
-//!   The database file and its `-wal` sidecar are left byte-identical and
-//!   no sidecar is deleted; the `-shm` (SQLite's derived WAL index, which
-//!   the read path rebuilds whenever a `-wal` is present) is checked for
-//!   survival, not for bytes — it holds no data.
+//!   version whose required structure is absent (the tables AND signature
+//!   columns, Phase 6.5.2) never reaches the mutating bootstrap. Before, a
+//!   foreign database was called "current" (it records no version), and
+//!   the bootstrap ADDED CoreSight tables to it. The database file and its
+//!   `-wal` sidecar are left byte-identical and no sidecar is deleted; the
+//!   `-shm` (SQLite's derived WAL index, which the read path rebuilds
+//!   whenever a `-wal` is present) is checked for survival, not for bytes —
+//!   it holds no data.
 //! - **Post-bootstrap corruption is quarantined too**: corruption
 //!   established on the already-open connection took a path that returned
 //!   the error WITHOUT moving the store aside, so a reliably corrupt store
-//!   stayed at a path every future open keeps failing on.
+//!   stayed at a path every future open keeps failing on. (Proven by the
+//!   crate-internal failure-path tests in `src/store_hazard_tests.rs`.)
 //! - **A failed rollback reports honestly**: a relocation failure after
 //!   real moves are already made restores what it can; if the MAIN file
 //!   cannot be restored it stays quarantined and the error says exactly
 //!   which artifact is where instead of claiming the store was moved or
-//!   that everything is back where it was.
+//!   that everything is back where it was. (Proven by the crate-internal
+//!   failure-path tests.)
+//!
+//! Phase 6.5.2 adds two more, also proven below:
+//!
+//! - **The recognition contract is the real per-version structure**: a
+//!   store recording a version that is missing the tables or signature
+//!   columns that version's migrations guarantee is refused with its bytes
+//!   preserved — never bootstrapped, migrated, backed up, or quarantined.
+//! - **No public API can manufacture corruption evidence**: the hazard
+//!   seams are crate-internal now (no `#[doc(hidden)] pub`, no test
+//!   feature); this test crate imports nothing from `store_safety`, and
+//!   the only public entry point is [`HistoryStore::open`].
 //!
 //! Every fixture is a real SQLite database in a temporary directory. No real
 //! user database, home-directory path, or platform data is ever touched.
@@ -52,7 +66,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use coresight_history::store::HISTORY_SCHEMA_VERSION;
-use coresight_history::store_safety::{Hazard, PostBootstrapFault};
 use coresight_history::{HistoryStore, QueryLimits, StoreError};
 use rusqlite::Connection;
 
@@ -337,51 +350,6 @@ fn a_second_backup_cannot_overwrite_an_existing_one() {
     }
 }
 
-/// (6) A backup failure at EVERY stage prevents the migration and leaves the
-/// source exactly as it was. Each injected hazard stands for a real fault.
-#[test]
-fn a_backup_failure_prevents_migration_and_preserves_the_source() {
-    for (label, hazard) in [
-        ("copy", Hazard::BackupCopy),
-        ("verify", Hazard::BackupVerify),
-        ("publish", Hazard::BackupPublish),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("hazard.db");
-        build_legacy_v2(&db);
-
-        let before = fs::read(&db).unwrap();
-        let err = HistoryStore::open_with_hazard(&db, hazard)
-            .expect_err(&format!("a {label} failure must abort the open"));
-        assert!(
-            matches!(err, StoreError::BackupFailed { .. }),
-            "{label}: expected BackupFailed, got {err:?}"
-        );
-
-        assert_eq!(
-            schema_version_of(&db),
-            2,
-            "{label}: a failed backup must NOT migrate the store"
-        );
-        assert_eq!(
-            fs::read(&db).unwrap(),
-            before,
-            "{label}: a failed backup must leave the source byte-identical"
-        );
-        // Nothing was published under the backup name, and the temporary
-        // artifact this attempt owned was cleaned up.
-        assert!(
-            backup_artifacts(&db).is_empty(),
-            "{label}: a failed attempt must publish nothing"
-        );
-        assert!(
-            !db.with_extension("backup-in-progress").exists()
-                && !with_raw_suffix(&db, ".backup-in-progress").exists(),
-            "{label}: the temporary artifact must be cleaned up"
-        );
-    }
-}
-
 fn with_raw_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap().to_os_string();
     name.push(suffix);
@@ -455,64 +423,6 @@ fn a_failed_migration_keeps_the_pre_migration_state_and_the_backup() {
     assert_eq!(
         still, 1,
         "a failed migration must leave the pre-migration rows intact"
-    );
-}
-
-/// The backup is SQLite-consistent, not a file copy: data that exists ONLY
-/// in an uncheckpointed write-ahead log must appear in the backup.
-///
-/// This is the specific failure a raw `fs::copy` of the main database file
-/// would produce: the main file is a valid, older image and the newest
-/// committed rows live in `-wal`. Copying only the main file would publish a
-/// backup that silently omits committed history.
-#[test]
-fn a_backup_captures_data_held_only_in_the_uncheckpointed_wal() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("wal.db");
-    {
-        let conn = Connection::open(&db).unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
-        conn.execute_batch(
-            "CREATE TABLE schema_version (version INTEGER NOT NULL);
-             INSERT INTO schema_version VALUES (1);
-             CREATE TABLE keeper(marker TEXT NOT NULL);",
-        )
-        .unwrap();
-        conn.execute("UPDATE schema_version SET version = 2", [])
-            .unwrap();
-        conn.execute("INSERT INTO keeper VALUES ('committed-row')", [])
-            .unwrap();
-        // Leaking the connection leaves the WAL un-checkpointed, so the row
-        // above exists ONLY in the -wal file.
-        std::mem::forget(conn);
-    }
-    let wal = with_raw_suffix(&db, "-wal");
-    assert!(
-        wal.exists(),
-        "the fixture must really have an uncheckpointed WAL"
-    );
-
-    let src = Connection::open(&db).unwrap();
-    let published = coresight_history::store_safety::verified_pre_migration_backup(
-        &src,
-        &db,
-        Some(2),
-        Hazard::None,
-    )
-    .expect("a WAL-mode store must still back up");
-    drop(src);
-
-    let b = Connection::open(&published).unwrap();
-    let rows: i64 = b
-        .query_row(
-            "SELECT COUNT(*) FROM keeper WHERE marker = 'committed-row'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        rows, 1,
-        "the backup must include rows that exist only in the uncheckpointed WAL"
     );
 }
 
@@ -667,42 +577,6 @@ fn a_quarantine_collision_cannot_overwrite_existing_artifacts() {
         fs::read(&first_artifact).unwrap(),
         first_bytes,
         "the earlier quarantined artifact must be untouched"
-    );
-}
-
-/// (12) A relocation failure is rolled back: the store is restored to its
-/// original location and the error does NOT claim a successful quarantine.
-#[test]
-fn a_relocation_failure_restores_the_store_and_reports_honestly() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("relocate-fail.db");
-    build_corrupt_store(&db);
-    let before = fs::read(&db).unwrap();
-
-    let err = HistoryStore::open_with_hazard(&db, Hazard::QuarantineRelocate)
-        .expect_err("an injected relocation failure must abort the open");
-
-    match &err {
-        StoreError::Corrupt { detail, .. } => {
-            assert!(
-                detail.contains("could NOT be moved aside"),
-                "a failed quarantine must be reported truthfully: {detail}"
-            );
-        }
-        other => panic!("expected Corrupt, got {other:?}"),
-    }
-    assert!(
-        db.exists(),
-        "the store must be restored to its original location"
-    );
-    assert_eq!(
-        fs::read(&db).unwrap(),
-        before,
-        "restoration must be byte-identical"
-    );
-    assert!(
-        quarantine_dirs(&db).is_empty(),
-        "a rolled-back quarantine must not leave an empty directory behind"
     );
 }
 
@@ -1065,274 +939,187 @@ fn an_existing_v1_store_is_backed_up_and_migrated() {
 }
 
 // ---------------------------------------------------------------------------
-// Post-bootstrap integrity (Phase 6.5.1, Workstream C)
+// The full recognition contract (Phase 6.5.2, Workstream C): the
+// per-version structure a real store has, not just a table name or two
 // ---------------------------------------------------------------------------
 
-/// A healthy store already at the current version: nothing to migrate, so
-/// no backup is involved and the only variable is the post-bootstrap
-/// check.
-fn build_current_store(db: &Path) {
-    let store = HistoryStore::open(db).expect("fixture: a fresh store must open");
-    drop(store);
-}
-
-/// (21) Corruption established on the ALREADY-OPEN connection is
-/// quarantined exactly like preflight corruption — never merely refused
-/// with the store left at a path every future open keeps failing on.
+/// (26) An incomplete v2 store — it records version 2, but it has only
+/// `scan_runs` + `observations` and lacks the v1 bootstrap tables and half
+/// the v2 tables — is refused as `UnrecognizedSchema` and left untouched:
+/// no bootstrap table added, no migration, no backup, no quarantine, the
+/// database and its `-wal` byte-identical, no sidecar deleted.
+///
+/// This is the decisive regression for the recognition contract: under the
+/// Phase 6.5.1 rule (`scan_runs` + `observations` present) this file WAS
+/// recognized, so the mutating bootstrap would have run on it.
 #[test]
-fn post_bootstrap_corruption_is_quarantined_like_preflight_corruption() {
+fn an_incomplete_v2_store_is_refused_untouched() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("late-corrupt.db");
-    build_current_store(&db);
-
-    let err = HistoryStore::open_with_hazard(
-        &db,
-        Hazard::PostBootstrapIntegrity(PostBootstrapFault::ReportsCorruption),
-    )
-    .expect_err("injected post-bootstrap corruption must abort the open");
-
-    assert!(
-        matches!(err, StoreError::Corrupt { .. }),
-        "expected a typed Corrupt error, got {err:?}"
-    );
-    let message = err.to_string();
-    assert!(
-        message.contains("database integrity check failed on open:"),
-        "the established prefix must be preserved: {message}"
-    );
-    assert!(
-        message.contains("injected post-bootstrap corruption"),
-        "the evidence must name the injected corruption: {message}"
-    );
-
-    let dirs = quarantine_dirs(&db);
-    assert_eq!(dirs.len(), 1, "the store must be quarantined: {dirs:?}");
-    assert!(
-        dirs[0].join("late-corrupt.db").exists(),
-        "the store file must be preserved inside the quarantine directory"
-    );
-    assert!(
-        message.contains(&dirs[0].display().to_string()),
-        "the error must name the quarantine location: {message}"
-    );
-    assert!(
-        !db.exists(),
-        "no replacement store may be left at the original path"
-    );
-    assert!(
-        backup_artifacts(&db).is_empty(),
-        "a store already at the current version is not backed up"
-    );
-}
-
-/// (22) A post-bootstrap check that cannot be READ for a non-corruption
-/// reason preserves the store: nothing may be quarantined on an
-/// environment failure.
-#[test]
-fn a_post_bootstrap_io_failure_preserves_the_store_without_quarantine() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("late-io.db");
-    build_current_store(&db);
-
-    let err = HistoryStore::open_with_hazard(
-        &db,
-        Hazard::PostBootstrapIntegrity(PostBootstrapFault::UnreadableIoError),
-    )
-    .expect_err("an unreadable (I/O) result must abort the open");
-    assert!(
-        !matches!(err, StoreError::Corrupt { .. }),
-        "an I/O failure is not corruption and must not be reported as it: {err:?}"
-    );
-    assert!(
-        err.to_string()
-            .contains("injected unreadable integrity result (I/O)"),
-        "the environment failure must be surfaced as-is: {err}"
-    );
-
-    assert!(
-        db.exists(),
-        "an environment failure must not move the store"
-    );
-    assert!(
-        quarantine_dirs(&db).is_empty(),
-        "nothing may be quarantined for a non-corruption failure"
-    );
-    assert!(backup_artifacts(&db).is_empty());
-    let store = HistoryStore::open(&db).expect("the store must still be readable");
-    drop(store);
-}
-
-/// (23) A post-bootstrap result that cannot be READ with SQLite's own
-/// corruption code is positive corruption evidence: it is quarantined
-/// rather than smoothed into "healthy" or reported without a quarantine.
-#[test]
-fn a_post_bootstrap_unreadable_corruption_result_is_quarantined() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("late-unreadable.db");
-    build_current_store(&db);
-
-    let err = HistoryStore::open_with_hazard(
-        &db,
-        Hazard::PostBootstrapIntegrity(PostBootstrapFault::UnreadableCorruption),
-    )
-    .expect_err("an unreadable (corruption) result must abort the open");
-    match &err {
-        StoreError::Corrupt { detail, .. } => assert!(
-            detail.contains("injected unreadable integrity result (corruption)"),
-            "{detail}"
-        ),
-        other => panic!("expected Corrupt, got {other:?}"),
+    let db = dir.path().join("incomplete-v2.db");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version VALUES (2);
+             CREATE TABLE scan_runs (
+                 run_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, roots TEXT NOT NULL,
+                 platform TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL
+             );
+             CREATE TABLE observations (
+                 run_id TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL
+             );",
+        )
+        .unwrap();
     }
-
-    let dirs = quarantine_dirs(&db);
-    assert_eq!(
-        dirs.len(),
-        1,
-        "corruption established from an unreadable result must quarantine: {dirs:?}"
-    );
-    assert!(dirs[0].join("late-unreadable.db").exists());
-}
-
-// ---------------------------------------------------------------------------
-// Quarantine rollback (Phase 6.5.1, Workstream D)
-// ---------------------------------------------------------------------------
-
-/// A corrupt store with BOTH sidecars present as real files, so a
-/// relocation failure has already-moved artifacts to roll back.
-/// Returns `(wal, wal_bytes, shm)`. The `-shm` is a derived index that
-/// SQLite's read path rebuilds when a `-wal` is present, so its BYTES are
-/// not part of the contract — only its survival at the original path.
-fn build_corrupt_store_with_sidecars(db: &Path) -> (PathBuf, Vec<u8>, PathBuf) {
-    build_corrupt_store(db);
-    let wal = with_raw_suffix(db, "-wal");
-    let shm = with_raw_suffix(db, "-shm");
-    fs::write(&wal, b"uncheckpointed wal frames").unwrap();
-    fs::write(&shm, b"shm index state").unwrap();
-    let wal_bytes = fs::read(&wal).unwrap();
-    (wal, wal_bytes, shm)
-}
-
-/// (24) A relocation failure AFTER real moves were made restores every
-/// MOVED artifact byte-identically and reports truthfully that the store
-/// was NOT moved. (Test 12 covers failing before anything moved; this
-/// covers the rollback with a real move list — the main file and the
-/// `-wal` had already moved when the `-shm` relocation failed.)
-#[test]
-fn a_sidecar_relocation_failure_restores_everything_that_moved() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("sidecar-fail.db");
-    let (wal, wal_bytes, shm) = build_corrupt_store_with_sidecars(&db);
+    // A stale `-wal` beside it must survive the refusal byte-identically:
+    // the check must not delete a sidecar of a store it did not write. (The
+    // file is in rollback journal mode, so this stray WAL is inert.)
+    let wal = with_raw_suffix(&db, "-wal");
+    fs::write(&wal, b"stale wal bytes").unwrap();
     let before = fs::read(&db).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
 
-    let err = HistoryStore::open_with_hazard(&db, Hazard::QuarantineRelocateSidecar)
-        .expect_err("an injected sidecar relocation failure must abort the open");
+    let err = HistoryStore::open(&db).expect_err("an incomplete v2 store must be refused");
     match &err {
-        StoreError::Corrupt { detail, .. } => {
-            assert!(
-                detail.contains("could NOT be moved aside"),
-                "a fully rolled-back quarantine must say the store was NOT moved: {detail}"
-            );
+        StoreError::UnrecognizedSchema { detail } => {
+            for needle in [
+                "missing core tables",
+                "missing table drives",
+                "missing table scans",
+                "missing table relationship_obs",
+                "missing table relationship_members",
+            ] {
+                assert!(
+                    detail.contains(needle),
+                    "the refusal must name {needle:?}: {detail}"
+                );
+            }
         }
-        other => panic!("expected Corrupt, got {other:?}"),
+        other => panic!("expected UnrecognizedSchema, got {other:?}"),
     }
 
-    assert!(db.exists(), "the main store must be restored");
     assert_eq!(
         fs::read(&db).unwrap(),
         before,
-        "the restored main store must be byte-identical"
+        "the refused database must be byte-identical"
     );
+    assert!(wal.exists(), "no sidecar may be deleted");
     assert_eq!(
         fs::read(&wal).unwrap(),
-        wal_bytes,
-        "the -wal must be restored byte-identically"
+        wal_before,
+        "the -wal must be byte-identical"
     );
     assert!(
-        shm.exists(),
-        "the -shm must be back at its original path — the rollback of the \
-         relocations must never lose a sidecar (SQLite may rebuild this \
-         derived index while reading; its bytes are not the contract)"
+        backup_artifacts(&db).is_empty(),
+        "an unrecognized file must not be backed up"
     );
     assert!(
         quarantine_dirs(&db).is_empty(),
-        "a fully rolled-back quarantine must not leave a directory behind"
+        "an unrecognized file is not corrupt and must not be quarantined"
     );
-    assert!(backup_artifacts(&db).is_empty());
+    assert_eq!(schema_version_of(&db), 2, "no migration may run");
+
+    let conn = Connection::open(&db).unwrap();
+    let added: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name IN
+             ('drives', 'scans', 'relationship_obs', 'relationship_members')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(added, 0, "no CoreSight table may be added");
 }
 
-/// (25) When the rollback itself fails for the MAIN database, the error
-/// reports a partial state honestly: the main file stays inside the
-/// quarantine directory, the sidecars are back where they were, and the
-/// message claims neither a successful quarantine nor that everything is
-/// unchanged.
+/// (27) A store that records v6 but is missing a signature COLUMN the v6
+/// migration guarantees (`app_snapshot_apps.id_encoding`) is refused —
+/// having every table is not enough when the recorded version promises the
+/// column — and is left byte-identical: no bootstrap, no migration, no
+/// backup, no quarantine.
 #[test]
-fn an_unrestorable_main_file_is_reported_honestly_and_stays_quarantined() {
+fn a_v6_store_missing_a_required_column_is_refused_untouched() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("restore-fail.db");
-    let (wal, wal_bytes, shm) = build_corrupt_store_with_sidecars(&db);
+    let db = dir.path().join("v6-missing-column.db");
+    {
+        let store = HistoryStore::open(&db).expect("fixture: a fresh store must open");
+        drop(store);
+    }
+    // Remove the v6 column: a plain schema edit, exactly the shape a
+    // partial lookalike (or a damaged store) has.
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("ALTER TABLE app_snapshot_apps DROP COLUMN id_encoding;")
+            .unwrap();
+    }
     let before = fs::read(&db).unwrap();
 
-    let err = HistoryStore::open_with_hazard(&db, Hazard::QuarantineRestore)
-        .expect_err("an injected restore failure must abort the open");
-    let detail = match &err {
-        StoreError::Corrupt { detail, .. } => detail.clone(),
-        other => panic!("expected Corrupt, got {other:?}"),
-    };
+    let err = HistoryStore::open(&db).expect_err("an incomplete v6 store must be refused");
+    match &err {
+        StoreError::UnrecognizedSchema { detail } => assert!(
+            detail.contains("missing column app_snapshot_apps.id_encoding"),
+            "the refusal must name the missing column: {detail}"
+        ),
+        other => panic!("expected UnrecognizedSchema, got {other:?}"),
+    }
 
-    assert!(
-        detail.contains("could NOT be quarantined cleanly"),
-        "the partial failure must say the quarantine was not clean: {detail}"
-    );
-    assert!(
-        detail.contains("NOT all at their original locations"),
-        "the partial failure must not claim the files are where they were: {detail}"
-    );
-    assert!(
-        !detail.contains("could NOT be moved aside"),
-        "the partial-state report must not be downgraded to the fully-restored wording: {detail}"
-    );
-    assert!(
-        !detail.contains("was preserved (not deleted, not repaired) under"),
-        "no successful quarantine may be claimed: {detail}"
-    );
-
-    // The main file could not be restored: it remains quarantined, and the
-    // error says exactly where.
-    assert!(
-        !db.exists(),
-        "the main file did not return to its original path"
-    );
-    let dirs = quarantine_dirs(&db);
     assert_eq!(
-        dirs.len(),
-        1,
-        "the quarantine directory must remain: {dirs:?}"
-    );
-    let quarantined = dirs[0].join("restore-fail.db");
-    assert!(
-        quarantined.exists(),
-        "the main file must remain inside the quarantine directory"
-    );
-    assert_eq!(
-        fs::read(&quarantined).unwrap(),
+        fs::read(&db).unwrap(),
         before,
-        "the quarantined file must be byte-identical to what was moved"
+        "the refused database must be byte-identical"
     );
     assert!(
-        detail.contains(&quarantined.display().to_string()),
-        "the error must name where the unrestorable artifact is: {detail}"
+        backup_artifacts(&db).is_empty(),
+        "an unrecognized file must not be backed up"
     );
-
-    // The sidecars WERE restored to their original path.
+    assert!(
+        quarantine_dirs(&db).is_empty(),
+        "an unrecognized file is not corrupt and must not be quarantined"
+    );
     assert_eq!(
-        fs::read(&wal).unwrap(),
-        wal_bytes,
-        "the -wal must have returned to its original path"
+        schema_version_of(&db),
+        HISTORY_SCHEMA_VERSION,
+        "no migration may run and the version must not change"
     );
+}
+
+/// (28) A store that records v6 but is missing a v5 table is refused the
+/// same way: the structure contract follows the recorded version through
+/// every migration, not just the newest one.
+#[test]
+fn a_v6_store_missing_a_required_table_is_refused_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("v6-missing-table.db");
+    {
+        let store = HistoryStore::open(&db).expect("fixture: a fresh store must open");
+        drop(store);
+    }
+    // `app_snapshot_history` is referenced by no other table, so dropping
+    // it leaves a clean (if incomplete) schema.
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("DROP TABLE app_snapshot_history;")
+            .unwrap();
+    }
+    let before = fs::read(&db).unwrap();
+
+    let err = HistoryStore::open(&db).expect_err("an incomplete v6 store must be refused");
+    match &err {
+        StoreError::UnrecognizedSchema { detail } => assert!(
+            detail.contains("missing table app_snapshot_history"),
+            "the refusal must name the missing table: {detail}"
+        ),
+        other => panic!("expected UnrecognizedSchema, got {other:?}"),
+    }
+
+    assert_eq!(
+        fs::read(&db).unwrap(),
+        before,
+        "the refused database must be byte-identical"
+    );
+    assert!(backup_artifacts(&db).is_empty(), "no backup may be taken");
     assert!(
-        shm.exists(),
-        "the -shm must have returned to its original path (SQLite may have \
-         rebuilt this derived index while reading; it must never be lost)"
+        quarantine_dirs(&db).is_empty(),
+        "nothing may be quarantined"
     );
-    assert!(backup_artifacts(&db).is_empty());
+    assert_eq!(schema_version_of(&db), HISTORY_SCHEMA_VERSION);
 }

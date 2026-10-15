@@ -17,62 +17,25 @@ use coresight_identity::{DuplicateStatus, ObjectIdentity, StorageAccounting, Und
 // A legacy v4-era database written by the PRE-6.4.2 unchecked writer
 // ---------------------------------------------------------------------------
 
-const LEGACY_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS scan_runs (
-    run_id TEXT PRIMARY KEY,
-    started_at INTEGER NOT NULL,
-    completed_at INTEGER,
-    roots TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    config TEXT NOT NULL,
-    status TEXT NOT NULL,
-    entries_examined INTEGER NOT NULL DEFAULT 0,
-    files INTEGER NOT NULL DEFAULT 0,
-    dirs INTEGER NOT NULL DEFAULT 0,
-    links INTEGER NOT NULL DEFAULT 0,
-    other_entries INTEGER NOT NULL DEFAULT 0,
-    bytes INTEGER NOT NULL DEFAULT 0,
-    observation_errors INTEGER NOT NULL DEFAULT 0,
-    candidates_untracked INTEGER NOT NULL DEFAULT 0,
-    hash_failures INTEGER NOT NULL DEFAULT 0,
-    rel_status TEXT,
-    rel_truncated INTEGER
-);
-CREATE TABLE IF NOT EXISTS observations (
-    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
-    path TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER,
-    device INTEGER, inode INTEGER, file_id_hi INTEGER, modified INTEGER,
-    category TEXT, subcategory TEXT, content_sha256 TEXT, obs_error TEXT,
-    PRIMARY KEY (run_id, path)
-);
-CREATE TABLE IF NOT EXISTS relationship_obs (
-    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
-    rel_id TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL,
-    member_count INTEGER NOT NULL, recoverable INTEGER, accounting TEXT NOT NULL,
-    PRIMARY KEY (run_id, rel_id)
-);
-CREATE TABLE IF NOT EXISTS relationship_members (
-    run_id TEXT NOT NULL, rel_id TEXT NOT NULL, path TEXT NOT NULL,
-    device INTEGER, inode INTEGER, file_id_hi INTEGER,
-    PRIMARY KEY (run_id, rel_id, path)
-);
-CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
-";
-
 fn config_json() -> String {
     serde_json::to_string(&ConfigFingerprint::current()).unwrap()
 }
 
 /// A legacy run whose numbers were written with the OLD unchecked
 /// `u64 as i64` conversion, so a domain value >= 2^63 is stored negative.
+///
+/// The fixture builds a REAL store through the production opener and then
+/// writes the legacy ROWS directly (Phase 6.5.2: the recognition contract
+/// is the true per-version schema, so a hand-rolled partial schema is no
+/// longer recognized as one of this build's stores). The rows — the part
+/// under test — are unchanged: the same legacy numeric bit patterns, the
+/// same config JSON, the same relationship report shape.
 fn build_legacy_run(db: &Path, rel_truncated_i64: i64, recoverable_i64: i64) {
+    {
+        let store = HistoryStore::open(db).unwrap();
+        drop(store);
+    }
     let conn = rusqlite::Connection::open(db).unwrap();
-    conn.execute_batch(LEGACY_SCHEMA).unwrap();
-    conn.execute(
-        "INSERT INTO schema_version (version) VALUES (6)",
-        rusqlite::params![],
-    )
-    .unwrap();
     conn.execute(
         "INSERT INTO scan_runs
          (run_id, started_at, completed_at, roots, platform, config, status,

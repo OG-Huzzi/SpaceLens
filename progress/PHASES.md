@@ -123,6 +123,23 @@ current-state claims. Current-state documents use CoreSight.
     reports exactly which files moved and which did not, proven with real
     moves to roll back. Schema stays v6; migration SQL v2–v6 byte-identical.
     Status: `progress/CURRENT_PHASE.md`.
+  - [ ] **PHASE 6.5.2 — remaining 6.5 safety gaps (test-only API surface,
+    fail-closed integrity, full per-version recognition, preflight-to-write
+    race).** IMPLEMENTED — every local gate executed and green; the
+    exact-SHA CI is recorded by the immediate verification-record commit
+    (started from `d62665a87e5c0eb58b4a2e31ad193dba8f58cf13`).
+    The hazard/backup/quarantine seams are crate-private (no
+    `open_with_hazard`, no `#[doc(hidden)] pub`, no test-only feature); an
+    `integrity_check` that returns NO rows is a failure to establish
+    integrity, never health (store left in place, no quarantine, no backup
+    published); the corruption classifier compares SQLite's RAW result
+    codes; recognition enforces the full per-version structure (tables +
+    signature columns, v1–v6) with adversarial fixtures proving untouched
+    refusal; and the read-write connection that writes is re-validated by a
+    mutation gate on that same connection, so a database swapped in after
+    the read-only gate is either handled under its own verdict or refused
+    without being written. Schema stays v6; migration SQL v2–v6
+    byte-identical. Status: `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.

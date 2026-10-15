@@ -466,58 +466,19 @@ fn report_with(
     }
 }
 
-/// The store's own schema, used to build raw fixture rows.
-const RAW_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS scan_runs (
-    run_id TEXT PRIMARY KEY,
-    started_at INTEGER NOT NULL,
-    completed_at INTEGER,
-    roots TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    config TEXT NOT NULL,
-    status TEXT NOT NULL,
-    entries_examined INTEGER NOT NULL DEFAULT 0,
-    files INTEGER NOT NULL DEFAULT 0,
-    dirs INTEGER NOT NULL DEFAULT 0,
-    links INTEGER NOT NULL DEFAULT 0,
-    other_entries INTEGER NOT NULL DEFAULT 0,
-    bytes INTEGER NOT NULL DEFAULT 0,
-    observation_errors INTEGER NOT NULL DEFAULT 0,
-    candidates_untracked INTEGER NOT NULL DEFAULT 0,
-    hash_failures INTEGER NOT NULL DEFAULT 0,
-    rel_status TEXT,
-    rel_truncated INTEGER
-);
-CREATE TABLE IF NOT EXISTS observations (
-    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
-    path TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER,
-    device INTEGER, inode INTEGER, file_id_hi INTEGER, modified INTEGER,
-    category TEXT, subcategory TEXT, content_sha256 TEXT, obs_error TEXT,
-    PRIMARY KEY (run_id, path)
-);
-CREATE TABLE IF NOT EXISTS relationship_obs (
-    run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
-    rel_id TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL,
-    member_count INTEGER NOT NULL, recoverable INTEGER, accounting TEXT NOT NULL,
-    PRIMARY KEY (run_id, rel_id)
-);
-CREATE TABLE IF NOT EXISTS relationship_members (
-    run_id TEXT NOT NULL, rel_id TEXT NOT NULL, path TEXT NOT NULL,
-    device INTEGER, inode INTEGER, file_id_hi INTEGER,
-    PRIMARY KEY (run_id, rel_id, path)
-);
-";
-
 /// Insert one raw run row with an explicit (status, counter) pair.
+///
+/// The fixture builds a REAL store through the production opener and then
+/// writes the raw run row directly (Phase 6.5.2: the recognition contract
+/// is the true per-version schema, so a hand-rolled partial schema is no
+/// longer recognized as one of this build's stores). The row — the part
+/// under test — is unchanged.
 fn insert_raw_run(db: &Path, run_id: &str, rel_status: Option<&str>, rel_truncated: Option<i64>) {
+    {
+        let store = HistoryStore::open(db).unwrap();
+        drop(store);
+    }
     let conn = rusqlite::Connection::open(db).unwrap();
-    conn.execute_batch(RAW_SCHEMA).unwrap();
-    conn.execute(
-        "INSERT INTO schema_version (version) VALUES (6)",
-        rusqlite::params![],
-    )
-    .unwrap();
     conn.execute(
         "INSERT INTO scan_runs
          (run_id, started_at, roots, platform, config, status, rel_status, rel_truncated)

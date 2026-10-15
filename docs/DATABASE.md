@@ -136,12 +136,13 @@ a defaulted `0`, `None`, or empty value.
   the user to upgrade); older stores migrate forward automatically.
 - A file that is a valid SQLite database but NOT a store this build can
   recognize — no `schema_version` table, unusable version metadata, a
-  recorded version of 0, or a recorded version missing its core tables — is
-  refused UNWRITTEN with `StoreError::UnrecognizedSchema` (Phase 6.5.1). It
-  is not initialized, backed up, migrated, or quarantined: the mutating
-  bootstrap never runs on a database CoreSight does not own. A brand-new
-  EMPTY file is the one shape that IS initialized — refusing it would
-  refuse a first run.
+  recorded version of 0, or a recorded version whose required structure
+  (the tables AND signature columns its migrations guarantee) is incomplete
+  — is refused UNWRITTEN with `StoreError::UnrecognizedSchema` (Phase 6.5.1;
+  the structure contract completed in Phase 6.5.2). It is not initialized,
+  backed up, migrated, or quarantined: the mutating bootstrap never runs on
+  a database CoreSight does not own. A brand-new EMPTY file is the one
+  shape that IS initialized — refusing it would refuse a first run.
 - Each migration step runs in ONE transaction with its version bump, so a
   failed migration rolls back rather than leaving a half-migrated
   database (asserted by test). Migrations are idempotent per state.
@@ -506,22 +507,30 @@ everything at least this long".
 ## Pre-migration backup and corrupt-store quarantine (Phase 6.5)
 
 Guarantees about the FILE, enforced by `HistoryStore::open` in
-`crates/coresight-history/src/store_safety.rs` (Phase 6.5, refined by the
-6.5.1 closures).
+`crates/coresight-history/src/store.rs`, with the backup and quarantine
+helpers (and the test-only failure seams) in
+`crates/coresight-history/src/store_safety.rs` — a **crate-private** module
+since Phase 6.5.2 (see "API surface" in `docs/API_CONTRACTS.md`). Phase 6.5
+established the guarantees; 6.5.1 and 6.5.2 closed the gaps recorded at the
+end of this section.
 
-### Ordering: nothing is inspected after it has been written
+### Ordering: two gates, and nothing is mutated before both pass
 
-`coresight_core::db::open` runs `PRAGMA journal_mode=WAL` and applies the v1
-bootstrap — both of which WRITE. So `open` first inspects an EXISTING store
-through a **read-only** connection (`SQLITE_OPEN_READ_ONLY`), which cannot
+`coresight_core::db::apply_bootstrap` runs `PRAGMA journal_mode=WAL` and
+applies the v1 bootstrap — both of which WRITE. The open sequence therefore
+has TWO gates, and a path must pass both before any write.
+
+**Gate 1 — the read-only preflight.** An EXISTING store is inspected through
+a **read-only** connection (`SQLITE_OPEN_READ_ONLY`), which cannot
 checkpoint, cannot create sidecars, and cannot alter the file:
 
 1. No file at the path → brand new. Nothing to protect, nothing to back up.
 2. `PRAGMA integrity_check` returns anything other than `ok` → corruption
    established → quarantine (below).
-3. A file holding no schema objects at all → a store this build CREATES:
-   the bootstrap initializes it. (A brand-new EMPTY file is this case, not
-   the refusal case below; refusing it would refuse a first run.)
+3. A file holding no schema objects at all → a store this build CREATES
+   (gate 2 re-confirms on the connection that would write). A brand-new
+   EMPTY file is this case, not the refusal case below; refusing it would
+   refuse a first run.
 4. Recorded version NEWER than this build supports → `SchemaTooNew`, and the
    file is left **completely untouched**: not migrated, not backed up, not
    quarantined. A newer store is not this build's to modify. Decided before
@@ -530,31 +539,69 @@ checkpoint, cannot create sidecars, and cannot alter the file:
 5. A readable SQLite file that is not recognizable as a store this build has
    ever written → `UnrecognizedSchema`, left **unwritten**: not initialized,
    not backed up, not migrated, not quarantined (below).
-6. Recorded version OLDER than supported → take a verified backup. If it
-   cannot be created, verified, or published, `open` fails and the store is
-   never migrated.
-7. Recorded version == supported and recognizable → open it as-is.
+6. Recorded version OLDER than supported → proceed to gate 2, which
+   re-confirms the verdict and takes the verified backup ON the validated
+   connection before migrating.
+7. Recorded version == supported and recognizable → open it as-is (gate 2
+   re-checks).
 
-The read-only handle is **closed before** any backup or relocation. This is
+The read-only handle is **closed before** anything else. This is
 load-bearing, not tidiness: SQLite holds the file open for the connection's
 lifetime and Windows cannot rename an open file. A quarantine running while
 the handle was alive would fail on Windows and succeed on Unix — a
-platform-dependent safety guarantee. The inspection therefore returns owned
+platform-dependent safety guarantee. The preflight therefore returns owned
 data, never a `Connection`.
+
+**Gate 2 — the mutation gate.** The path is re-opened READ-WRITE through
+`coresight_core::db::open_connection`, which writes NOTHING (not even the
+WAL pragma; that is part of `apply_bootstrap`), and gate 1's full check set
+— integrity, object count, recorded version, recognition — runs AGAIN on
+that very connection, the one that would perform the writes. Only then does
+`apply_bootstrap` run, followed by the post-bootstrap integrity check
+(below).
+
+This closes the inspection-to-mutation race: a database SUBSTITUTED at the
+store path between the two gates is validated by the gate that would write
+it, and is either handled under its OWN verdict — initialized if it is
+empty, backed up (with its own verified backup) before its migration — or
+refused without being written (foreign file, incomplete structure, too
+new). A substitute that passes both gates while claiming a supported version
+is treated as the store it claims to be; structure is not provenance
+(below). Proven by
+`store::hazard_tests::a_database_swapped_in_after_the_read_only_gate_is_gated_before_any_write`,
+which moves the genuine store aside and drops a foreign database in at the
+boundary observer (deterministic file operations at the seam — no sleeps, no
+scheduling assumptions).
+
+Cost: one open can run up to three integrity checks on the store path
+(preflight, mutation gate, post-bootstrap), and a migrating open runs a
+fourth on the completed backup copy before publishing it. That is the price
+of deciding from read-only evidence and then re-deciding on the connection
+that writes.
 
 ### The backup is SQLite-consistent, and published only once verified
 
+- Taken by **gate 2, on the connection it just validated** (Phase 6.5.2): a
+  backup is a decision to write, made only after the mutation gate has
+  re-established the store's identity on the very connection the migration
+  would use. Gate 1 decides *whether* a backup will be needed; gate 2
+  re-confirms and takes it.
 - Written through **SQLite's Online Backup API** (`rusqlite::backup`), never
   a raw file copy. A raw copy of the main file while a `-wal` holds
   uncheckpointed frames produces a stale image that silently omits committed
   history; the Online Backup API reads through the WAL and restarts if the
   source changes mid-copy. (Asserted by
-  `phase65_tests::a_backup_captures_data_held_only_in_the_uncheckpointed_wal`.)
+  `store::hazard_tests::a_backup_captures_data_held_only_in_the_uncheckpointed_wal`,
+  crate-internal.)
 - Built into an attempt-specific temporary (`<store>.backup-in-progress`,
   `<store>.backup-in-progress.1`, … on a collision), then re-opened by a
   **separate** connection and checked for `PRAGMA integrity_check == ok`
   **and** the source's pre-migration schema version — before it is
-  published.
+  published. Verification is closed like every other integrity decision: a
+  check that cannot establish integrity — anything other than a non-empty
+  all-`ok` result — fails the backup
+  (`StoreError::BackupFailed { step: "verify" }`), publishes NOTHING under
+  the backup name, and leaves the source unmigrated.
 - Published by renaming to `<store>.pre-migration-backup`. **Both** the
   temporary name and the final name are reserved per attempt with
   `create_new`, which succeeds only for an unused name, so a second attempt
@@ -611,19 +658,21 @@ When corruption IS established:
   injected failures fire on the last existing sidecar, after the main
   database (and any earlier sidecar) has already moved, so the rollback
   runs with a non-empty move list
-  (`phase65_tests::a_sidecar_relocation_failure_restores_everything_that_moved`,
-  `phase65_tests::an_unrestorable_main_file_is_reported_honestly_and_stays_quarantined`).
+  (`store::hazard_tests::a_sidecar_relocation_failure_restores_everything_that_moved`,
+  `store::hazard_tests::an_unrestorable_main_file_is_reported_honestly_and_stays_quarantined`,
+  crate-internal).
 - `open` then returns `StoreError::Corrupt` whose detail names the quarantine
   directory. **No replacement database is created at the original path, no
   repair is attempted, and no recovery of historical data is claimed.**
 
 ### Corruption the bootstrap itself introduces is quarantined too
 
-The preflight above proves the file was intact when it was FOUND; it cannot
-see damage introduced by the writes `coresight_core::db::open` performs (the
-WAL pragma and the v1 bootstrap; a migration's own damage is still preceded
-by its verified backup). `open` therefore runs the integrity check a SECOND
-time on the already-open connection:
+Gate 1 proves the file was intact when it was FOUND, but its evidence is
+read-only; gate 2 re-checks before writes; neither can see damage introduced
+by the writes `apply_bootstrap` itself performs (the WAL pragma and the v1
+bootstrap; a migration's own damage is still preceded by its verified
+backup). `open` therefore runs the integrity check a THIRD time, on the
+already-open connection, after the bootstrap:
 
 - Clean → continue.
 - Problems, or an integrity result unreadable with a corruption code →
@@ -634,37 +683,94 @@ time on the already-open connection:
 - A result unreadable for a NON-corruption reason (an ordinary I/O failure)
   → the store is left exactly where it is and the error is returned; an
   environment problem is not evidence of damage.
+- No rows at all → a failure to establish integrity (below): the open
+  aborts, the store stays where it is, and nothing is quarantined.
+
+### Integrity decisions are closed: no result is not a verdict
+
+An `integrity_check` that returns NO rows has established NOTHING, so it is
+never read as health and never as damage. Every decision site treats it as a
+failure to establish integrity: the open aborts, the store is left exactly
+where it is, nothing is moved, and the error says integrity could not be
+established. The backup-verification site reports the same way
+(`StoreError::BackupFailed { step: "verify" }`) and the source is left
+unmigrated. Only a non-empty result whose every row is `ok` is health, and a
+result unreadable with SQLite's own corruption code remains positive
+corruption evidence and is quarantined as such. Every decision site
+(read-only preflight, mutation gate, post-bootstrap check, and backup
+verification) is covered deterministically by crate-internal seams
+(`store::hazard_tests::an_empty_preflight_integrity_result_fails_closed_without_quarantine`,
+`an_empty_backup_verification_result_never_publishes_a_backup`,
+`an_empty_post_bootstrap_integrity_result_fails_closed_without_quarantine`).
 
 ### A file this build cannot recognize is refused, never initialized over
 
 The bootstrap adds its schema to whatever file it is pointed at, so before
-anything may touch an existing file, the read-only snapshot must prove the
-file is a store this build has ever written. A readable SQLite database that
-holds objects but fails that proof is refused with
+anything may touch an existing file, the gates must prove the file is a
+store this build has ever written. A readable SQLite database that holds
+objects but fails that proof is refused with
 `StoreError::UnrecognizedSchema` when it:
 
 - has no `schema_version` table (a foreign database);
 - has a `schema_version` table that does not hold exactly one non-negative
   integer (no rows, several rows, a non-integer, a value beyond `u32`);
 - records version 0, which no CoreSight build has ever written;
-- records a version whose CORE tables are missing (`drives` + `scans` for
-  v1; `scan_runs` + `observations` for v2 and later — the pair every history
-  migration builds on).
+- records a version whose REQUIRED STRUCTURE is incomplete: the tables AND
+  signature columns that version's migrations guarantee. The contract
+  follows the recorded version through every step — v1: `drives` + `scans`
+  and their key columns; v2 adds `scan_runs`, `observations`,
+  `relationship_obs`, `relationship_members` and their signature columns;
+  v3: the `file_id_hi` columns; v4: `scan_runs.rel_status` /
+  `rel_truncated`; v5: the 13 `app_snapshot_*` tables; v6:
+  `app_snapshot_apps.id_encoding`. The refusal names each gap ("missing
+  table X" / "missing column T.C"). This is why an incomplete v2 or v6
+  lookalike is refused even though it carries the history tables a blanket
+  "core tables" rule would accept (Phase 6.5.2 completed this contract; the
+  6.5.1 pair-based rule was too weak).
 
 "Unusable" data is refused rather than coerced to 0, because 0 is exactly
 what would hand the file to the bootstrap. The refusal leaves the
 **database file and its `-wal` sidecar byte-identical**, deletes no sidecar,
 takes no backup, and adds nothing
 (`phase65_tests::a_foreign_sqlite_database_is_refused_and_left_byte_identical`;
-tests 16–19 cover the versioned-foreign, unusable-metadata, version-0, and
-empty-file cases). The one empty shape that IS initialized is a file holding
-no schema objects at all — refusing a brand-new EMPTY file would refuse a
-first run.
+tests 13–16 cover the versioned-foreign, unusable-metadata, version-0, and
+empty-file cases; tests 18–20 cover the adversarial incomplete v2 store and
+the v6 store missing a required column or table). The one empty shape that
+IS initialized is a file holding no schema objects at all — refusing a
+brand-new EMPTY file would refuse a first run.
+
+**Structure is not provenance.** Passing the recognition check means the
+file has the shape a CoreSight store at its recorded version always has; it
+does not prove CoreSight wrote the file or that its content is authentic —
+the format carries no such evidence. A full-structure lookalike is
+therefore treated as the store it claims to be, and everything read from it
+is judged by the normal decode rules (strict fields, typed
+corruption/caller-input errors). The alternative — distrusting every store
+because authorship cannot be proven — would refuse real stores too.
 
 ### Honest limitations
 
 - The store is preserved, not recovered. Quarantine makes the data
   *findable*; nothing here can repair a damaged file.
+- **Corruption found at the mutation gate is refused in place, not
+  quarantined.** Gate 2's reads run on a read-write connection (the one
+  that would write), and SQLite may discard or rebuild a `-wal`/`-shm` that
+  does not match the database on such reads. Quarantine decisions are
+  therefore made only from gate 1's read-only evidence; damage that only
+  becomes visible at gate 2 is reported with the store left at its path.
+  The window is narrow (the file was healthy at gate 1, and nothing but a
+  substitution can change it before gate 2), and a store that is corrupt on
+  every open still takes the normal path: gate 1 establishes it from
+  read-only evidence and quarantines it.
+- **Structure is not provenance.** A substitute that carries the full
+  structure of a supported version is validated and handled as that store,
+  not refused: the file format cannot prove authorship (see "Structure is
+  not provenance" above). What a swap cannot do is reach the writes without
+  passing the gate that owns them.
+- An integrity check that returns no rows aborts the open with the store
+  left where it is: nothing is quarantined and nothing is backed up, and
+  the error says integrity could not be established. (Quarantining on an
+  empty result would move a store on a decision that was never made.)
 - A `-shm` beside a `-wal` is SQLite's derived WAL index. Reading a
   database through a `-wal` can rebuild it (its bytes are not stable by
   construction), and it holds no committed data. The byte-identity contract
@@ -688,14 +794,17 @@ first run.
 - `PRAGMA integrity_check` runs on EVERY open, before anything reads or
   migrates the file (IMPLEMENTED, Phase 6.1 audit: `HistoryStore::open`
   refuses a corrupt store with the typed `StoreError::Corrupt` — never
-  guess, never half-read), and AGAIN after the bootstrap helper's own
-  writes (IMPLEMENTED, Phase 6.5.1), so corruption those writes introduce
-  is quarantined like any other instead of being left at a path that keeps
-  failing.
+  guess, never half-read); AGAIN at the mutation gate, on the read-write
+  connection and before any write (Phase 6.5.2); and a THIRD time after the
+  bootstrap helper's own writes (IMPLEMENTED, Phase 6.5.1), so corruption
+  those writes introduce is quarantined like any other instead of being
+  left at a path that keeps failing. Every site is closed: only a non-empty
+  all-`ok` result is health (Phase 6.5.2).
 - A valid SQLite file that is not a recognizable CoreSight store is refused
-  UNWRITTEN (`StoreError::UnrecognizedSchema`, Phase 6.5.1) instead of
-  having CoreSight tables added to it — see "A file this build cannot
-  recognize is refused, never initialized over" above.
+  UNWRITTEN (`StoreError::UnrecognizedSchema`, Phase 6.5.1; full
+  per-version structure contract since 6.5.2) instead of having CoreSight
+  tables added to it — see "A file this build cannot recognize is refused,
+  never initialized over" above.
 - Corrupt stores are now QUARANTINED (IMPLEMENTED, Phase 6.5) rather than
   only refused: see "Pre-migration backup and corrupt-store quarantine"
   above. Still PLANNED, and deliberately out of scope for 6.5: starting a

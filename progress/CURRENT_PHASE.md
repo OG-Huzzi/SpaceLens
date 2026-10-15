@@ -1,5 +1,247 @@
 # CoreSight — Current State
 
+PHASE 6.5.2 — Remaining Phase 6.5 Safety Gaps (test-only public API, fail-closed integrity, full per-version recognition, preflight-to-write race)
+
+**Status: Phase 6.5.2 IMPLEMENTED — every local gate executed and green
+(table below); the exact-SHA CI is recorded by the immediate
+verification-record commit.** Started from baseline
+`d62665a87e5c0eb58b4a2e31ad193dba8f58cf13` (the Phase 6.5.1
+verification-record commit). **Schema version stays 6** — no migration was
+added, and migration SQL v2–v6 is byte-identical to the baseline (all five
+`MIGRATION_V*` constants extracted from `git show d62665a8:…` and compared
+case-sensitively before committing; lengths 1931 / 516 / 107 / 5704 / 86
+bytes). **Phase 6.6 and later phases are NOT authorized and were NOT
+started.**
+
+## Phase 6.5.2 — the remaining gaps in the Phase 6.5 open path
+
+### The gaps
+
+**A. Dangerous test-only entry points were part of the public API.** Phase
+6.5.1 shipped `pub mod store_safety` (re-exporting `Hazard`, `Quarantine`,
+…) and `HistoryStore::open_with_hazard`, so any external caller could name
+a hazard and drive the open path into failure modes, or reach the low-level
+backup/quarantine helpers directly. The 6.5.1 record correctly described
+production behavior ("nothing outside the history-store open path
+changed"), but the seams were an API-surface change — corrected in the
+6.5.1 record above and in `docs/API_CONTRACTS.md`.
+
+**B. An integrity check that returned NO rows was read as healthy.**
+`integrity_problems` scanned the result rows and reported "healthy" when
+there were none. An empty `PRAGMA integrity_check` result establishes
+NOTHING: it is a failure to establish integrity, not a verdict of health.
+The same shape existed at the backup verification, and there was no
+deterministic way to provoke an empty result at any site.
+
+**C. Recognition was too weak to be the contract it claimed.** The 6.5.1
+rule recognized v2+ on `scan_runs` + `observations` alone and v1 on its
+two tables (a documented deviation). An incomplete store recording a
+supported version — missing the v1 bootstrap tables, half the v2 tables,
+the v3/v4 columns, the v5 snapshot tables, or the v6 column — passed
+recognition and reached the mutating bootstrap / backup path.
+
+**D. The preflight-to-write race was open.** The validated read-only
+inspection and the pre-migration backup ran on one connection; the
+bootstrap and migrations then ran on a DIFFERENT, freshly opened
+read-write connection that was never validated. A database substituted at
+the store path between inspection and writes could be initialized over (a
+foreign file) or migrated without a backup of ITS content (a different
+version). Re-checking the path and opening a fresh connection is not a fix
+— the race simply reopens in the gap.
+
+**E. The corruption classifier had an inert comparison** (found by the
+independent audit). `sqlite_error_indicates_corruption` compared
+`ffi.extended_code` against `ErrorCode::DatabaseCorrupt as i32` — the Rust
+ENUM DISCRIMINANT (9), not SQLite's raw result code (SQLITE_CORRUPT = 11).
+The belt-and-braces branch was therefore dead — and the discriminant it
+compared against (9) equals SQLITE_INTERRUPT's raw code, so the branch
+could only ever have misfired on an interrupt, which is not corruption.
+Latent in practice (real errors were still classified by the primary-code
+branch), but it is the classifier every quarantine decision rests on, so
+it was fixed and pinned.
+
+### Fixes
+
+- **A** — `store_safety` is a PRIVATE module (`mod store_safety;`; the
+  crate-root re-exports are gone). `Hazard`, `PostBootstrapFault`,
+  `Quarantine`, `quarantine_corrupt_store`, `verified_pre_migration_backup`
+  and `sqlite_error_indicates_corruption` are `pub(crate)`;
+  `HistoryStore::open_with_hazard` is DELETED. The hazard-driven tests
+  moved into a `#[cfg(test)]` module inside the crate
+  (`crates/coresight-history/src/store_hazard_tests.rs`, 12 tests) and
+  drive the private `HistoryStore::open_impl` / `open_impl_observed`. No
+  `#[doc(hidden)] pub` item, no test-only cargo feature; the public entry
+  point is `HistoryStore::open`. (`Hazard`/`PostBootstrapFault` carry a
+  justified `#[allow(dead_code)]`: only crate-internal tests construct
+  them, so non-test builds see no constructor.)
+- **B** — `integrity_problems` split into `integrity_rows` /
+  `classify_integrity_rows` / `integrity_problems`. An EMPTY result now
+  produces `SqliteFailure(ErrorCode::Unknown, "PRAGMA integrity_check
+  returned no result rows, so integrity could not be established (this is
+  not a verdict of health)")` and ABORTS the open with the store left
+  exactly where it is — no quarantine (nothing is moved on a decision that
+  was never made), and at backup verification nothing is published
+  (`StoreError::BackupFailed { step: "verify" }`, source left unmigrated).
+  Deterministic coverage through three crate-internal seams
+  (`Hazard::IntegrityReportsNoRows`, `PostBootstrapFault::ReportsNoRows`,
+  `Hazard::BackupVerifyReportsNoRows`).
+- **C** — `recognition_gaps(conn, version)` replaces the table-pair rule.
+  The required structure is now, per recorded version, the tables AND
+  signature columns that version's migrations guarantee: v1 `drives` +
+  `scans` and their key columns; v2 `scan_runs`, `observations`,
+  `relationship_obs`, `relationship_members` + their 15 signature
+  columns; v3 the two `file_id_hi` columns; v4
+  `scan_runs.rel_status` / `rel_truncated`; v5 the 13 `app_snapshot_*`
+  tables; v6 `app_snapshot_apps.id_encoding`. The refusal names each gap
+  ("missing table X" / "missing column T.C") and keeps the "missing core
+  tables" substring. This SUPERSEDES the 6.5.1 two-pair deviation — the
+  deviation was the defect — and the repository's own fixtures were raised
+  to the contract (v1 bootstraps gained `drives` + `scans`; the
+  6.4.3/6.4.4 legacy fixtures build their rows through the real opener;
+  the v4/v5 snapshot fixtures gained the v1 tables). Adversarial coverage:
+  an incomplete v2 store, a v6 store missing a required column, and a v6
+  store missing a required table are each refused with db + `-wal` bytes
+  preserved, no sidecar deleted, no backup, no quarantine, and no
+  bootstrap/migration write.
+- **D** — `coresight_core::db::open` split into `open_connection` (opens,
+  writes NOTHING — not even the WAL pragma) + `apply_bootstrap` (WAL
+  pragma + v1 bootstrap) + `open` (compatibility: connection + bootstrap).
+  The store's open is now two gates: gate 1 is the read-only preflight
+  (unchanged guarantees — quarantine decisions, refusals, byte/
+  sidecar-preserving evidence, handle closed before anything else); an
+  observer seam (`OpenStage::PreflightPassed`) fires at the boundary; gate
+  2 re-opens READ-WRITE and re-runs the FULL check set — integrity, object
+  count, recorded version, recognition — on that very connection before
+  any write. Initialize/current proceed; older takes the pre-migration
+  backup ON the validated connection; corruption is refused in place
+  (connection dropped first, NO quarantine — gate 2 reads are read-write,
+  so they may discard a mismatched `-wal`/`-shm`; quarantine decisions
+  stay on read-only evidence); any other failure returns without writing.
+  Only then: `apply_bootstrap` → post-bootstrap integrity check → version
+  check → `apply_migrations` → `recover_stale_runs` (on the
+  already-validated connection). `open_for_backup` — which opened a fresh
+  unvalidated connection — is DELETED. Proven by
+  `a_database_swapped_in_after_the_read_only_gate_is_gated_before_any_write`
+  (the original store is renamed aside and a foreign database swapped in
+  AT the boundary; the substituted file is refused, byte-identical, with
+  no CoreSight table added, no WAL mode set, no backup and no quarantine —
+  deterministic file operations at the seam, no sleeps).
+- **E** — the classifier now compares SQLite's RAW result codes
+  (`rusqlite::ffi::SQLITE_CORRUPT` / `SQLITE_NOTADB`) in addition to the
+  primary `ffi.code`; the unit test pins the trap (raw SQLITE_INTERRUPT =
+  9 must NOT qualify) and constructs environment-error fixtures with
+  their REAL raw codes (`DiskFull`'s implicit discriminant is 11 =
+  SQLITE_CORRUPT — the old fixture construction, `code as i32`, masked
+  both defects and could not fail).
+
+### The tests that prove each closure
+
+Crate-internal (`src/store_hazard_tests.rs`, 12 tests; `cfg(test)` only):
+
+| Gap | Test | Property |
+|---|---|---|
+| B | `an_empty_preflight_integrity_result_fails_closed_without_quarantine` | empty result → abort, store untouched, no quarantine, error says integrity could not be established |
+| B | `an_empty_post_bootstrap_integrity_result_fails_closed_without_quarantine` | the same at the post-bootstrap check |
+| B | `an_empty_backup_verification_result_never_publishes_a_backup` | no artifact published, `BackupFailed { step: "verify" }`, source unmigrated |
+| E | `store_safety::tests::only_defined_corruption_codes_qualify` (unit) | corruption RAW codes qualify; environment codes (real raw values) and the raw-9 interrupt do not |
+| D | `a_database_swapped_in_after_the_read_only_gate_is_gated_before_any_write` | substitution at the boundary is refused untouched |
+| moved | `a_backup_failure_prevents_migration_and_preserves_the_source`, `a_backup_captures_data_held_only_in_the_uncheckpointed_wal`, `a_relocation_failure_restores_the_store_and_reports_honestly`, `post_bootstrap_corruption_is_quarantined_like_preflight_corruption`, `a_post_bootstrap_io_failure_preserves_the_store_without_quarantine`, `a_post_bootstrap_unreadable_corruption_result_is_quarantined`, `a_sidecar_relocation_failure_restores_everything_that_moved`, `an_unrestorable_main_file_is_reported_honestly_and_stays_quarantined` | the 6.5/6.5.1 properties, kept (adapted to the private seams) |
+
+Public-API (`tests/phase65_tests.rs`, 20 tests): the recognition tests
+(versioned-foreign, unusable-metadata, version-0, empty-file) are retained
+as tests 13–16; adversarial additions are tests 18–20
+(`an_incomplete_v2_store_is_refused_untouched`,
+`a_v6_store_missing_a_required_column_is_refused_untouched`,
+`a_v6_store_missing_a_required_table_is_refused_untouched`); the file no
+longer imports anything from `store_safety`.
+
+### Decisions worth recording
+
+- **The contract was raised, and the fixtures were raised with it.** The
+  6.5.1 "core tables" rule was too weak to refuse real half-stores; the
+  full per-version structure is now the contract, and the repository's own
+  v1 bootstraps were extended to satisfy it. No production validation was
+  weakened, no test was deleted, and no threshold was loosened (the
+  Windows snapshot scaling guard in `tests/snapshot_perf_tests.rs` is
+  untouched and passing).
+- **Quarantine decisions only from read-only evidence.** Gate 2's reads
+  are read-write; SQLite may checkpoint/rebuild or discard a mismatched
+  `-wal`/`-shm` during them, so a corruption verdict there is refused in
+  place instead of quarantining from potentially self-modified evidence.
+  The window is narrow (the file was healthy at gate 1, and nothing but a
+  substitution can change it before gate 2), and a store corrupt on EVERY
+  open still quarantines via gate 1.
+- **Structure is not provenance.** Passing recognition means the file has
+  the shape this build's migrations produce at its recorded version; the
+  format carries no authorship evidence. A full-structure lookalike that
+  also passes gate 2 is treated as the store it claims to be — what a swap
+  can never do is reach the writes without passing the gate that owns
+  them.
+- **Fail closed, uniformly.** "No rows" aborts the open at every integrity
+  site (preflight, mutation gate, post-bootstrap, backup verification);
+  only a non-empty all-`ok` result is health; only SQLite's own corruption
+  codes and non-`ok` rows are damage.
+- **Integrity cost.** A migrating open can run up to four integrity checks
+  (preflight, mutation gate, post-bootstrap, completed backup copy).
+  Chosen deliberately: decide from read-only evidence, re-decide on the
+  writing connection, verify the artifact before publishing it.
+
+### Files changed
+
+- Code: `crates/coresight-core/src/db.rs`,
+  `crates/coresight-history/src/lib.rs`,
+  `crates/coresight-history/src/store.rs`,
+  `crates/coresight-history/src/store_safety.rs`.
+- Tests: `crates/coresight-history/src/store_hazard_tests.rs` (new),
+  `tests/phase65_tests.rs`, `tests/migration_tests.rs`,
+  `tests/audit_v2_regression_tests.rs`, `tests/phase643_tests.rs`,
+  `tests/phase644_tests.rs`, `tests/phase645_tests.rs`,
+  `tests/snapshot_tests.rs`.
+- Docs: `docs/DATABASE.md`, `docs/API_CONTRACTS.md`,
+  `progress/CURRENT_PHASE.md`, `progress/PHASES.md`.
+
+### Local verification (all executed, exit status checked)
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | exit 0 |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| `cargo test --workspace` | exit 0 — 62 test-result summaries green, 966 tests passed |
+| `cargo test --workspace --all-features` | exit 0 |
+| `cargo test --workspace --all-features -- --ignored` | exit 0 — incl. `perf_smoke_10k_files_correct_and_timed` and the 5 snapshot-perf tests (scaling guard untouched) |
+| `npm ci` | exit 0 |
+| `npm audit --audit-level=high` | exit 0 — 0 vulnerabilities |
+| `npm run build` | exit 0 |
+| `git diff --check` | exit 0 |
+| Migration SQL v2–v6 vs `d62665a8` | byte-identical (1931 / 516 / 107 / 5704 / 86 bytes, compared case-sensitively) |
+| Focused `coresight-history` suites | lib 50 ✓, phase65_tests 20 ✓, migration_tests 5 ✓, audit_v2_regression_tests 16 ✓, phase643_tests 11 ✓, phase644_tests 12 ✓, phase645_tests 10 ✓, snapshot_tests 63 ✓ |
+| `coresight-system-model` | not touched by this diff (still platform-neutral / DB-independent); its 7 lib tests green |
+
+### CI verification (exact SHA)
+
+Recorded by the immediate verification-record commit: the implementation
+commit's run id, `head_sha` match, attempt, and the four required job
+conclusions (`frontend`, `rust (ubuntu-latest)`, `rust (windows-latest)`,
+`rust (macos-latest)`), followed by that verification commit's own CI.
+
+### Limitations (honest)
+
+- **Corruption found at the mutation gate is refused in place, not
+  quarantined** (rationale above). A store corrupt on every open is still
+  quarantined from the read-only preflight.
+- **Structure is not provenance** (above): a full-structure substitute that
+  passes both gates is validated and handled as the store it claims to be.
+- The `-shm` nuance is unchanged from Phase 6.5: the byte-identity contract
+  covers the database file and its `-wal`; a `-shm` is never deleted and is
+  never interpreted, but its bytes are not stable by construction.
+- Backup publication remains `remove` + `rename`, not one atomic step (the
+  crash-window caveat of Phase 6.5 is unchanged; `renameat2(RENAME_NOREPLACE)`
+  is still not portable and no dependency was added for it).
+- The classifier defect (E) was latent: real SQLite errors were already
+  classified correctly through the primary-code branch. It is fixed and
+  regression-pinned because it is the classifier quarantine decisions rest
+  on.
+
 PHASE 6.5.1 — Safety Closure for the Phase 6.5 Open Path (concurrent backups, unrecognized schemas, post-bootstrap quarantine, rollback honesty)
 
 **Status: Phase 6.5.1 IMPLEMENTED + VERIFIED — every local gate executed
@@ -9,8 +251,13 @@ green on all four required jobs (table below).** Started from baseline
 **Schema version stays 6** — no migration was added, and migration SQL v2–v6
 is byte-identical to the baseline (all five `MIGRATION_V*` constants
 extracted from `git show 1b458e8:…` and compared case-sensitively before
-committing). Nothing outside the history-store open path changed. **Phase
-6.6 and later phases are NOT authorized and were NOT started.**
+committing). Nothing outside the history-store open path changed —
+**correction (Phase 6.5.2):** that sentence described PRODUCTION behavior;
+the 6.5.1 commits had also added test-only seams (`pub mod store_safety`
+and `HistoryStore::open_with_hazard`) to the crate's public API. Phase
+6.5.2 removes both, so the public surface no longer carries them (see the
+Phase 6.5.2 record below and `docs/API_CONTRACTS.md`). **Phase 6.6 and
+later phases are NOT authorized and were NOT started.**
 
 ## Phase 6.5.1 — Safety closure for the Phase 6.5 open path
 

@@ -85,7 +85,15 @@ pub enum StoreError {
     /// database (objects but no `schema_version` table), unusable version
     /// metadata (the table exists but does not hold exactly one
     /// non-negative integer), a recorded version of 0, or a recorded
-    /// version whose core tables are absent (Phase 6.5.1).
+    /// version whose required structure is incomplete — the tables AND
+    /// signature columns a real store at that version always has are not
+    /// all present (Phase 6.5.1, completed in 6.5.2).
+    ///
+    /// Structure is not provenance: this check refuses files that cannot
+    /// be this build's store at the version they record; it does not prove
+    /// that a file which can be is one. A database forged to carry the
+    /// full structure and a valid version is indistinguishable from a
+    /// genuine store by structure alone.
     ///
     /// This is REFUSAL, not corruption and not a schema mismatch: nothing
     /// is quarantined, nothing is backed up, and nothing is migrated. The
@@ -718,15 +726,20 @@ impl std::fmt::Debug for HistoryStore {
     }
 }
 
-/// What a read-only inspection concluded about an EXISTING store file.
+/// What a gate concluded about the database it inspected.
 ///
-/// Deliberately owns no `Connection`: the inspection must be able to CLOSE
-/// the database before the caller acts on the verdict, because a quarantine
-/// rename fails on Windows while SQLite still holds the file open.
+/// Deliberately owns no `Connection`: a corrupt verdict must be handled by
+/// CLOSING the connection before any quarantine rename — Windows cannot
+/// rename an open file — so the verdict must be plain owned data. The
+/// mutation gate (Phase 6.5.2) returns [`Inspection::Corrupt`] to its
+/// caller instead of acting on it, for the same reason plus one more: its
+/// own read-write reads may already have let SQLite discard sidecar files
+/// that did not match the database, so it must not drive a relocation.
 enum Inspection {
     /// The file holds no schema at all (a zero-byte file or an empty
-    /// database): `coresight_core::db::open` runs the v1 bootstrap on it,
-    /// which is exactly how this build creates a brand-new store.
+    /// database): `coresight_core::db::apply_bootstrap` runs the v1
+    /// bootstrap on it, which is exactly how this build creates a
+    /// brand-new store.
     Initialize,
     /// Already at the supported version: nothing to migrate, nothing to back
     /// up.
@@ -735,6 +748,21 @@ enum Inspection {
     /// verified backup must exist first. Carries the recorded version so the
     /// backup can be checked against it.
     NeedsMigration(u32),
+    /// Integrity problems were found: positive evidence of corruption. The
+    /// string is the evidence to report. The read-only gate quarantines it
+    /// (after closing its connection); the mutation gate refuses it in
+    /// place.
+    Corrupt(String),
+}
+
+/// A named point of the open sequence, reported to a test observer
+/// ([`HistoryStore::open_impl_observed`]). Production discards it.
+enum OpenStage<'a> {
+    /// The READ-ONLY gate has concluded and NO connection is held. The
+    /// verdict is carried for TEST observers (the field is deliberately
+    /// unread outside tests); `None` means no existing file was there to
+    /// inspect. The read-write mutation gate runs next.
+    PreflightPassed(#[allow(dead_code)] Option<&'a Inspection>),
 }
 
 /// The verdict of the integrity check that runs on the ALREADY-OPEN
@@ -757,11 +785,15 @@ impl HistoryStore {
     /// recovering stale `RUNNING` runs as `FAILED` (Objective 19 —
     /// deterministic crash recovery).
     ///
-    /// `PRAGMA integrity_check` runs FIRST: a corrupt store is refused
-    /// ([`StoreError::Corrupt`]) before anything reads or migrates it.
-    /// A store whose corruption is established is then QUARANTINED — its
-    /// file and sidecars are moved aside, never deleted and never replaced
-    /// with a fresh empty store (Phase 6.5).
+    /// `PRAGMA integrity_check` runs FIRST, on a READ-ONLY connection: a
+    /// corrupt store is refused ([`StoreError::Corrupt`]) before anything
+    /// reads or migrates it. A store whose corruption is thereby
+    /// established is QUARANTINED — its file and sidecars are moved aside,
+    /// never deleted and never replaced with a fresh empty store (Phase
+    /// 6.5). An integrity result that establishes NOTHING (no rows, or an
+    /// unreadable result without a corruption code) aborts the open
+    /// WITHOUT quarantining: failing to establish integrity is not
+    /// evidence of damage (Phase 6.5.2).
     ///
     /// A store written by a NEWER build is refused
     /// ([`StoreError::SchemaTooNew`]) rather than partially interpreted:
@@ -771,56 +803,120 @@ impl HistoryStore {
     ///
     /// A file that is a readable SQLite database but NOT a store this build
     /// recognizes ([`StoreError::UnrecognizedSchema`]) — a foreign
-    /// database, unusable `schema_version` metadata, or a recorded version
-    /// whose core tables are absent — is REFUSED and the database file and
-    /// its `-wal` are left byte-identical (Phase 6.5.1; the `-shm` index
-    /// nuance is documented on [`StoreError::UnrecognizedSchema`]). The
-    /// mutating bootstrap never runs on a database this build does not own.
+    /// database, unusable `schema_version` metadata, a recorded version of
+    /// 0, or a recorded version whose required structure is incomplete — is
+    /// REFUSED and the database file and its `-wal` are left byte-identical
+    /// (Phase 6.5.1; the `-shm` index nuance is documented on
+    /// [`StoreError::UnrecognizedSchema`]). The mutating bootstrap never
+    /// runs on a database this build does not own. Since Phase 6.5.2 the
+    /// structure contract is the full per-version shape the migrations
+    /// guarantee — the required tables AND their signature columns — not
+    /// a table name or two.
     ///
     /// When an EXISTING healthy store genuinely needs a forward migration,
     /// a verified pre-migration backup is completed and published BEFORE
     /// the first migration statement runs; a backup that cannot be created,
     /// verified, or published aborts the open rather than migrating
-    /// unprotected (Phase 6.5).
+    /// unprotected (Phase 6.5). A backup whose integrity cannot be
+    /// established is never published as verified (Phase 6.5.2).
+    ///
+    /// ## Two gates, one mutating connection (Phase 6.5.2, Workstream D)
+    ///
+    /// The open runs a READ-ONLY gate (byte-preserving: it can neither
+    /// write nor let SQLite discard sidecar files) and then a MUTATION
+    /// GATE: the connection that is allowed to write runs the same check —
+    /// integrity plus recognition — on itself immediately before the first
+    /// write. The database that may be modified is therefore always a
+    /// database whose full gate passed on the very connection that would
+    /// modify it. A database substituted at the path between the gates is
+    /// either validated under its own verdict (with its own pre-migration
+    /// backup, if that verdict says it needs migrating) or refused without
+    /// being written at all. `docs/DATABASE.md` states what this does and
+    /// does not close.
+    ///
+    /// This is the only entry point that can open a store; the
+    /// fault-injection seams the failure-path tests use are crate-internal
+    /// (Phase 6.5.2).
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Self::open_impl(path, crate::store_safety::Hazard::None)
     }
 
-    /// Open with an injected [`Hazard`]. **Test seam** — the hazard is
-    /// threaded into the preflight and the post-bootstrap check so the
-    /// fail-closed paths are exercised by test rather than described in a
-    /// comment.
-    ///
-    /// This is NOT a production entry point: [`Hazard::None`] takes exactly
-    /// the same path as [`HistoryStore::open`]. It exists because an
-    /// untested failure path is a claim, not a guarantee, and the failures
-    /// it injects (a disk that cannot be written, a rename that fails)
-    /// cannot be provoked reliably on demand.
-    pub fn open_with_hazard(
-        path: &Path,
-        hazard: crate::store_safety::Hazard,
-    ) -> Result<Self, StoreError> {
-        Self::open_impl(path, hazard)
+    /// The one open path, shared by [`HistoryStore::open`] and the
+    /// crate-internal test seams so every caller takes exactly the same
+    /// steps in the same order.
+    fn open_impl(path: &Path, hazard: crate::store_safety::Hazard) -> Result<Self, StoreError> {
+        Self::open_impl_observed(path, hazard, &mut |_| {})
     }
 
-    /// The one open path, shared by [`HistoryStore::open`] and the test
-    /// seam so both take exactly the same steps in the same order.
-    fn open_impl(path: &Path, hazard: crate::store_safety::Hazard) -> Result<Self, StoreError> {
-        // Phase 6.5: establish the store's original state BEFORE any helper
-        // can mutate it. `coresight_core::db::open` sets `journal_mode=WAL`
-        // and applies the v1 bootstrap, both of which WRITE to the file —
-        // so the corruption gate, the recognition refusal, the
-        // too-new-schema refusal, and the pre-migration backup all have to
-        // run first.
-        Self::preflight_existing_store(path, hazard)?;
+    /// [`HistoryStore::open_impl`] with an observer at the
+    /// inspection-to-mutation boundary.
+    ///
+    /// The observer is the crate-internal seam that makes the phase-1 /
+    /// phase-2 boundary deterministic for tests (no sleep): it runs after
+    /// the read-only gate has concluded — with no connection held — and
+    /// before the read-write mutation gate opens.
+    fn open_impl_observed(
+        path: &Path,
+        hazard: crate::store_safety::Hazard,
+        observe: &mut dyn FnMut(OpenStage<'_>),
+    ) -> Result<Self, StoreError> {
+        // Phase 1 — the READ-ONLY gate. It establishes the store's state
+        // before anything can write to it; it never opens the file
+        // read-write (SQLite's read-write read path DELETES stray sidecar
+        // files that do not match the database — a read-only connection
+        // cannot), and it is where corruption is quarantined and
+        // unrecognized databases are refused, with their files left
+        // byte-untouched.
+        let preflight = Self::preflight_existing_store(path, hazard)?;
 
-        let mut conn = coresight_core::db::open(path)?;
+        // No connection is held here. A file replaced at exactly this
+        // boundary cannot be initialized or changed unvalidated: the
+        // mutation gate below validates whatever database it opens, on the
+        // connection that would write it.
+        observe(OpenStage::PreflightPassed(preflight.as_ref()));
+
+        // Phase 2 — the MUTATION GATE. The connection that may write runs
+        // the full gate on itself immediately before the first write.
+        let mut conn = coresight_core::db::open_connection(path)?;
+        match Self::inspect_connection(&conn, hazard) {
+            Ok(Inspection::Initialize) | Ok(Inspection::Current) => {}
+            Ok(Inspection::NeedsMigration(found)) => {
+                // A migration WILL run. Its verified backup is driven from
+                // THIS connection — the same file the migration will
+                // change — so the backup can never represent a different
+                // file than the one being migrated. A backup that cannot
+                // be created, verified, or published aborts the open: the
+                // store stays exactly as it is.
+                crate::store_safety::verified_pre_migration_backup(
+                    &conn,
+                    path,
+                    Some(found),
+                    hazard,
+                )?;
+            }
+            Ok(Inspection::Corrupt(detail)) => {
+                // Corruption found by the mutation gate is refused IN
+                // PLACE. Quarantine decisions belong to the read-only gate
+                // alone: the mutation gate's read-write reads may already
+                // have let SQLite discard sidecar files that did not match
+                // the database, so relocating this file could not promise
+                // the preserved sidecar state a quarantine must preserve.
+                drop(conn);
+                return Err(Self::corrupt_at_mutation_gate(&detail));
+            }
+            Err(e) => return Err(e),
+        }
+
+        // The mutating half of the bootstrap (WAL, foreign keys, and the
+        // v1 schema when nothing is recorded) now runs on the validated
+        // connection.
+        coresight_core::db::apply_bootstrap(&conn)?;
         // docs/DATABASE.md: integrity is checked on open BEFORE anything
         // reads or migrates the file. A corrupt store is refused as a
         // typed error — never partially interpreted, never "recovered" by
-        // guessing. This second check runs on the ALREADY-OPEN connection:
-        // the preflight above proved the file was intact when we found it,
-        // and this catches anything the bootstrap helper's own writes broke.
+        // guessing. This check runs on the ALREADY-OPEN connection: the
+        // gates above proved the file was intact when we found it, and
+        // this catches anything the bootstrap helper's own writes broke.
         match Self::post_bootstrap_integrity(&conn, hazard) {
             PostBootstrapIntegrity::Healthy => {}
             PostBootstrapIntegrity::Corrupt(detail) => {
@@ -864,9 +960,20 @@ impl HistoryStore {
             crate::store_safety::Hazard::PostBootstrapIntegrity(fault) => {
                 use crate::store_safety::PostBootstrapFault;
                 match fault {
-                    PostBootstrapFault::ReportsCorruption => Ok(vec![
-                        "injected post-bootstrap corruption (ReportsCorruption)".to_string(),
-                    ]),
+                    PostBootstrapFault::ReportsCorruption => {
+                        // Fed through the same classifier the real rows
+                        // go through.
+                        crate::store_safety::classify_integrity_rows(vec![
+                            "injected post-bootstrap corruption (ReportsCorruption)".to_string(),
+                        ])
+                    }
+                    PostBootstrapFault::ReportsNoRows => {
+                        // The empty-result outcome, fed through the REAL
+                        // classifier: "no rows" must fail closed here too
+                        // (an environment-shaped failure, no corruption
+                        // code, no quarantine).
+                        crate::store_safety::classify_integrity_rows(Vec::new())
+                    }
                     PostBootstrapFault::UnreadableIoError => {
                         Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(
                             rusqlite::ffi::Error {
@@ -907,12 +1014,14 @@ impl HistoryStore {
         }
     }
 
-    /// Establish the store's original state before anything mutates it.
+    /// Phase 1: establish the store's original state on a READ-ONLY
+    /// connection, before anything can mutate it.
     ///
-    /// Ordering matters and is the reason this is separate from `open`:
-    /// [`coresight_core::db::open`] runs `PRAGMA journal_mode=WAL` and the
-    /// v1 bootstrap, both of which WRITE. Checking corruption or backing up
-    /// AFTER that would be checking a file this build had already touched.
+    /// Returns the read-only gate's verdict (`None` when no file exists:
+    /// there is nothing to inspect and nothing to protect). Quarantine and
+    /// refusals are HANDLED here, precisely so the byte-preserving
+    /// guarantees hold — the connection is closed before any rename, and a
+    /// refused or corrupt file is never opened read-write.
     ///
     /// The sequence is:
     ///
@@ -932,34 +1041,26 @@ impl HistoryStore {
     ///    database this build does not own.
     /// 5. **Schema newer than supported** → refuse as `SchemaTooNew` and
     ///    leave the file completely untouched.
-    /// 6. **Schema older than supported** → take a verified backup, which
-    ///    must succeed before `open` proceeds to migrate.
+    /// 6. **Anything else** → report the verdict. No backup is taken here:
+    ///    the mutation gate carries the verdict for the connection that
+    ///    will actually migrate, and THAT connection's own verdict — and
+    ///    its own backup — is what guards the migration (Phase 6.5.2).
+    ///    The preflight also never lets an integrity result that
+    ///    established NOTHING (no rows, an unreadable non-corruption
+    ///    result) through as health: that fails the open right here,
+    ///    without quarantine.
     fn preflight_existing_store(
         path: &Path,
         hazard: crate::store_safety::Hazard,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<Inspection>, StoreError> {
         if !path.is_file() {
-            // A brand-new store has no pre-migration state to protect and no
-            // corruption to establish: `open` simply creates it.
-            return Ok(());
+            // A brand-new store has no pre-migration state to protect and
+            // no corruption to establish: there is nothing to inspect. The
+            // mutation gate still validates whatever file exists when the
+            // time comes to write.
+            return Ok(None);
         }
-        match Self::inspect_existing_store(path, hazard)? {
-            // An empty file is a store this build CREATES (the bootstrap
-            // runs on it); a current one has nothing to do.
-            Inspection::Initialize | Inspection::Current => Ok(()),
-            Inspection::NeedsMigration(found) => {
-                // A migration WILL run. Take the verified backup first; a
-                // backup that cannot be created, verified, or published
-                // aborts the open — the store stays exactly as it is.
-                crate::store_safety::verified_pre_migration_backup(
-                    &Self::open_for_backup(path)?,
-                    path,
-                    Some(found),
-                    hazard,
-                )?;
-                Ok(())
-            }
-        }
+        Self::inspect_existing_store(path, hazard).map(Some)
     }
 
     /// Open `path` READ-ONLY, decide its state, and CLOSE the connection
@@ -1001,24 +1102,69 @@ impl HistoryStore {
         // open and Windows cannot rename it. Collecting the raw results
         // (rather than classifying inside `map_err`) is what guarantees the
         // connection is closed below before anything touches the file.
-        let snapshot = crate::store_safety::inspect_snapshot(&conn);
+        let snapshot = crate::store_safety::inspect_snapshot(&conn, hazard);
 
         // The connection closes HERE, before any handling below.
         drop(conn);
 
         let snapshot = snapshot.map_err(|e| Self::classify_inspection_error(path, e, hazard))?;
+        match Self::verdict_from_snapshot(snapshot)? {
+            Inspection::Corrupt(detail) => {
+                Err(Self::quarantine_after_corruption(path, &detail, hazard))
+            }
+            verdict => Ok(verdict),
+        }
+    }
 
+    /// Phase 2 (Phase 6.5.2, Workstream D): run the SAME gate on an
+    /// already-open connection. This is the mutation gate — whatever it
+    /// validates is the database that same connection may then write.
+    ///
+    /// Unlike the read-only gate this does NOT quarantine corruption it
+    /// finds: it returns [`Inspection::Corrupt`] as a verdict, and the
+    /// caller closes the connection and refuses in place (see
+    /// `open_impl_observed` for why a relocation must not be driven from
+    /// here).
+    fn inspect_connection(
+        conn: &rusqlite::Connection,
+        hazard: crate::store_safety::Hazard,
+    ) -> Result<Inspection, StoreError> {
+        let snapshot = match crate::store_safety::inspect_snapshot(conn, hazard) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                let corruption = matches!(
+                    &e,
+                    StoreError::Sqlite(sql)
+                        if crate::store_safety::sqlite_error_indicates_corruption(sql)
+                );
+                if corruption {
+                    return Ok(Inspection::Corrupt(e.to_string()));
+                }
+                return Err(e);
+            }
+        };
+        Self::verdict_from_snapshot(snapshot)
+    }
+
+    /// Turn a gathered snapshot into the verdict both gates share.
+    ///
+    /// Order matters: corruption established by the check comes first, an
+    /// object-less file is a store this build CREATES, and only then must
+    /// the file prove it is one of this build's own stores — a too-new
+    /// version first (this build cannot know what a newer store looks
+    /// like, so its structure is not judged), then version 0, then the
+    /// full per-version structure contract, then the verdict.
+    fn verdict_from_snapshot(
+        snapshot: crate::store_safety::InspectionSnapshot,
+    ) -> Result<Inspection, StoreError> {
         // Any row other than `ok` is positive evidence of corruption.
         if !snapshot.problems.is_empty() {
-            return Err(Self::quarantine_after_corruption(
-                path,
-                &snapshot.problems.join("; "),
-                hazard,
-            ));
+            return Ok(Inspection::Corrupt(snapshot.problems.join("; ")));
         }
 
         // A file with NOTHING in it is a store this build CREATES, never one
-        // it refuses: `coresight_core::db::open` runs the v1 bootstrap on it.
+        // it refuses: `coresight_core::db::apply_bootstrap` runs the v1
+        // bootstrap on it.
         if snapshot.object_count == 0 {
             return Ok(Inspection::Initialize);
         }
@@ -1047,12 +1193,12 @@ impl HistoryStore {
                             .to_string(),
                     });
                 }
-                if !snapshot.missing_core_tables.is_empty() {
+                if !snapshot.recognition_gaps.is_empty() {
                     return Err(StoreError::UnrecognizedSchema {
                         detail: format!(
-                            "it records schema version {found} but is missing core tables a \
-                             store at that version always has: {}",
-                            snapshot.missing_core_tables.join(", ")
+                            "it records schema version {found} but is missing core tables or \
+                             columns a store at that version always has: {}",
+                            snapshot.recognition_gaps.join(", ")
                         ),
                     });
                 }
@@ -1075,8 +1221,9 @@ impl HistoryStore {
         }
     }
 
-    /// Decide whether an inspection error is proven corruption (quarantine)
-    /// or merely an inability to decide (preserve and report).
+    /// Decide whether a READ-ONLY-gate failure is proven corruption
+    /// (quarantine after the connection is closed) or merely an inability
+    /// to decide (preserve and report).
     fn classify_inspection_error(
         path: &Path,
         e: StoreError,
@@ -1093,13 +1240,27 @@ impl HistoryStore {
         }
     }
 
-    /// A short-lived WRITE connection used only to drive the online backup.
-    ///
-    /// The Online Backup API needs a normal connection as its source. This
-    /// connection performs no migration and is closed immediately after the
-    /// backup, so it cannot leave a store half-migrated.
-    fn open_for_backup(path: &Path) -> Result<rusqlite::Connection, StoreError> {
-        rusqlite::Connection::open(path).map_err(StoreError::Sqlite)
+    /// The typed error for corruption the MUTATION gate established: the
+    /// store is refused in place — nothing written, nothing repaired, no
+    /// replacement created — and no quarantine relocation is attempted
+    /// (see `open_impl_observed`: the mutation gate's own read-write
+    /// access cannot promise a quarantined file's sidecar state stayed
+    /// pristine).
+    fn corrupt_at_mutation_gate(detail: &str) -> StoreError {
+        StoreError::Corrupt {
+            table: "store",
+            column: "integrity_check",
+            run_id: None,
+            detail: format!(
+                "database integrity check failed on open: {detail}. It failed the mutation \
+                 gate — the check that runs on the very connection that would have written \
+                 to it — so it was refused where it stands, with nothing written, nothing \
+                 repaired, and no replacement store created. No quarantine relocation was \
+                 attempted: it may have been substituted after the read-only gate, and the \
+                 mutation gate's own read-write access cannot promise a quarantined file's \
+                 sidecar state stayed pristine. Inspect this file yourself before trusting it"
+            ),
+        }
     }
 
     /// Quarantine a store whose corruption is established, then return an
@@ -3017,3 +3178,13 @@ fn retention_age_exceeded(started_nanos: i64, age: Duration, now_nanos: i64) -> 
     let elapsed = now.saturating_sub(started);
     elapsed > age.as_nanos()
 }
+
+// The failure-path tests for the open sequence (Phase 6.5 / 6.5.2). They
+// live in their own file because they use crate-internal seams
+// (`Hazard`, `PostBootstrapFault`, `open_impl`, `open_impl_observed`) that
+// are deliberately NOT part of this crate's public API: an external test
+// crate — or any other crate — cannot see them, and nothing outside this
+// crate can force a quarantine on a healthy store.
+#[cfg(test)]
+#[path = "store_hazard_tests.rs"]
+mod hazard_tests;

@@ -26,7 +26,8 @@
 //! database is created, no repair is attempted, and no recovery of
 //! historical data is claimed.
 //!
-//! ## 3. Only a recognizable store is ever touched (Phase 6.5.1)
+//! ## 3. Only a recognizable store is ever touched (Phase 6.5.1, completed
+//! in 6.5.2)
 //!
 //! "No existing file → create, existing file → inspect" is not a
 //! recognition rule: any foreign SQLite file with a few tables would be
@@ -34,13 +35,33 @@
 //! the mutating bootstrap, which would ADD CoreSight tables to it. The
 //! recognition helpers here gather what an existing file actually is —
 //! its integrity, whether it has a `schema_version` table at all, what
-//! that table records, and whether the core tables of that version exist
-//! — and [`crate::store::HistoryStore`] refuses anything it cannot
-//! recognize as a store it could have written, leaving the database file
-//! and its `-wal` untouched and deleting nothing. (SQLite's own read path
-//! may rebuild a derived `-shm` WAL index while it reads a file that
-//! carries a `-wal`; that cache holds no data and byte-identity is
-//! deliberately not claimed for it.)
+//! that table records, and whether the FULL structure a real store at
+//! that version has (every table and signature column migrations v1–v6
+//! guarantee; [`recognition_gaps`]) — and [`crate::store::HistoryStore`]
+//! refuses anything it cannot recognize, leaving the database file and
+//! its `-wal` untouched and deleting nothing. (SQLite's own read path may
+//! rebuild a derived `-shm` WAL index while it reads a file that carries
+//! a `-wal`; that cache holds no data and byte-identity is deliberately
+//! not claimed for it.)
+//!
+//! What this establishes: the file has the structure of this build's
+//! store at the version it records, and its integrity check said `ok`.
+//! What it deliberately does NOT establish: PROVENANCE. A foreign
+//! database deliberately forged to carry the full v1–v6 structure and a
+//! valid `schema_version` row is indistinguishable from a genuine store
+//! by structure alone. The check refuses files that cannot be this
+//! build's store; it does not prove that a file which can be is one.
+//!
+//! ## 4. Integrity fails CLOSED (Phase 6.5.2)
+//!
+//! A `PRAGMA integrity_check` that returns NO rows has established
+//! nothing: it is not a verdict of health, and it is not evidence of
+//! corruption either. [`classify_integrity_rows`] reports it as a typed
+//! failure ("integrity could not be established", an ordinary
+//! non-corruption error with no SQLite corruption code), so every caller
+//! — the store-open preflight, the post-bootstrap check, and backup
+//! verification — aborts instead of proceeding, and no store is
+//! quarantined on a decision that was never made.
 //!
 //! ## What this module deliberately does NOT do
 //!
@@ -56,12 +77,20 @@
 //!
 //! ## Test seams
 //!
-//! [`Hazard`] injects deterministic failures at each stage (naming a real
-//! fault that a filesystem can produce) so the fail-closed paths are
-//! exercised by test rather than described. Production passes
+//! [`Hazard`] and [`PostBootstrapFault`] inject deterministic failures
+//! (each naming a real fault a filesystem can produce) so the fail-closed
+//! paths are exercised by test rather than described. Production passes
 //! [`Hazard::None`]. A hazard fails ONLY the stage it names: a hazard
 //! aimed at a quarantine relocation or a post-bootstrap integrity result
 //! can never accidentally fail an earlier backup.
+//!
+//! Since Phase 6.5.2 these seams are CRATE-INTERNAL (`pub(crate)` or
+//! private) and the `store_safety` module is private: the public entry
+//! point is [`HistoryStore::open`](crate::store::HistoryStore::open)
+//! alone. No public caller can name a hazard, force a quarantine on a
+//! healthy store, or drive the low-level backup/quarantine helpers
+//! directly — the hazard-driven tests live in crate-internal test modules
+//! (`store::hazard_tests`).
 
 use std::fs::{self, File};
 use std::io;
@@ -102,8 +131,18 @@ pub(crate) const QUARANTINE_RESTORE_STEP: &str = "restore";
 /// produce. They exist so the fail-closed paths are *tested* rather than
 /// asserted in a comment — an untested failure path is a claim, not a
 /// guarantee.
+///
+/// **Not public API** (Phase 6.5.2): `pub(crate)` so only crate-internal
+/// tests can name a hazard. Production callers open a store with
+/// [`crate::store::HistoryStore::open`] and can never force a
+/// quarantine, a backup failure, or a fabricated integrity result.
+///
+/// Constructed only by the crate-internal failure-path tests in
+/// `store::hazard_tests`; a production build contains no constructor for
+/// most variants, so dead-code analysis is silenced deliberately.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Hazard {
+pub(crate) enum Hazard {
     /// No injected failure (production).
     #[default]
     None,
@@ -126,17 +165,34 @@ pub enum Hazard {
     /// partial-failure report: the main file stays in quarantine and the
     /// error says exactly which artifact is where.
     QuarantineRestore,
+    /// The PREFLIGHT `PRAGMA integrity_check` returns NO result rows at
+    /// all — not `ok`, not a corruption report, nothing. Exercises the
+    /// fail-closed rule: an empty result establishes nothing, so it must
+    /// abort the open WITHOUT quarantining.
+    IntegrityReportsNoRows,
+    /// The BACKUP-VERIFICATION `PRAGMA integrity_check` returns NO result
+    /// rows at all. Exercises the same rule at the backup gate: an
+    /// unverifiable backup must never be published.
+    BackupVerifyReportsNoRows,
     /// The post-bootstrap integrity check behaves as the named fault
-    /// describes (it reports corruption, or its result cannot be read).
+    /// describes (it reports corruption, its result cannot be read, or it
+    /// reports no rows at all).
     PostBootstrapIntegrity(PostBootstrapFault),
 }
 
 /// How the post-bootstrap integrity check fails under
 /// [`Hazard::PostBootstrapIntegrity`].
+///
+/// Constructed only by the crate-internal failure-path tests in
+/// `store::hazard_tests`; dead-code analysis is silenced deliberately.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PostBootstrapFault {
+pub(crate) enum PostBootstrapFault {
     /// The check runs and reports corruption rows.
     ReportsCorruption,
+    /// The check runs and reports NO result rows at all (as if the pragma
+    /// answered with nothing).
+    ReportsNoRows,
     /// Reading the check's result fails with an ordinary I/O error — an
     /// ENVIRONMENT problem, not corruption.
     UnreadableIoError,
@@ -357,12 +413,88 @@ pub(crate) fn recorded_version(conn: &Connection) -> Result<RecordedVersion, Sto
     }
 }
 
-/// The Phase-0 bootstrap tables a v1 store always has.
-const V1_CORE_TABLES: [&str; 2] = ["drives", "scans"];
+// ---------------------------------------------------------------------------
+// The recognition contract (Phase 6.5.2, Workstream C)
+//
+// What a store at each recorded version must structurally possess, derived
+// from the migration history this build actually shipped: v1 is the
+// Phase-0 bootstrap (coresight-core); v2 created the history tables; v3
+// widened object identity with `file_id_hi`; v4 added the persisted
+// relationship status; v5 created the normalized `app_snapshot_*` tables;
+// v6 added the application-id encoding column.
+//
+// A recorded version PROMISES that its migrations ran, so the structure of
+// those migrations must be present. A store missing any of it is refused
+// as `UnrecognizedSchema` — never handed to the mutating bootstrap.
+// ---------------------------------------------------------------------------
 
-/// The history tables a v2+ store always has: the pair every migration
-/// since v2 builds on and the history API itself reads.
-const HISTORY_CORE_TABLES: [&str; 2] = ["scan_runs", "observations"];
+/// The Phase-0 bootstrap tables: present at every recorded version.
+const V1_TABLES: [&str; 2] = ["drives", "scans"];
+
+/// Signature columns of the v1 bootstrap. A file with a `drives` table
+/// that is not this build's `drives` is not a store this build wrote.
+const V1_COLUMNS: [(&str, &str); 3] = [("drives", "id"), ("scans", "id"), ("scans", "drive_id")];
+
+/// The history tables migration v2 created: present at every v2+ store.
+const V2_TABLES: [&str; 4] = [
+    "scan_runs",
+    "observations",
+    "relationship_obs",
+    "relationship_members",
+];
+
+/// Signature columns of the v2 history tables (the identity columns the
+/// history API reads them by).
+const V2_COLUMNS: [(&str, &str); 15] = [
+    ("scan_runs", "run_id"),
+    ("scan_runs", "started_at"),
+    ("scan_runs", "roots"),
+    ("scan_runs", "platform"),
+    ("scan_runs", "config"),
+    ("scan_runs", "status"),
+    ("observations", "run_id"),
+    ("observations", "path"),
+    ("observations", "kind"),
+    ("relationship_obs", "run_id"),
+    ("relationship_obs", "rel_id"),
+    ("relationship_obs", "kind"),
+    ("relationship_members", "run_id"),
+    ("relationship_members", "rel_id"),
+    ("relationship_members", "path"),
+];
+
+/// v3 (Phase 5.1) widened object identity with the high half of the file
+/// id. Present at every v3+ store.
+const V3_COLUMNS: [(&str, &str); 2] = [
+    ("observations", "file_id_hi"),
+    ("relationship_members", "file_id_hi"),
+];
+
+/// v4 persists each run's relationship-report status and truncation
+/// flag. Present at every v4+ store.
+const V4_COLUMNS: [(&str, &str); 2] = [("scan_runs", "rel_status"), ("scan_runs", "rel_truncated")];
+
+/// The v5 (Phase 6.4) normalized application/system snapshot tables.
+/// Present at every v5+ store.
+const V5_TABLES: [&str; 13] = [
+    "app_snapshot_meta",
+    "app_snapshot_artifacts",
+    "app_snapshot_apps",
+    "app_snapshot_provenance",
+    "app_snapshot_views",
+    "app_snapshot_roots",
+    "app_snapshot_evidence",
+    "app_snapshot_coverage",
+    "app_snapshot_relationships",
+    "app_snapshot_rel_members",
+    "app_snapshot_history",
+    "app_snapshot_footprints",
+    "app_snapshot_footprint_evidence",
+];
+
+/// v6 (Phase 6.4.1) records the application-id encoding on each row.
+/// Present at every v6 store.
+const V6_COLUMNS: [(&str, &str); 1] = [("app_snapshot_apps", "id_encoding")];
 
 /// Whether `name` is absent from `sqlite_master` as a table.
 fn table_missing(conn: &Connection, name: &str) -> Result<bool, StoreError> {
@@ -376,51 +508,125 @@ fn table_missing(conn: &Connection, name: &str) -> Result<bool, StoreError> {
     Ok(count == 0)
 }
 
-/// The core tables missing for a store that records `version`.
-///
-/// - v1 is the Phase-0 core bootstrap: `drives` and `scans`.
-/// - v2+ is the history layer on top of it: `scan_runs` and
-///   `observations`.
-///
-/// This is the minimum that makes a file RECOGNIZABLE as one of this
-/// product's own stores at that version; deeper structure is verified by
-/// the reads that use it, which already fail with typed errors rather than
-/// guessing.
-pub(crate) fn missing_core_tables(
-    conn: &Connection,
-    version: u32,
-) -> Result<Vec<&'static str>, StoreError> {
-    let required: &[&'static str] = if version >= 2 {
-        &HISTORY_CORE_TABLES
-    } else {
-        &V1_CORE_TABLES
-    };
-    let mut missing = Vec::new();
-    for name in required {
-        if table_missing(conn, name)? {
-            missing.push(*name);
-        }
-    }
-    Ok(missing)
+/// Whether `table` exists but has no column named `column`.
+fn column_missing(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    // `pragma_table_info` is SQLite's table-valued pragma: the table name
+    // is a bound parameter, never interpolated SQL.
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::Sqlite)?;
+    Ok(count == 0)
 }
 
-/// Every row `PRAGMA integrity_check` reports other than `ok`.
+/// The pieces of the required structure that are missing for a store
+/// recording `version`: tables a real store at that version always has,
+/// and — for tables that exist — the signature columns those tables
+/// always have.
+///
+/// Each finding is a description ("missing table drives", "missing column
+/// observations.file_id_hi") so the refusal names exactly what failed to
+/// match. Columns of a MISSING table are not listed separately: the table
+/// itself is the finding.
+///
+/// The contract is the MINIMUM STRUCTURE the migration history guarantees,
+/// not a full schema comparison: migrations are forward-only
+/// `CREATE TABLE IF NOT EXISTS`/`ADD COLUMN` steps, and this is what a
+/// genuine store at `version` cannot lack. See the module docs for what
+/// this establishes (structure, not provenance).
+pub(crate) fn recognition_gaps(conn: &Connection, version: u32) -> Result<Vec<String>, StoreError> {
+    let mut tables: Vec<&'static str> = V1_TABLES.to_vec();
+    let mut columns: Vec<(&'static str, &'static str)> = V1_COLUMNS.to_vec();
+    if version >= 2 {
+        tables.extend(V2_TABLES);
+        columns.extend(V2_COLUMNS);
+    }
+    if version >= 3 {
+        columns.extend(V3_COLUMNS);
+    }
+    if version >= 4 {
+        columns.extend(V4_COLUMNS);
+    }
+    if version >= 5 {
+        tables.extend(V5_TABLES);
+    }
+    if version >= 6 {
+        columns.extend(V6_COLUMNS);
+    }
+
+    let mut gaps = Vec::new();
+    for name in tables {
+        if table_missing(conn, name)? {
+            gaps.push(format!("missing table {name}"));
+        }
+    }
+    for (table, column) in columns {
+        if table_missing(conn, table)? {
+            // Already reported as a missing table; a missing column of a
+            // missing table is not a second finding.
+            continue;
+        }
+        if column_missing(conn, table, column)? {
+            gaps.push(format!("missing column {table}.{column}"));
+        }
+    }
+    Ok(gaps)
+}
+
+/// The raw rows `PRAGMA integrity_check` returns.
 ///
 /// A RESULT-READING failure is surfaced as an error, never read as
 /// "healthy": silently treating an unreadable result as equivalent to
 /// `ok` would let a damaged store through the exact gate that is supposed
-/// to catch it. An empty result is therefore NOT the same as `ok` — it
-/// falls out as an error from the `collect` rather than being smoothed
-/// over.
-pub(crate) fn integrity_problems(conn: &Connection) -> Result<Vec<String>, StoreError> {
+/// to catch it. `collect::<Result<..>>()` rather than
+/// `filter_map(|r| r.ok())`: a row that cannot be READ is a failure to
+/// decide, and must not be silently dropped into a "no problems"
+/// conclusion.
+pub(crate) fn integrity_rows(conn: &Connection) -> Result<Vec<String>, StoreError> {
     let mut stmt = conn.prepare("PRAGMA integrity_check")?;
-    // `collect::<Result<..>>()` rather than `filter_map(|r| r.ok())`:
-    // a row that cannot be READ is a failure to decide, and must not be
-    // silently dropped into a "no problems" conclusion.
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Classify the raw `PRAGMA integrity_check` rows into "problems found".
+///
+/// **Fail closed on emptiness** (Phase 6.5.2): a check that produced NO
+/// rows established NOTHING. It is reported as a typed failure to
+/// establish integrity — an ordinary, non-corruption error that carries
+/// no SQLite corruption code — so no caller can read it as health
+/// (healthy) and no caller can read it as damage (quarantine). The pragma
+/// is documented to answer with at least `ok`; this code does not rely on
+/// that documentation holding, because "documented" is not "guaranteed by
+/// our own control".
+///
+/// Rows other than `ok` are positive evidence of corruption and are
+/// returned. An all-`ok`, non-empty result is the ONLY healthy outcome.
+pub(crate) fn classify_integrity_rows(rows: Vec<String>) -> Result<Vec<String>, StoreError> {
+    if rows.is_empty() {
+        return Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::Unknown,
+                extended_code: rusqlite::ffi::ErrorCode::Unknown as i32,
+            },
+            Some(
+                "PRAGMA integrity_check returned no result rows, so integrity could not be \
+                 established (this is not a verdict of health)"
+                    .to_string(),
+            ),
+        )));
+    }
     Ok(rows.into_iter().filter(|r| r != "ok").collect())
+}
+
+/// Every row `PRAGMA integrity_check` reports other than `ok`, with the
+/// empty-result rule applied (see [`classify_integrity_rows`]).
+pub(crate) fn integrity_problems(conn: &Connection) -> Result<Vec<String>, StoreError> {
+    classify_integrity_rows(integrity_rows(conn)?)
 }
 
 /// Everything a recognition verdict needs from an open connection,
@@ -434,9 +640,9 @@ pub(crate) struct InspectionSnapshot {
     pub problems: Vec<String>,
     /// What the `schema_version` table records.
     pub version: RecordedVersion,
-    /// Core tables missing for the recorded version (empty when what is
-    /// missing cannot be judged, e.g. no version is recorded).
-    pub missing_core_tables: Vec<&'static str>,
+    /// Required structure missing for the recorded version (empty when
+    /// what is missing cannot be judged, e.g. no version is recorded).
+    pub recognition_gaps: Vec<String>,
     /// Total rows in `sqlite_master` (tables, indexes, views, triggers):
     /// zero means the file holds no schema at all.
     pub object_count: i64,
@@ -447,21 +653,32 @@ pub(crate) struct InspectionSnapshot {
 ///
 /// Integrity runs FIRST and its failure is returned for the caller to
 /// classify: corruption codes quarantine, environment failures do not,
-/// and neither is smoothed into a verdict here.
-pub(crate) fn inspect_snapshot(conn: &Connection) -> Result<InspectionSnapshot, StoreError> {
-    let problems = integrity_problems(conn)?;
+/// an empty result is "could not establish" (fail closed, neither of the
+/// other two), and none of them is smoothed into a verdict here.
+pub(crate) fn inspect_snapshot(
+    conn: &Connection,
+    hazard: Hazard,
+) -> Result<InspectionSnapshot, StoreError> {
+    let problems = if hazard == Hazard::IntegrityReportsNoRows {
+        // The injected outcome is fed through the REAL classifier, so this
+        // seam exercises the production decision rather than a shortcut
+        // around it.
+        classify_integrity_rows(Vec::new())?
+    } else {
+        integrity_problems(conn)?
+    };
     let object_count: i64 = conn
         .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
         .map_err(StoreError::Sqlite)?;
     let version = recorded_version(conn)?;
-    let missing_core_tables = match &version {
-        RecordedVersion::Version(version) => missing_core_tables(conn, *version)?,
+    let recognition_gaps = match &version {
+        RecordedVersion::Version(version) => recognition_gaps(conn, *version)?,
         RecordedVersion::NoTable | RecordedVersion::Unusable(_) => Vec::new(),
     };
     Ok(InspectionSnapshot {
         problems,
         version,
-        missing_core_tables,
+        recognition_gaps,
         object_count,
     })
 }
@@ -544,7 +761,7 @@ enum BackupStage<'a> {
 /// `expected_version` is the pre-migration version the source recorded; it
 /// must match, because a backup of a different version would not
 /// represent the state the migration is about to change.
-pub fn verified_pre_migration_backup(
+pub(crate) fn verified_pre_migration_backup(
     conn: &Connection,
     path: &Path,
     expected_version: Option<u32>,
@@ -595,7 +812,7 @@ fn verified_pre_migration_backup_observed(
         // Verify BEFORE publishing: an unverified artifact must never be
         // reachable under the name that means "a safe copy exists".
         hazard.inject("verify")?;
-        verify_backup(&temporary, expected_version)?;
+        verify_backup(&temporary, expected_version, hazard)?;
         observe(BackupStage::TemporaryVerified(&temporary));
 
         hazard.inject("publish")?;
@@ -648,7 +865,20 @@ fn publish_backup(temporary: &Path, destination: &Path) -> Result<(), StoreError
 
 /// Re-open `path` with a SEPARATE connection and verify it is
 /// structurally intact and carries `expected_version`.
-fn verify_backup(path: &Path, expected_version: Option<u32>) -> Result<(), StoreError> {
+///
+/// Integrity fails closed here too (Phase 6.5.2): a verification that
+/// cannot establish integrity — including one whose `PRAGMA
+/// integrity_check` returned no rows at all — must never let the artifact
+/// be published under the name that means "a safe copy exists". Both the
+/// integrity failure and a version that cannot be read are reported as
+/// [`StoreError::BackupFailed`] with step `verify`, so a backup problem is
+/// one error type regardless of which layer produced it (the migration
+/// then aborts with the source unchanged).
+fn verify_backup(
+    path: &Path,
+    expected_version: Option<u32>,
+    hazard: Hazard,
+) -> Result<(), StoreError> {
     if !is_existing_file(path) {
         return Err(StoreError::BackupFailed {
             step: "verify".to_string(),
@@ -656,7 +886,17 @@ fn verify_backup(path: &Path, expected_version: Option<u32>) -> Result<(), Store
         });
     }
     let conn = Connection::open(path).map_err(|e| backup_sqlite_error("verify open", e))?;
-    let problems = integrity_problems(&conn)?;
+    let problems = if hazard == Hazard::BackupVerifyReportsNoRows {
+        // Injected empty outcome, fed through the real classifier: the
+        // same decision the production path takes.
+        classify_integrity_rows(Vec::new())
+    } else {
+        integrity_problems(&conn)
+    }
+    .map_err(|e| StoreError::BackupFailed {
+        step: "verify".to_string(),
+        detail: format!("the backup's integrity could not be established: {e}"),
+    })?;
     if !problems.is_empty() {
         return Err(StoreError::BackupFailed {
             step: "verify".to_string(),
@@ -666,7 +906,10 @@ fn verify_backup(path: &Path, expected_version: Option<u32>) -> Result<(), Store
             ),
         });
     }
-    let found = match recorded_version(&conn)? {
+    let found = match recorded_version(&conn).map_err(|e| StoreError::BackupFailed {
+        step: "verify".to_string(),
+        detail: format!("the backup's recorded schema version could not be read: {e}"),
+    })? {
         RecordedVersion::Version(found) => Some(found),
         RecordedVersion::NoTable => None,
         // A backup whose own version cannot be read is not verifiable:
@@ -711,8 +954,13 @@ fn verify_backup(path: &Path, expected_version: Option<u32>) -> Result<(), Store
 /// The relocated files keep their ORIGINAL names inside the directory, so
 /// listing it describes exactly what was preserved. Nothing here is
 /// interpreted, repaired, or claimed to be recovered.
+///
+/// **Not public API** (Phase 6.5.2): quarantine relocations happen only
+/// inside [`crate::store::HistoryStore::open`], on evidence the open path
+/// established. No public caller can name this type, drive a relocation,
+/// or point it at an arbitrary store.
 #[derive(Debug, Clone)]
-pub struct Quarantine {
+pub(crate) struct Quarantine {
     directory: PathBuf,
 }
 
@@ -720,7 +968,7 @@ impl Quarantine {
     /// The quarantine directory. Callers that report it must report it as
     /// a LOCATION only — the damaged data's contents are never described
     /// as recovered or repaired.
-    pub fn directory(&self) -> &Path {
+    pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
 }
@@ -743,7 +991,14 @@ impl Quarantine {
 /// The caller is responsible for closing its live connection BEFORE
 /// calling this: SQLite holds file handles, and on Windows an open
 /// database file cannot be renamed.
-pub fn quarantine_corrupt_store(path: &Path, hazard: Hazard) -> Result<Quarantine, StoreError> {
+///
+/// **Not public API** (Phase 6.5.2): `pub(crate)` so a relocation can only
+/// be driven by the store-open path's own, established corruption
+/// evidence — never by a public caller pointing it at an arbitrary file.
+pub(crate) fn quarantine_corrupt_store(
+    path: &Path,
+    hazard: Hazard,
+) -> Result<Quarantine, StoreError> {
     if !is_existing_file(path) {
         return Err(StoreError::QuarantineFailed {
             step: "prepare".to_string(),
@@ -901,13 +1156,30 @@ fn relocate_one(
 /// database" qualify. Everything else — permission denial, lock
 /// contention, a full disk, an ordinary I/O failure — is an environment
 /// problem that quarantine would only make worse by moving a healthy file
-/// aside.
-pub fn sqlite_error_indicates_corruption(err: &rusqlite::Error) -> bool {
+/// aside. (The "no result rows" error [`classify_integrity_rows`]
+/// produces carries `ErrorCode::Unknown` and deliberately does NOT
+/// qualify: failing to establish integrity is not evidence of damage.)
+///
+/// **Not public API** (Phase 6.5.2): an internal classification primitive,
+/// `pub(crate)` for the open path and its crate-internal tests.
+pub(crate) fn sqlite_error_indicates_corruption(err: &rusqlite::Error) -> bool {
     match err {
         rusqlite::Error::SqliteFailure(ffi, _) => {
             use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
-            matches!(ffi.extended_code, c if c == DatabaseCorrupt as i32)
-                || matches!(ffi.code, DatabaseCorrupt | NotADatabase)
+            // `ffi.code` is SQLite's PRIMARY result code (`raw & 0xff`), so
+            // it already covers the whole corruption family — the extended
+            // variants (SQLITE_CORRUPT_VTAB, SQLITE_CORRUPT_INDEX, …) all
+            // mask to SQLITE_CORRUPT. The raw extended-code comparisons are
+            // belt-and-braces for an error built by hand, and MUST compare
+            // against SQLite's own result-code constants: the Rust
+            // `ErrorCode` enum has implicit discriminants that do NOT match
+            // them (`DatabaseCorrupt as i32` is 9, while SQLITE_CORRUPT is
+            // 11) — comparing against the discriminant also made
+            // SQLITE_INTERRUPT's raw code (9) look like corruption, which it
+            // is not.
+            matches!(ffi.code, DatabaseCorrupt | NotADatabase)
+                || ffi.extended_code == rusqlite::ffi::SQLITE_CORRUPT
+                || ffi.extended_code == rusqlite::ffi::SQLITE_NOTADB
         }
         _ => false,
     }
@@ -967,7 +1239,7 @@ mod tests {
         let corruption = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error {
                 code: ErrorCode::DatabaseCorrupt,
-                extended_code: 11,
+                extended_code: rusqlite::ffi::SQLITE_CORRUPT,
             },
             Some("database disk image is malformed".to_string()),
         );
@@ -976,29 +1248,66 @@ mod tests {
         let not_a_database = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error {
                 code: ErrorCode::NotADatabase,
-                extended_code: 26,
+                extended_code: rusqlite::ffi::SQLITE_NOTADB,
             },
             Some("file is not a database".to_string()),
         );
         assert!(sqlite_error_indicates_corruption(&not_a_database));
 
+        // A corruption result whose primary code is unknown but whose RAW
+        // extended code is SQLITE_CORRUPT still qualifies (the
+        // belt-and-braces branch).
+        let extended_only = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::Unknown,
+                extended_code: rusqlite::ffi::SQLITE_CORRUPT,
+            },
+            Some("extended corruption code".to_string()),
+        );
+        assert!(sqlite_error_indicates_corruption(&extended_only));
+
+        // The trap a discriminant-based comparison would set:
+        // `ErrorCode::DatabaseCorrupt as i32` is 9, which equals
+        // SQLITE_INTERRUPT's raw code — but an interrupt is NOT corruption
+        // and must never quarantine a healthy store.
+        let interrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::OperationInterrupted,
+                extended_code: rusqlite::ffi::SQLITE_INTERRUPT,
+            },
+            Some("interrupted".to_string()),
+        );
+        assert!(
+            !sqlite_error_indicates_corruption(&interrupt),
+            "SQLITE_INTERRUPT is not corruption"
+        );
+
         // Environment problems must NOT qualify: quarantining on these
-        // would move a HEALTHY file aside. Each is a real SQLite code a
-        // real environment can produce.
-        for code in [
-            ErrorCode::SystemIoFailure,
-            ErrorCode::PermissionDenied,
-            ErrorCode::DatabaseBusy,
-            ErrorCode::CannotOpen,
-            ErrorCode::ReadOnly,
-            ErrorCode::DiskFull,
-            ErrorCode::FileLockingProtocolFailed,
-            ErrorCode::OperationInterrupted,
+        // would move a HEALTHY file aside. Each carries its REAL raw
+        // result code — constructed from the Rust discriminant, several
+        // would collide with real corruption codes (DiskFull's implicit
+        // discriminant is 11, SQLITE_CORRUPT) and mask exactly the defect
+        // this test now pins.
+        for (code, raw) in [
+            (ErrorCode::SystemIoFailure, rusqlite::ffi::SQLITE_IOERR),
+            (ErrorCode::PermissionDenied, rusqlite::ffi::SQLITE_PERM),
+            (ErrorCode::DatabaseBusy, rusqlite::ffi::SQLITE_BUSY),
+            (ErrorCode::CannotOpen, rusqlite::ffi::SQLITE_CANTOPEN),
+            (ErrorCode::ReadOnly, rusqlite::ffi::SQLITE_READONLY),
+            (ErrorCode::DiskFull, rusqlite::ffi::SQLITE_FULL),
+            (
+                ErrorCode::FileLockingProtocolFailed,
+                rusqlite::ffi::SQLITE_PROTOCOL,
+            ),
+            (
+                ErrorCode::OperationInterrupted,
+                rusqlite::ffi::SQLITE_INTERRUPT,
+            ),
         ] {
             let env = rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error {
                     code,
-                    extended_code: code as i32,
+                    extended_code: raw,
                 },
                 Some("environment problem".to_string()),
             );
@@ -1342,41 +1651,141 @@ mod tests {
         }
     }
 
-    /// The core-table requirement follows the recorded version: v1 is the
-    /// Phase-0 bootstrap, v2+ is the history layer.
-    #[test]
-    fn missing_core_tables_follow_the_recorded_version() {
+    /// The minimum structure the recognition contract requires up to
+    /// `version` — only the required tables and signature columns.
+    fn minimal_store_at(version: u32) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        assert_eq!(
-            missing_core_tables(&conn, 1).unwrap(),
-            vec!["drives", "scans"]
-        );
-        assert_eq!(
-            missing_core_tables(&conn, 6).unwrap(),
-            vec!["scan_runs", "observations"]
-        );
-
-        conn.execute_batch(
+        let mut ddl = String::from(
             "CREATE TABLE drives (id TEXT);
-             CREATE TABLE scans (id TEXT);
-             CREATE TABLE scan_runs (run_id TEXT);
-             CREATE TABLE observations (path TEXT);",
+             CREATE TABLE scans (id TEXT, drive_id TEXT);
+             CREATE TABLE scan_runs (run_id TEXT, started_at INTEGER, roots TEXT,
+                                     platform TEXT, config TEXT, status TEXT);
+             CREATE TABLE observations (run_id TEXT, path TEXT, kind TEXT);
+             CREATE TABLE relationship_obs (run_id TEXT, rel_id TEXT, kind TEXT);
+             CREATE TABLE relationship_members (run_id TEXT, rel_id TEXT, path TEXT);",
+        );
+        if version >= 3 {
+            ddl.push_str(
+                "ALTER TABLE observations ADD COLUMN file_id_hi INTEGER;
+                 ALTER TABLE relationship_members ADD COLUMN file_id_hi INTEGER;",
+            );
+        }
+        if version >= 4 {
+            ddl.push_str(
+                "ALTER TABLE scan_runs ADD COLUMN rel_status TEXT;
+                 ALTER TABLE scan_runs ADD COLUMN rel_truncated INTEGER;",
+            );
+        }
+        if version >= 5 {
+            for table in V5_TABLES {
+                ddl.push_str(&format!("CREATE TABLE {table} (x INTEGER);"));
+            }
+        }
+        if version >= 6 {
+            ddl.push_str("ALTER TABLE app_snapshot_apps ADD COLUMN id_encoding TEXT;");
+        }
+        conn.execute_batch(&ddl).unwrap();
+        conn
+    }
+
+    /// The recognition contract is the FULL v1–v6 structure — every table
+    /// AND signature column the migrations guarantee — following the
+    /// recorded version.
+    #[test]
+    fn recognition_gaps_follow_the_recorded_version() {
+        for version in 1..=6 {
+            let conn = minimal_store_at(version);
+            assert!(
+                recognition_gaps(&conn, version).unwrap().is_empty(),
+                "a minimally-complete v{version} store must be recognized"
+            );
+        }
+
+        // A v2 store missing the v1 bootstrap and half the v2 tables (the
+        // adversarial shape: scan_runs + observations only) names every
+        // missing piece.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scan_runs (run_id TEXT, started_at INTEGER, roots TEXT,
+                                     platform TEXT, config TEXT, status TEXT);
+             CREATE TABLE observations (run_id TEXT, path TEXT, kind TEXT);",
         )
         .unwrap();
-        assert!(missing_core_tables(&conn, 1).unwrap().is_empty());
-        assert!(missing_core_tables(&conn, 6).unwrap().is_empty());
+        let gaps = recognition_gaps(&conn, 2).unwrap();
+        for expected in [
+            "missing table drives",
+            "missing table scans",
+            "missing table relationship_obs",
+            "missing table relationship_members",
+        ] {
+            assert!(
+                gaps.contains(&expected.to_string()),
+                "expected {expected:?} in {gaps:?}"
+            );
+        }
 
-        // A v2+ store is recognized by its history tables alone: the
-        // history layer was migrated onto stores built before this crate
-        // owned the v1 bootstrap verbatim, so absence of `drives`/`scans`
-        // at v2+ must not hide a genuine store.
-        let history_only = Connection::open_in_memory().unwrap();
-        history_only
-            .execute_batch(
-                "CREATE TABLE scan_runs (run_id TEXT);
-                 CREATE TABLE observations (path TEXT);",
-            )
-            .unwrap();
-        assert!(missing_core_tables(&history_only, 2).unwrap().is_empty());
+        // A v5-shaped store recording v6 is incomplete: the v6 column is
+        // absent. Structure, not provenance: having every table is not
+        // enough when the recorded version promises the column.
+        let conn = minimal_store_at(5);
+        assert_eq!(
+            recognition_gaps(&conn, 6).unwrap(),
+            vec!["missing column app_snapshot_apps.id_encoding".to_string()]
+        );
+
+        // A v2-shaped store recording v3 lacks the widened-identity
+        // columns.
+        let conn = minimal_store_at(2);
+        assert_eq!(
+            recognition_gaps(&conn, 3).unwrap(),
+            vec![
+                "missing column observations.file_id_hi".to_string(),
+                "missing column relationship_members.file_id_hi".to_string(),
+            ]
+        );
+    }
+
+    /// (Phase 6.5.2, Workstream B) The classifier fails closed on an empty
+    /// result; only a non-empty all-`ok` result is healthy; any other row
+    /// is a problem.
+    #[test]
+    fn integrity_classification_fails_closed_on_an_empty_result() {
+        let err = classify_integrity_rows(Vec::new())
+            .expect_err("an empty result established nothing and must not mean healthy");
+        match &err {
+            StoreError::Sqlite(sql) => {
+                assert!(
+                    !sqlite_error_indicates_corruption(sql),
+                    "an empty result is not evidence of damage either: {err:?}"
+                );
+            }
+            other => panic!("expected a Sqlite error, got {other:?}"),
+        }
+        assert!(
+            err.to_string()
+                .contains("integrity could not be established"),
+            "the failure must say what could not be established: {err}"
+        );
+
+        // The real pragma on a real (empty) database answers `ok` — the
+        // empty-result rule is about an outcome we cannot rule out, not
+        // about a pragma that normally misbehaves.
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(
+            integrity_problems(&conn).unwrap().is_empty(),
+            "an empty database's integrity check answers ok"
+        );
+
+        assert!(classify_integrity_rows(vec!["ok".to_string()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            classify_integrity_rows(vec![
+                "ok".to_string(),
+                "row 3 missing from index idx_obs_path".to_string(),
+            ])
+            .unwrap(),
+            vec!["row 3 missing from index idx_obs_path".to_string()]
+        );
     }
 }

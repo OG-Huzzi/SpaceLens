@@ -2889,6 +2889,22 @@ fn build_legacy_v5_snapshot_store(db_path: &std::path::Path) {
     let sql = format!(
         "CREATE TABLE schema_version (version INTEGER NOT NULL);
          INSERT INTO schema_version (version) VALUES (1);
+         CREATE TABLE drives (
+             id TEXT PRIMARY KEY, label TEXT NOT NULL, fs_type TEXT NOT NULL,
+             kind TEXT NOT NULL, capacity INTEGER NOT NULL,
+             first_seen_at TEXT NOT NULL, seen_last_at TEXT NOT NULL,
+             offline INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE scans (
+             id TEXT PRIMARY KEY,
+             drive_id TEXT NOT NULL REFERENCES drives(id),
+             started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+             root TEXT NOT NULL,
+             file_count INTEGER NOT NULL DEFAULT 0,
+             dir_count INTEGER NOT NULL DEFAULT 0,
+             bytes INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX idx_scans_drive ON scans(drive_id);
          {core}
          {snapshots}"
     );
@@ -4003,7 +4019,23 @@ fn build_v4_database(db_path: &std::path::Path) {
     let conn = Connection::open(db_path).unwrap();
     conn.execute_batch(
         "CREATE TABLE schema_version (version INTEGER NOT NULL);
-         INSERT INTO schema_version (version) VALUES (1);",
+         INSERT INTO schema_version (version) VALUES (1);
+         CREATE TABLE drives (
+             id TEXT PRIMARY KEY, label TEXT NOT NULL, fs_type TEXT NOT NULL,
+             kind TEXT NOT NULL, capacity INTEGER NOT NULL,
+             first_seen_at TEXT NOT NULL, seen_last_at TEXT NOT NULL,
+             offline INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE scans (
+             id TEXT PRIMARY KEY,
+             drive_id TEXT NOT NULL REFERENCES drives(id),
+             started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+             root TEXT NOT NULL,
+             file_count INTEGER NOT NULL DEFAULT 0,
+             dir_count INTEGER NOT NULL DEFAULT 0,
+             bytes INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX idx_scans_drive ON scans(drive_id);",
     )
     .unwrap();
     conn.execute_batch(

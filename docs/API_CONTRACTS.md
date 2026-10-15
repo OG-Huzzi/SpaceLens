@@ -340,6 +340,32 @@ Phase 6.4.6 additions:
   failures. The legacy run API keeps its own `InvalidRunCount` /
   `InvalidTimestamp` for the same caller-input reason.
 
+Phase 6.5.1 / 6.5.2 additions (no new public API; a public-API
+correction):
+
+- The store's open-time safety seams are **crate-internal**: `store_safety`
+  (failure hazards, quarantine and backup helpers, integrity
+  classification) is a private module — not `pub`, no `#[doc(hidden)] pub`
+  items, no test-only feature — and the public
+  `HistoryStore::open_with_hazard` entry point added in Phase 6.5.1 was
+  DELETED in 6.5.2. The public surface is `HistoryStore::open`; no public
+  API (and no other crate) can name a hazard, force a quarantine on a
+  healthy store, or reach the low-level backup/quarantine helpers.
+- Correction to the Phase 6.5.1 record: "nothing outside the history-store
+  open path changed" described PRODUCTION behavior; the 6.5.1 commits had
+  also added `pub mod store_safety` and `HistoryStore::open_with_hazard`
+  (test-only seams) to the crate's public API. Phase 6.5.2 removes those
+  two, and the hazard-driven failure tests now live in a crate-internal
+  `#[cfg(test)]` module (`src/store_hazard_tests.rs`). The typed errors the
+  open path reports to callers (`StoreError::UnrecognizedSchema`,
+  `StoreError::BackupFailed`, `StoreError::Corrupt`) remain the public
+  contract.
+- Behavior added in 6.5.2, with no API change: the open path validates the
+  connection it is about to write **on that connection** (the mutation
+  gate), and every integrity decision is closed — a check that returns no
+  rows is a failure to establish integrity, never a verdict of health (see
+  docs/DATABASE.md).
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

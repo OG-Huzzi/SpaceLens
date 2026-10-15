@@ -46,7 +46,12 @@ pub mod path_encoding;
 pub mod snapshot;
 pub mod snapshot_codec;
 pub mod store;
-pub mod store_safety;
+// Phase 6.5.2: the backup/quarantine/recognition machinery is an
+// implementation detail of the store's open path. It stays a private
+// module — no public caller can name a hazard, force a quarantine, or
+// drive the low-level helpers directly; the only public entry point is
+// `HistoryStore::open`.
+mod store_safety;
 
 pub use compare::{
     compare, ChangeCounts, ChangeEvent, ChangeSet, CompareError, CompareOptions,
@@ -61,4 +66,3 @@ pub use snapshot::{AppSnapshotFact, LoadedApplications, SnapshotSummary, SystemS
 pub use store::{
     HistoryStore, PathHistoryPoint, QueryLimits, RetentionPolicy, RetentionReport, StoreError,
 };
-pub use store_safety::{Hazard, Quarantine};
