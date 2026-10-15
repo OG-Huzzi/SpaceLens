@@ -151,10 +151,16 @@ remain in place and green (`src/store_hazard_tests.rs`, `tests/phase65_tests.rs`
 
 | Commit | Meaning | CI run | head_sha | event | attempt | conclusion |
 |---|---|---|---|---|---|---|
-| (pending) | Phase 6.5.3 implementation | — | — | push | — | — |
+| `6d268c69355f8198e46276bb3ee815e14c817ca7` | Phase 6.5.3 implementation | 38770540720 | `6d268c69355f8198e46276bb3ee815e14c817ca7` (exact match) | push | 1 | success |
 
-The implementation commit's exact-SHA run IDs, attempt and per-job results are
-recorded in a follow-up verification-record commit once the run completes.
+Per-job results of run 38770540720 (all four required jobs, `fail-fast: false`):
+
+| Job | Job ID | Started (UTC) | Completed (UTC) | Result |
+|---|---|---|---|---|
+| `frontend` | 116544879438 | 2026-10-15T16:37:49Z | 2026-10-15T16:38:00Z | success |
+| `rust (ubuntu-latest)` | 116544878929 | 2026-10-15T16:37:50Z | 2026-10-15T16:43:11Z | success |
+| `rust (macos-latest)` | 116544879225 | 2026-10-15T16:37:55Z | 2026-10-15T16:45:16Z | success |
+| `rust (windows-latest)` | 116544879261 | 2026-10-15T16:37:49Z | 2026-10-15T16:45:42Z | success |
 
 PHASE 6.5.2 — Remaining Phase 6.5 Safety Gaps (test-only public API, fail-closed integrity, full per-version recognition, preflight-to-write race)
 
