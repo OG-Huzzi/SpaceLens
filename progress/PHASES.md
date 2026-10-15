@@ -140,6 +140,19 @@ current-state claims. Current-state documents use CoreSight.
     the read-only gate is either handled under its own verdict or refused
     without being written. Schema stays v6; migration SQL v2–v6
     byte-identical. Status: `progress/CURRENT_PHASE.md`.
+  - [ ] **PHASE 6.5.3 — concurrent open serialization & file-identity
+    safety.** IMPLEMENTED. Concurrent opens of the same existing store are
+    serialized on SQLite's own cross-process write lock: each migration step
+    takes `BEGIN IMMEDIATE` and re-reads the recorded version inside it, so a
+    second opener observes the completed step and skips it instead of applying
+    a stale plan; the v1 bootstrap decision is re-made under the same lock; the
+    WAL conversion (which the busy handler does NOT cover) is retried within a
+    bounded timeout and then fails closed. Quarantine relocation is bound to
+    the file whose corruption was observed (a platform metadata identity
+    captured while the read-only handle pinned it, re-checked before the
+    rename), so a substituted file is never moved as another file's
+    corruption. Schema stays v6; migration SQL v2–v6 byte-identical. Status:
+    `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.

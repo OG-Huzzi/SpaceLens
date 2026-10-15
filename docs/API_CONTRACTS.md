@@ -366,6 +366,42 @@ correction):
   rows is a failure to establish integrity, never a verdict of health (see
   docs/DATABASE.md).
 
+Phase 6.5.3 (a public-API correction for `coresight-core`; `coresight-history`
+still gains no public API):
+
+- **`coresight-history`: no new public API.** The only public entry point
+  remains `HistoryStore::open`. The Phase 6.5.3 concurrency seams
+  (`OpenSeam`), the file-identity type used to bind a quarantine to the
+  observed file, and the bounded backup re-gate are all crate-internal; the
+  new tests live in a crate-internal `#[cfg(test)]` module. The typed
+  errors callers see are unchanged, and no public/test-only claim exists
+  that the Rust visibility does not match.
+- **`coresight-core::db` gained two `pub` helpers in Phase 6.5.2, and the
+  earlier text in this document incorrectly said there was no new public
+  API.** They are real public Rust API of `coresight-core`:
+  `open_connection(path) -> Result<Connection>` opens a connection and
+  writes NOTHING (not even the WAL pragma), and
+  `apply_bootstrap(&Connection) -> Result<()>` is the write half (WAL +
+  foreign keys + the v1 install). `coresight-history`'s store open path
+  calls them cross-crate, so they cannot be made private without breaking a
+  legitimate call. The pre-existing `coresight_core::db::open(path)` stays
+  as a compatibility wrapper (`open_connection` + `apply_bootstrap`).
+  Phase 6.5.3 adds the public constant `OPEN_BUSY_TIMEOUT`.
+- **Which paths carry the full history-store safety gates.** ONLY
+  `HistoryStore::open` runs the two-gate sequence (read-only preflight +
+  mutation gate), the verified pre-migration backup, the quarantine and the
+  serialized migrations. The `coresight_core::db` helpers are RAW
+  connectivity/bootstrap primitives: they perform no integrity check, no
+  recognition, no backup and no quarantine, and applying the bootstrap to a
+  file this build does not own is the caller's responsibility. That is
+  exactly why the history store validates on the very connection it writes,
+  and why the helpers must not be treated as a safe way to open a store.
+- **Structure is not provenance.** The recognition check establishes
+  STRUCTURAL compatibility with the schema a version's migrations produce.
+  It is not evidence of authorship: a database forged to carry the full
+  structure and a valid version is handled as the store it claims to be
+  (see docs/DATABASE.md).
+
 ## Rules for evolution
 
 - Additive changes only within `v1` (new optional fields, new commands).

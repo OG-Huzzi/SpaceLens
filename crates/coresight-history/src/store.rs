@@ -375,6 +375,14 @@ impl From<crate::model::BuildError> for StoreError {
 /// boundaries (see [`MIGRATION_V6`]).
 pub const HISTORY_SCHEMA_VERSION: u32 = 6;
 
+/// How many times an opener re-gates after a concurrent migrator moved the
+/// store forward while its pre-migration backup was being built
+/// (Phase 6.5.3). Bounded because every pass only happens while another
+/// process is actively migrating — work this opener is about to observe as
+/// complete — so the loop converges; the bound exists so a pathological
+/// environment fails closed instead of spinning.
+const MAX_BACKUP_REGATES: u32 = 3;
+
 /// Forward-only migration: v1 (core bootstrap) → v2 (history tables).
 const MIGRATION_V2: &str = "
 CREATE TABLE IF NOT EXISTS scan_runs (
@@ -765,6 +773,26 @@ enum OpenStage<'a> {
     PreflightPassed(#[allow(dead_code)] Option<&'a Inspection>),
 }
 
+/// A named I/O boundary INSIDE the open sequence, reported to a
+/// crate-internal test observer so concurrency races can be provoked
+/// deterministically (Phase 6.5.3) — never with sleeps. Production passes a
+/// no-op observer ([`HistoryStore::open_impl`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenSeam {
+    /// Gate 1 has CLOSED its read-only connection and derived its verdict
+    /// (possibly `Corrupt`) but has not yet acted on it. The file at the
+    /// store path may legally be a DIFFERENT file here — the exact hazard
+    /// the quarantine identity check exists for.
+    AfterReadOnlyClose,
+    /// Gate 2 has read the integrity rows and has NOT yet gathered the
+    /// recorded version / recognition facts. A concurrent writer committing
+    /// here is the race the serialized migration path must survive.
+    MutationAfterIntegrity,
+    /// Gate 2's verdict is decided and any required pre-migration backup is
+    /// complete; the FIRST mutation (bootstrap or migration) has not run.
+    MutationBeforeFirstWrite,
+}
+
 /// The verdict of the integrity check that runs on the ALREADY-OPEN
 /// connection, after `coresight_core::db::open` may have written.
 enum PostBootstrapIntegrity {
@@ -860,6 +888,20 @@ impl HistoryStore {
         hazard: crate::store_safety::Hazard,
         observe: &mut dyn FnMut(OpenStage<'_>),
     ) -> Result<Self, StoreError> {
+        Self::open_impl_seamed(path, hazard, observe, &mut |_| {})
+    }
+
+    /// [`HistoryStore::open_impl_observed`] with the Phase 6.5.3 I/O seams
+    /// ([`OpenSeam`]): deterministic (no sleep) points at which a concurrent
+    /// writer can be made to act, so the serialized migration and the
+    /// quarantine identity check are tested against the real race rather
+    /// than asserted in a comment.
+    fn open_impl_seamed(
+        path: &Path,
+        hazard: crate::store_safety::Hazard,
+        observe: &mut dyn FnMut(OpenStage<'_>),
+        seam: &mut dyn FnMut(OpenSeam),
+    ) -> Result<Self, StoreError> {
         // Phase 1 — the READ-ONLY gate. It establishes the store's state
         // before anything can write to it; it never opens the file
         // read-write (SQLite's read-write read path DELETES stray sidecar
@@ -867,7 +909,7 @@ impl HistoryStore {
         // cannot), and it is where corruption is quarantined and
         // unrecognized databases are refused, with their files left
         // byte-untouched.
-        let preflight = Self::preflight_existing_store(path, hazard)?;
+        let preflight = Self::preflight_existing_store(path, hazard, seam)?;
 
         // No connection is held here. A file replaced at exactly this
         // boundary cannot be initialized or changed unvalidated: the
@@ -878,34 +920,81 @@ impl HistoryStore {
         // Phase 2 — the MUTATION GATE. The connection that may write runs
         // the full gate on itself immediately before the first write.
         let mut conn = coresight_core::db::open_connection(path)?;
-        match Self::inspect_connection(&conn, hazard) {
-            Ok(Inspection::Initialize) | Ok(Inspection::Current) => {}
-            Ok(Inspection::NeedsMigration(found)) => {
-                // A migration WILL run. Its verified backup is driven from
-                // THIS connection — the same file the migration will
-                // change — so the backup can never represent a different
-                // file than the one being migrated. A backup that cannot
-                // be created, verified, or published aborts the open: the
-                // store stays exactly as it is.
-                crate::store_safety::verified_pre_migration_backup(
-                    &conn,
-                    path,
-                    Some(found),
-                    hazard,
-                )?;
-            }
-            Ok(Inspection::Corrupt(detail)) => {
-                // Corruption found by the mutation gate is refused IN
-                // PLACE. Quarantine decisions belong to the read-only gate
-                // alone: the mutation gate's read-write reads may already
-                // have let SQLite discard sidecar files that did not match
-                // the database, so relocating this file could not promise
-                // the preserved sidecar state a quarantine must preserve.
-                drop(conn);
-                return Err(Self::corrupt_at_mutation_gate(&detail));
-            }
-            Err(e) => return Err(e),
+        // The failure-path tests drive a shorter lock wait than production
+        // (Phase 6.5.3). It is still a HARD bound: a holder that outlasts it
+        // yields SQLite's own SQLITE_BUSY, never a silent success.
+        if let crate::store_safety::Hazard::MutationBusyTimeout(timeout) = hazard {
+            conn.busy_timeout(timeout)?;
         }
+        // The identity of the file THIS connection opened, captured while
+        // the handle still pins it, so a verdict derived from this
+        // connection can be quarantined against a file PROVEN to be the one
+        // the checks ran on (Phase 6.5.3).
+        let observed_identity = crate::store_safety::FileIdentity::observe(path);
+        // A concurrent migrator can move the store forward between this
+        // gate's version read and its backup. When that happens the backup
+        // is no longer a copy of the state THIS opener would migrate, so
+        // the opener re-gates on the newer version — and, if that version
+        // still needs migrating, takes THAT state's backup — instead of
+        // either migrating a state its backup does not match or reporting a
+        // backup failure that is really "another process finished first".
+        //
+        // This re-gate is NOT the serialization: that is the per-step write
+        // lock inside `apply_migrations`. It exists only because the backup
+        // is necessarily taken outside the write lock (SQLite cannot change
+        // journal mode, nor run the backup API, inside the transaction that
+        // would serialize it). It is bounded ([`MAX_BACKUP_REGATES`]).
+        let mut regates = 0u32;
+        loop {
+            match Self::inspect_connection(&conn, hazard, seam)? {
+                Inspection::Initialize | Inspection::Current => break,
+                Inspection::NeedsMigration(found) => {
+                    // A migration WILL run — unless another process finishes
+                    // it first. The verified backup is driven from THIS
+                    // connection — the same file the migration would change
+                    // — so it can never represent a different file than the
+                    // one being migrated. A backup that cannot be created,
+                    // verified, or published aborts the open: the store
+                    // stays exactly as it is.
+                    match crate::store_safety::verified_pre_migration_backup(
+                        &conn,
+                        path,
+                        Some(found),
+                        hazard,
+                    ) {
+                        Ok(_) => break,
+                        Err(e) => {
+                            let moved_on = matches!(&e, StoreError::BackupFailed { .. })
+                                && coresight_core::db::schema_version(&conn)
+                                    .map(|now| now > found)
+                                    .unwrap_or(false);
+                            if moved_on && regates < MAX_BACKUP_REGATES {
+                                regates += 1;
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                Inspection::Corrupt(detail) => {
+                    // Corruption found by the mutation gate is refused IN
+                    // PLACE. Quarantine decisions belong to the read-only
+                    // gate alone: the mutation gate's read-write reads may
+                    // already have let SQLite discard sidecar files that did
+                    // not match the database, so relocating this file could
+                    // not promise the preserved sidecar state a quarantine
+                    // must preserve.
+                    drop(conn);
+                    return Err(Self::corrupt_at_mutation_gate(&detail));
+                }
+            }
+        }
+
+        // No write has happened yet. A concurrent writer committing exactly
+        // here must not make this opener apply a stale migration plan — the
+        // per-step serialization in `apply_migrations` is what makes that
+        // true, and this seam is where the test proves it.
+        seam(OpenSeam::MutationBeforeFirstWrite);
 
         // The mutating half of the bootstrap (WAL, foreign keys, and the
         // v1 schema when nothing is recorded) now runs on the validated
@@ -929,7 +1018,12 @@ impl HistoryStore {
                 // connection's lifetime and Windows cannot rename an open
                 // file, so the connection is closed first.
                 drop(conn);
-                return Err(Self::quarantine_after_corruption(path, &detail, hazard));
+                return Err(Self::quarantine_after_corruption(
+                    path,
+                    &detail,
+                    observed_identity,
+                    hazard,
+                ));
             }
             PostBootstrapIntegrity::Failed(e) => return Err(e),
         }
@@ -1052,6 +1146,7 @@ impl HistoryStore {
     fn preflight_existing_store(
         path: &Path,
         hazard: crate::store_safety::Hazard,
+        seam: &mut dyn FnMut(OpenSeam),
     ) -> Result<Option<Inspection>, StoreError> {
         if !path.is_file() {
             // A brand-new store has no pre-migration state to protect and
@@ -1060,7 +1155,7 @@ impl HistoryStore {
             // time comes to write.
             return Ok(None);
         }
-        Self::inspect_existing_store(path, hazard).map(Some)
+        Self::inspect_existing_store(path, hazard, seam).map(Some)
     }
 
     /// Open `path` READ-ONLY, decide its state, and CLOSE the connection
@@ -1076,6 +1171,7 @@ impl HistoryStore {
     fn inspect_existing_store(
         path: &Path,
         hazard: crate::store_safety::Hazard,
+        seam: &mut dyn FnMut(OpenSeam),
     ) -> Result<Inspection, StoreError> {
         let conn = match rusqlite::Connection::open_with_flags(
             path,
@@ -1088,30 +1184,45 @@ impl HistoryStore {
                 // or an I/O failure is an ENVIRONMENT problem: quarantining
                 // a healthy file because the disk was busy would be worse
                 // than doing nothing, so the store is left untouched and
-                // the error is returned as-is.
+                // the error is returned as-is. No identity could be captured
+                // (the file was never opened), so a quarantine decision
+                // could not be proven anyway.
                 return Err(Self::classify_inspection_error(
                     path,
+                    None,
                     StoreError::Sqlite(e),
                     hazard,
                 ));
             }
         };
 
+        // The identity of the file this read-only handle opened, captured
+        // while it is still open: this is the file any corruption verdict
+        // below is ABOUT, and the file a later quarantine relocation must
+        // prove it is acting on (Phase 6.5.3).
+        let observed = crate::store_safety::FileIdentity::observe(path);
+
         // Read everything the verdict needs FIRST. No quarantine or file
         // operation may run while `conn` is alive — SQLite holds the file
         // open and Windows cannot rename it. Collecting the raw results
         // (rather than classifying inside `map_err`) is what guarantees the
         // connection is closed below before anything touches the file.
-        let snapshot = crate::store_safety::inspect_snapshot(&conn, hazard);
+        let snapshot = crate::store_safety::inspect_snapshot(&conn, hazard, &mut || {});
 
         // The connection closes HERE, before any handling below.
         drop(conn);
 
-        let snapshot = snapshot.map_err(|e| Self::classify_inspection_error(path, e, hazard))?;
+        // The Phase 6.5.3 seam at the one place the store pathname is
+        // unattended: the read-only handle is gone and no rename has run.
+        // A file substituted now must NOT be dragged into quarantine.
+        seam(OpenSeam::AfterReadOnlyClose);
+
+        let snapshot =
+            snapshot.map_err(|e| Self::classify_inspection_error(path, observed, e, hazard))?;
         match Self::verdict_from_snapshot(snapshot)? {
-            Inspection::Corrupt(detail) => {
-                Err(Self::quarantine_after_corruption(path, &detail, hazard))
-            }
+            Inspection::Corrupt(detail) => Err(Self::quarantine_after_corruption(
+                path, &detail, observed, hazard,
+            )),
             verdict => Ok(verdict),
         }
     }
@@ -1128,21 +1239,24 @@ impl HistoryStore {
     fn inspect_connection(
         conn: &rusqlite::Connection,
         hazard: crate::store_safety::Hazard,
+        seam: &mut dyn FnMut(OpenSeam),
     ) -> Result<Inspection, StoreError> {
-        let snapshot = match crate::store_safety::inspect_snapshot(conn, hazard) {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                let corruption = matches!(
-                    &e,
-                    StoreError::Sqlite(sql)
-                        if crate::store_safety::sqlite_error_indicates_corruption(sql)
-                );
-                if corruption {
-                    return Ok(Inspection::Corrupt(e.to_string()));
+        let mut after_integrity = || seam(OpenSeam::MutationAfterIntegrity);
+        let snapshot =
+            match crate::store_safety::inspect_snapshot(conn, hazard, &mut after_integrity) {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    let corruption = matches!(
+                        &e,
+                        StoreError::Sqlite(sql)
+                            if crate::store_safety::sqlite_error_indicates_corruption(sql)
+                    );
+                    if corruption {
+                        return Ok(Inspection::Corrupt(e.to_string()));
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
         Self::verdict_from_snapshot(snapshot)
     }
 
@@ -1226,6 +1340,7 @@ impl HistoryStore {
     /// to decide (preserve and report).
     fn classify_inspection_error(
         path: &Path,
+        observed: Option<crate::store_safety::FileIdentity>,
         e: StoreError,
         hazard: crate::store_safety::Hazard,
     ) -> StoreError {
@@ -1234,7 +1349,7 @@ impl HistoryStore {
             _ => false,
         };
         if corruption {
-            Self::quarantine_after_corruption(path, &e.to_string(), hazard)
+            Self::quarantine_after_corruption(path, &e.to_string(), observed, hazard)
         } else {
             e
         }
@@ -1272,18 +1387,37 @@ impl HistoryStore {
     fn quarantine_after_corruption(
         path: &Path,
         detail: &str,
+        observed: Option<crate::store_safety::FileIdentity>,
         hazard: crate::store_safety::Hazard,
     ) -> StoreError {
         // The caller is REQUIRED to have closed every connection to `path`
         // before calling this: SQLite holds the file open, and on Windows an
         // open database file cannot be renamed. `inspect_existing_store`
         // guarantees that by returning owned data rather than a connection.
-        let quarantine = crate::store_safety::quarantine_corrupt_store(path, hazard);
+        // `observed` is the identity captured while that connection was
+        // still open, so the relocation can prove it acts on that file
+        // (Phase 6.5.3).
+        let quarantine = crate::store_safety::quarantine_corrupt_store(path, observed, hazard);
         let location = match &quarantine {
             Ok(q) => format!(
                 " the damaged store was preserved (not deleted, not repaired) under {}",
                 q.directory().display()
             ),
+            // The relocation was REFUSED because the file at the path could
+            // not be proven to be the one whose corruption was observed
+            // (Phase 6.5.3): a substitute, or a file whose identity could
+            // not be established. Nothing was moved, so the message must not
+            // imply the damaged file is here (it may not be) or that it was
+            // preserved (it was not relocated).
+            Err(StoreError::QuarantineFailed { step, detail })
+                if step == crate::store_safety::QUARANTINE_IDENTITY_STEP =>
+            {
+                format!(
+                    " the damaged store was NOT quarantined and NOTHING was moved, because the \
+                     file at the store path could not be proven to be the file the integrity \
+                     check failed on: {detail}"
+                )
+            }
             // The rollback itself failed for at least one artifact: the
             // store is neither fully quarantined nor reliably back at its
             // original path. Saying "unchanged where they were" here would
@@ -1308,7 +1442,7 @@ impl HistoryStore {
             detail: format!(
                 "database integrity check failed on open: {detail}.{location} No replacement \
                  store was created and no repair was attempted — upgrade CoreSight or inspect \
-                 the quarantined files yourself before trusting this store again"
+                 the store's files yourself before trusting this store again"
             ),
         }
     }
@@ -1316,43 +1450,76 @@ impl HistoryStore {
     /// Apply every forward migration this build needs, each atomic with its
     /// version bump. Shared by `open` and the test seam so both take
     /// exactly the same path.
+    ///
+    /// ## Serialized against a concurrent migrator (Phase 6.5.3)
+    ///
+    /// Each step runs in a transaction opened with `BEGIN IMMEDIATE`, which
+    /// takes SQLite's own cross-process write lock UP FRONT (waiting per the
+    /// connection's busy timeout) instead of upgrading a read lock later.
+    /// The recorded version is then RE-READ inside that lock, and the
+    /// migration runs only if it is still below the step's target. A version
+    /// read OUTSIDE a lock is a snapshot another process may invalidate
+    /// before the first mutation; re-reading under the lock is what makes
+    /// "this migration is pending" and "run it" one indivisible decision.
+    ///
+    /// The consequence is exactly-once application: a second opener of the
+    /// same older store observes the winner's committed step and skips it,
+    /// instead of applying a stale plan and failing on a duplicate
+    /// `CREATE TABLE` / `ADD COLUMN`. The `current` argument is only an
+    /// optimization — a step whose target is already reached is not opened
+    /// at all — and it is NEVER trusted for the decision itself.
+    ///
+    /// Per-migration transactionality is unchanged: each step is still one
+    /// transaction that runs the migration SQL and its version bump
+    /// together, so a failure rolls that step back and leaves the earlier
+    /// ones committed. The v2–v6 SQL is untouched.
     fn apply_migrations(conn: &mut rusqlite::Connection, current: u32) -> Result<(), StoreError> {
         if current < 2 {
-            let tx = conn.transaction()?;
-            tx.execute_batch(MIGRATION_V2)?;
-            tx.execute("UPDATE schema_version SET version = 2", params![])?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if coresight_core::db::schema_version(&tx)? < 2 {
+                tx.execute_batch(MIGRATION_V2)?;
+                tx.execute("UPDATE schema_version SET version = 2", params![])?;
+            }
             tx.commit()?;
         }
         if current < 3 {
-            let tx = conn.transaction()?;
-            tx.execute_batch(MIGRATION_V3)?;
-            retag_legacy_roots(&tx)?;
-            tx.execute("UPDATE schema_version SET version = 3", params![])?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if coresight_core::db::schema_version(&tx)? < 3 {
+                tx.execute_batch(MIGRATION_V3)?;
+                retag_legacy_roots(&tx)?;
+                tx.execute("UPDATE schema_version SET version = 3", params![])?;
+            }
             tx.commit()?;
         }
         if current < 4 {
-            let tx = conn.transaction()?;
-            tx.execute_batch(MIGRATION_V4)?;
-            tx.execute("UPDATE schema_version SET version = 4", params![])?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if coresight_core::db::schema_version(&tx)? < 4 {
+                tx.execute_batch(MIGRATION_V4)?;
+                tx.execute("UPDATE schema_version SET version = 4", params![])?;
+            }
             tx.commit()?;
         }
         if current < 5 {
-            let tx = conn.transaction()?;
-            tx.execute_batch(MIGRATION_V5)?;
-            tx.execute("UPDATE schema_version SET version = 5", params![])?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if coresight_core::db::schema_version(&tx)? < 5 {
+                tx.execute_batch(MIGRATION_V5)?;
+                tx.execute("UPDATE schema_version SET version = 5", params![])?;
+            }
             tx.commit()?;
         }
         if current < 6 {
-            let tx = conn.transaction()?;
-            // Re-keying necessarily swaps a parent row's key while its
-            // children still reference the old one (and vice versa).
-            // Immediate FK enforcement would reject those intermediate
-            // states, so the checks are DEFERRED to commit: either the
-            // whole re-key lands consistently or none of it does.
-            tx.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
-            tx.execute_batch(MIGRATION_V6)?;
-            rekey_legacy_application_ids(&tx)?;
-            tx.execute("UPDATE schema_version SET version = 6", params![])?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if coresight_core::db::schema_version(&tx)? < 6 {
+                // Re-keying necessarily swaps a parent row's key while its
+                // children still reference the old one (and vice versa).
+                // Immediate FK enforcement would reject those intermediate
+                // states, so the checks are DEFERRED to commit: either the
+                // whole re-key lands consistently or none of it does.
+                tx.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
+                tx.execute_batch(MIGRATION_V6)?;
+                rekey_legacy_application_ids(&tx)?;
+                tx.execute("UPDATE schema_version SET version = 6", params![])?;
+            }
             tx.commit()?;
         }
         Ok(())
@@ -3188,3 +3355,11 @@ fn retention_age_exceeded(started_nanos: i64, age: Duration, now_nanos: i64) -> 
 #[cfg(test)]
 #[path = "store_hazard_tests.rs"]
 mod hazard_tests;
+
+// The Phase 6.5.3 concurrency and file-identity tests. They live in their
+// own file for the same reason as the failure-path tests: they drive the
+// crate-internal seams (`open_impl_seamed`, `OpenSeam`, `Hazard`) and must
+// never be reachable outside this crate.
+#[cfg(test)]
+#[path = "store_open_race_tests.rs"]
+mod open_race_tests;

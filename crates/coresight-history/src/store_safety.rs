@@ -63,6 +63,36 @@
 //! verification — aborts instead of proceeding, and no store is
 //! quarantined on a decision that was never made.
 //!
+//! ## 5. Quarantine acts on the file whose corruption was OBSERVED
+//! (Phase 6.5.3)
+//!
+//! The integrity verdict and the quarantine rename are separated by the
+//! close Windows requires before a rename, so the pathname is briefly
+//! unattended. The relocation is therefore bound to a [`FileIdentity`]
+//! captured while the read-only connection still pinned the file the check
+//! ran against, and re-established immediately before each move. If the
+//! path now names a different file — or no identity could be captured — the
+//! relocation is REFUSED, nothing is moved, and the error says so; the
+//! caller reports the corruption without claiming the damaged file was
+//! preserved. A file substituted at the path is thereby never labelled as,
+//! or moved in place of, another file's corruption.
+//!
+//! **Threat model (honest).** Protected against: concurrent CoreSight
+//! processes (each bound to the same identity; a second relocation of an
+//! already-gone file fails as `prepare`), and ordinary filesystem activity
+//! — a backup tool, a restore, a user replacing the file — which the
+//! identity re-check detects and refuses. NOT fully protected: an
+//! adversarial same-user process that renames its own file onto the path in
+//! the window *between* the identity re-check and the `rename` syscall
+//! itself. No portable primitive closes that window (the alternative —
+//! holding a handle open across the rename — is exactly what Windows
+//! forbids, and what the close-before-rename rule exists to avoid). The
+//! window is a single syscall wide, the check is repeated as the last act
+//! before the move, and the consequence of losing the race is bounded: a
+//! file that was not the observed damaged one is relocated (not deleted,
+//! not repaired), so the harm is a misplaced file, never data loss and
+//! never a false claim that the damaged file was preserved.
+//!
 //! ## What this module deliberately does NOT do
 //!
 //! - No network, no subprocess, no privilege escalation, no GUI. This is a
@@ -95,6 +125,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -124,6 +155,54 @@ const QUARANTINE_DIR_SUFFIX: &str = ".quarantined";
 /// honest-report wording on this, so it lives here as a named constant
 /// rather than as a string literal repeated in two modules.
 pub(crate) const QUARANTINE_RESTORE_STEP: &str = "restore";
+
+/// The `step` name a quarantine error carries when the relocation was
+/// REFUSED because the file at the store path could not be proven to be the
+/// file whose corruption was observed (Phase 6.5.3). The caller keys its
+/// honest-report wording on this, so it lives here as a named constant
+/// rather than as a string literal repeated in two modules.
+pub(crate) const QUARANTINE_IDENTITY_STEP: &str = "verify file identity";
+
+/// The identity of a filesystem entry, as the platform's own metadata
+/// reports it (Unix `st_dev` + `st_ino`; Windows volume serial + the 128-bit
+/// `FILE_ID_INFO.FileId`).
+///
+/// Phase 6.5.3 uses this to BIND a quarantine decision to the file whose
+/// corruption was observed: the corruption verdict and the relocation are
+/// separated by the close that Windows requires before a rename, and a file
+/// substituted at the path in that interval must not be moved in place of
+/// the damaged one. `None` means the platform could not prove an identity —
+/// in which case relocation is refused rather than guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    /// Unix `st_dev` / Windows volume serial number.
+    device: Option<u64>,
+    /// Unix `st_ino` / Windows low 64 bits of the file identifier.
+    inode: Option<u64>,
+    /// Windows high 64 bits of a >64-bit file identifier (ReFS-class).
+    file_id_hi: Option<u64>,
+}
+
+impl FileIdentity {
+    /// Observe the identity of the entry at `path` through the shared,
+    /// platform-neutral metadata boundary (`coresight-engine`'s `PlatformFs`
+    /// — never a `cfg` branch in this crate), or `None` when the platform
+    /// cannot prove one (or the path cannot be inspected at all).
+    pub(crate) fn observe(path: &Path) -> Option<FileIdentity> {
+        // `coresight-engine`'s platform-neutral metadata boundary: on Unix
+        // the (device, inode) pair, on Windows the volume serial and the
+        // 128-bit FILE_ID_INFO file identifier.
+        let md = coresight_engine::platform::std_fs().metadata(path).ok()?;
+        if md.device.is_none() && md.inode.is_none() {
+            return None;
+        }
+        Some(FileIdentity {
+            device: md.device,
+            inode: md.inode,
+            file_id_hi: md.file_id_hi,
+        })
+    }
+}
 
 /// A deterministic failure injected at one named stage.
 ///
@@ -178,6 +257,14 @@ pub(crate) enum Hazard {
     /// describes (it reports corruption, its result cannot be read, or it
     /// reports no rows at all).
     PostBootstrapIntegrity(PostBootstrapFault),
+    /// The mutation connection WAITS at most this long for a lock held by a
+    /// concurrent process, instead of the production [`OPEN_BUSY_TIMEOUT`].
+    /// Exercises the lock-contention path deterministically without making
+    /// the test wait out the production bound; a holder that outlasts it is
+    /// still a hard `SQLITE_BUSY` failure, never a silent success.
+    ///
+    /// [`OPEN_BUSY_TIMEOUT`]: coresight_core::db::OPEN_BUSY_TIMEOUT
+    MutationBusyTimeout(Duration),
 }
 
 /// How the post-bootstrap integrity check fails under
@@ -658,6 +745,7 @@ pub(crate) struct InspectionSnapshot {
 pub(crate) fn inspect_snapshot(
     conn: &Connection,
     hazard: Hazard,
+    after_integrity: &mut dyn FnMut(),
 ) -> Result<InspectionSnapshot, StoreError> {
     let problems = if hazard == Hazard::IntegrityReportsNoRows {
         // The injected outcome is fed through the REAL classifier, so this
@@ -667,6 +755,11 @@ pub(crate) fn inspect_snapshot(
     } else {
         integrity_problems(conn)?
     };
+    // The Phase 6.5.3 I/O seam: integrity has been read, and the recorded
+    // version / recognition facts have NOT yet been gathered. A concurrent
+    // writer releasing the write lock at exactly this point is the race the
+    // serialized migration path must survive.
+    after_integrity();
     let object_count: i64 = conn
         .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
         .map_err(StoreError::Sqlite)?;
@@ -977,6 +1070,15 @@ impl Quarantine {
 ///
 /// ## Rules this upholds
 ///
+/// - The relocation acts only on the file whose corruption was OBSERVED
+///   (Phase 6.5.3). `observed` is the identity captured while the read-only
+///   connection still pinned that file; it is re-established immediately
+///   before the relocation. A path that now names a different file — the
+///   substitute a hostile or ordinary writer could drop in between the
+///   integrity verdict and the rename — is refused with
+///   [`QUARANTINE_IDENTITY_STEP`], and NOTHING is moved. When no identity
+///   could be captured the relocation is refused too: an unprovable file is
+///   never guessed at.
 /// - The destination directory is created exclusively, so an existing
 ///   quarantined artifact is never overwritten.
 /// - Every sidecar that exists is moved, so uncheckpointed WAL frames are
@@ -997,6 +1099,7 @@ impl Quarantine {
 /// evidence — never by a public caller pointing it at an arbitrary file.
 pub(crate) fn quarantine_corrupt_store(
     path: &Path,
+    observed: Option<FileIdentity>,
     hazard: Hazard,
 ) -> Result<Quarantine, StoreError> {
     if !is_existing_file(path) {
@@ -1005,6 +1108,35 @@ pub(crate) fn quarantine_corrupt_store(
             detail: "the store file no longer exists".to_string(),
         });
     }
+
+    // Bind the relocation to the file whose corruption was OBSERVED. This is
+    // the check that stops a file substituted at the store path (after the
+    // read-only connection closed and before the rename) from being moved
+    // aside as though it were the damaged one. Both halves fail closed:
+    // an identity that was never captured, and an identity that no longer
+    // describes the path, both refuse to move anything.
+    let expected = match observed {
+        Some(expected) => {
+            if FileIdentity::observe(path) != Some(expected) {
+                return Err(StoreError::QuarantineFailed {
+                    step: QUARANTINE_IDENTITY_STEP.to_string(),
+                    detail: "the file now at the store path is not the file whose corruption \
+                             was observed, so nothing was moved"
+                        .to_string(),
+                });
+            }
+            expected
+        }
+        None => {
+            return Err(StoreError::QuarantineFailed {
+                step: QUARANTINE_IDENTITY_STEP.to_string(),
+                detail: "the identity of the file whose corruption was observed could not be \
+                         established, so it cannot be proven that the file at the store path \
+                         is the damaged one; nothing was moved"
+                    .to_string(),
+            });
+        }
+    };
 
     let directory =
         exclusive_quarantine_directory(path).map_err(|e| StoreError::QuarantineFailed {
@@ -1015,7 +1147,7 @@ pub(crate) fn quarantine_corrupt_store(
     // Move the main file first: if that succeeds, the sidecars follow, and
     // the "already moved" set is exactly what a rollback must undo.
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
-    match relocate_all(path, &directory, &mut moved, hazard) {
+    match relocate_all(path, expected, &directory, &mut moved, hazard) {
         Ok(()) => Ok(Quarantine { directory }),
         Err(e) => {
             // Attempt to restore what was moved, newest name last so the
@@ -1071,13 +1203,19 @@ pub(crate) fn quarantine_corrupt_store(
 }
 
 /// Move `path` and each existing sidecar into `directory`.
+///
+/// `expected` is the identity the MAIN file must still carry; it is
+/// re-checked as the last act before that rename (see [`relocate_one`]).
+/// Sidecars are derived artifacts of the same store and are relocated
+/// without an identity check of their own.
 fn relocate_all(
     path: &Path,
+    expected: FileIdentity,
     directory: &Path,
     moved: &mut Vec<(PathBuf, PathBuf)>,
     hazard: Hazard,
 ) -> Result<(), StoreError> {
-    relocate_one(path, directory, moved, hazard)?;
+    relocate_one(path, Some(expected), directory, moved, hazard)?;
     // The sidecars that exist NOW, in relocation order, so an injected
     // failure can hit the LAST one — after the main database has really
     // moved — exercising the rollback with something real to undo.
@@ -1098,14 +1236,23 @@ fn relocate_all(
                 detail: format!("injected test failure ({hazard:?})"),
             });
         }
-        relocate_one(sidecar, directory, moved, hazard)?;
+        relocate_one(sidecar, None, directory, moved, hazard)?;
     }
     Ok(())
 }
 
 /// Move one file, recording it so a later failure can restore it.
+///
+/// When `expected` is `Some`, the file's identity is re-established here as
+/// the LAST act before the rename, narrowing the window in which a writer
+/// could substitute a different file at `from` between the earlier check
+/// and the move itself. A mismatch moves nothing (and the caller's rollback
+/// then has an empty move list to undo). The window is narrowed, not closed:
+/// see the residual-limitation note on [`quarantine_corrupt_store`]'s
+/// module documentation.
 fn relocate_one(
     from: &Path,
+    expected: Option<FileIdentity>,
     directory: &Path,
     moved: &mut Vec<(PathBuf, PathBuf)>,
     hazard: Hazard,
@@ -1115,6 +1262,16 @@ fn relocate_one(
             step: "relocate".to_string(),
             detail: "injected test failure (QuarantineRelocate)".to_string(),
         });
+    }
+    if let Some(expected) = expected {
+        if FileIdentity::observe(from) != Some(expected) {
+            return Err(StoreError::QuarantineFailed {
+                step: QUARANTINE_IDENTITY_STEP.to_string(),
+                detail: "the file changed between the identity check and the relocation, so \
+                         nothing was moved"
+                    .to_string(),
+            });
+        }
     }
     let file_name = match from.file_name() {
         Some(name) => name,

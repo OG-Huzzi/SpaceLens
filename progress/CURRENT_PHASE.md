@@ -1,5 +1,161 @@
 # CoreSight — Current State
 
+PHASE 6.5.3 — Concurrent Open Serialization & File-Identity Safety
+
+**Status: Phase 6.5.3 IMPLEMENTED — every local gate executed and green (table
+below).** Started from baseline
+`7174952bd302c59f47259a8b33e205a99194d56b` (the Phase 6.5.2 verification-record
+commit). **Schema version stays 6** — no migration was added, and migration SQL
+v2–v6 is byte-identical to the baseline (all five `MIGRATION_V*` constants
+extracted from `git show 7174952b:…` and compared case-sensitively before
+committing; lengths 1931 / 516 / 107 / 5704 / 86 bytes). **Phase 6.6 and later
+phases are NOT authorized and were NOT started.**
+
+## Phase 6.5.3 — concurrent-open serialization and file-identity safety
+
+### The gaps
+
+**A. The validation-to-migration decision was not serialized.** The mutation
+gate gathered its facts (`inspect_snapshot`) through several separate
+statements, then ran `apply_bootstrap`, re-read the schema version, and applied
+each pending migration in its own transaction — with no lock covering the
+decision-to-mutation sequence. Two processes opening the same v1–v5 store at
+once could both decide "migrate from version N", both read a version that was
+stale by the time the first `ALTER TABLE` ran, and one would fail on a duplicate
+`ADD COLUMN` (or, worse, write an old version number back over a newer one).
+Measured facts that decided the design: `BEGIN IMMEDIATE` IS waited out by the
+connection's busy timeout, but `PRAGMA journal_mode=WAL` is NOT — SQLite
+answers `SQLITE_BUSY` immediately for a journal-mode change held by another
+connection.
+
+**B. Quarantine relocated a PATHNAME, not the file whose corruption was
+observed.** The read-only preflight closed its handle (Windows cannot rename an
+open file), so between the integrity verdict and the `rename` the store path
+was unattended. A file substituted there in that window would be moved aside as
+though it were the damaged one, and the error would claim the observed damaged
+file had been preserved.
+
+**C. The public-API record disagreed with the code.** `docs/API_CONTRACTS.md`
+asserted there was no new public API, while the Phase 6.5.2 split had added
+`pub fn open_connection` / `pub fn apply_bootstrap` to `coresight_core::db`.
+The helpers are real public Rust API, called cross-crate by
+`coresight-history`.
+
+### Fixes
+
+- **A** — the write lock is now taken where the decision is made, not assumed.
+  `coresight_core::db::open_connection` sets `OPEN_BUSY_TIMEOUT` (5 s) on the
+  connection (a connection-local setting; still writes nothing).
+  `apply_bootstrap` re-makes the v1 decision INSIDE `BEGIN IMMEDIATE`, with an
+  unlocked peek only as an optimization for the common case (a store that
+  already has its schema takes no write lock at all). The WAL conversion stays
+  OUTSIDE any transaction, as SQLite requires, and is retried within the same
+  5 s bound because the busy handler does not cover it. In
+  `HistoryStore::apply_migrations`, every step now runs in
+  `transaction_with_behavior(Immediate)` and re-reads the recorded version
+  INSIDE that lock, applying the step only while the re-read version is still
+  below the target. `current` remains an optimization and is never trusted for
+  the decision. Per-migration transactionality, backup-before-migration and the
+  v2–v6 SQL are unchanged. A concurrent opener that completes the migration
+  while this opener is building its backup makes the backup no longer describe
+  the state this opener would migrate: the opener re-gates on the newer version
+  (bounded by `MAX_BACKUP_REGATES`) and, if that version still needs migrating,
+  takes THAT state's backup, instead of reporting a false backup failure.
+- **B** — `store_safety::FileIdentity` captures the identity of the store file
+  while the read-only handle still pins it (Unix `st_dev`/`st_ino`; Windows
+  volume serial + 128-bit `FILE_ID_INFO`, through `coresight-engine`'s
+  platform-neutral metadata boundary — never a `cfg` branch in this crate).
+  `quarantine_corrupt_store` re-establishes that identity before it creates the
+  quarantine directory and re-checks it as the last act before the main-file
+  `rename`. A path that now names a different file, or a file whose identity
+  could not be captured, is refused with a dedicated step
+  (`QUARANTINE_IDENTITY_STEP`) and NOTHING is moved; the typed error says the
+  damaged store was NOT quarantined and NOTHING was moved, so it never claims
+  the observed damaged file was preserved.
+- **C** — `docs/API_CONTRACTS.md` now states precisely which crate has no
+  public API change (`coresight-history`: still only `HistoryStore::open`) and
+  records the `coresight-core::db` helpers as real public API, plus the new
+  public `OPEN_BUSY_TIMEOUT`. The doc also spells out which paths carry the
+  full history-store safety gates (only `HistoryStore::open`; the core helpers
+  are raw connectivity primitives) and that structural recognition is not
+  provenance.
+
+### The tests that prove each closure
+
+Crate-internal (`src/store_open_race_tests.rs`, new; `cfg(test)` only — the
+seams `open_impl_seamed`, `OpenSeam` and the `Hazard` variants are NOT public
+API). Barriers and inline seam callbacks drive every interleaving; no sleeps:
+
+| Gap | Test | Property |
+|---|---|---|
+| A | `two_concurrent_opens_of_a_genuine_v1_store_apply_each_migration_once` | two threads race a real v1 store; each migration is applied exactly once, the store ends v6 and intact, and any published backup is integrity-verified |
+| A | `two_concurrent_opens_of_an_intermediate_store_apply_each_migration_once` | the same for a v4 store, where the pending steps are the `ALTER TABLE` steps a stale plan would collide on |
+| A | `two_openers_that_reach_the_mutation_gate_together_apply_one_plan` | both openers reach the point just before their first mutation (barrier) and then race; both succeed and exactly one application of each step lands. This is the deterministic proof: with the per-step lock + re-read removed it FAILS |
+| A | `a_version_change_between_integrity_and_recognition_is_observed_not_fought` | a writer commits the migration between the integrity read and the version read; the opener decides from the version current at decision time |
+| A | `a_version_change_before_the_first_mutation_never_applies_a_stale_plan` | a writer commits the migration after recognition completes; the opener applies no stale plan and adds no duplicate column |
+| A | `a_concurrent_open_that_cannot_get_the_write_lock_fails_closed_and_leaves_the_store_valid` | a holder outlasting the lock wait makes the open fail closed with SQLite's own error; the store stays valid and a later open migrates it |
+| A | `a_published_backup_records_the_version_it_protects` | an uncontended migrating open publishes exactly one backup, integrity-checked, recording the version it protects |
+| B | `a_corrupt_store_is_quarantined_only_after_every_handle_is_closed` | a genuinely corrupt store IS quarantined — the close-before-rename evidence, load-bearing on Windows CI |
+| B | `a_substituted_file_is_never_quarantined_as_another_files_corruption` | a healthy database dropped in at the unattended path is never moved, the error does not claim preservation, and no quarantine directory is created |
+| coresight-core | `db::tests::concurrent_first_opens_bootstrap_exactly_once` | two processes opening a brand-new store install a single v1 |
+
+All Phase 6.5.1 / 6.5.2 failure-path, sidecar, rollback and recognition tests
+remain in place and green (`src/store_hazard_tests.rs`, `tests/phase65_tests.rs`,
+`tests/migration_tests.rs`, `tests/phase643_tests.rs`, `tests/phase644_tests.rs`,
+`tests/phase645_tests.rs`, `tests/audit_v2_regression_tests.rs`).
+
+### Decisions worth recording
+
+- **Serialize on SQLite's own lock, not a process-local mutex.** Two processes
+  do not share process memory; only the database's own lock is cross-process.
+  The lock is taken per migration STEP, which keeps per-migration
+  transactionality exactly as it was while making each decision and its
+  mutation indivisible.
+- **The WAL pragma keeps its SQLite-mandated place outside any transaction**,
+  and its non-busy-handler behavior is handled honestly with a bounded retry
+  and a hard failure rather than a longer sleep or a silent skip.
+- **Quarantine identity is bound, not atomically enforced.** The check is
+  repeated as the last act before the rename; the residual single-syscall
+  window an adversarial same-user process would need is documented, and losing
+  it moves (never deletes) a file and is reported as what actually happened.
+- **The core helpers stay `pub`.** `coresight-history` calls them cross-crate,
+  so the honest fix is to correct the contract, not to hide the visibility.
+
+### Files changed
+
+- Code: `crates/coresight-core/src/db.rs`,
+  `crates/coresight-history/src/store.rs`,
+  `crates/coresight-history/src/store_safety.rs`.
+- Tests: `crates/coresight-history/src/store_open_race_tests.rs` (new).
+- Docs: `docs/API_CONTRACTS.md`, `docs/DATABASE.md`,
+  `progress/CURRENT_PHASE.md`, `progress/PHASES.md`.
+
+### Local verification (all executed, exit status checked)
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | exit 0 |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| `cargo test --workspace` | exit 0 |
+| `cargo test --workspace --all-features` | exit 0 |
+| `cargo test --workspace --all-features -- --ignored` | exit 0 |
+| `npm ci` | exit 0 |
+| `npm audit --audit-level=high` | exit 0 — 0 vulnerabilities |
+| `npm run build` | exit 0 |
+| `git diff --check` | exit 0 |
+| Migration SQL v2–v6 vs `7174952b` | byte-identical (1931 / 516 / 107 / 5704 / 86 bytes) |
+| `coresight-system-model` | not touched by this diff (still platform-neutral / DB-independent) |
+| Windows Phase 5 perf guard `c100 <= c10 * 50` | exit 0 — measured 10k=183 ms, 100k=1875 ms (bound 9150 ms); load 10k=68 ms, 100k=596 ms (bound 3400 ms). `tests/snapshot_perf_tests.rs` untouched |
+
+### CI verification (exact SHA)
+
+| Commit | Meaning | CI run | head_sha | event | attempt | conclusion |
+|---|---|---|---|---|---|---|
+| (pending) | Phase 6.5.3 implementation | — | — | push | — | — |
+
+The implementation commit's exact-SHA run IDs, attempt and per-job results are
+recorded in a follow-up verification-record commit once the run completes.
+
 PHASE 6.5.2 — Remaining Phase 6.5 Safety Gaps (test-only public API, fail-closed integrity, full per-version recognition, preflight-to-write race)
 
 **Status: Phase 6.5.2 IMPLEMENTED + VERIFIED — every local gate executed

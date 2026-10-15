@@ -627,6 +627,62 @@ that writes.
 - A migration that then fails rolls back its own transaction and **keeps** the
   verified backup, so the pre-migration state is still recoverable.
 
+### Concurrent opens are serialized on SQLite's own lock (Phase 6.5.3)
+
+CoreSight is a single-process application, but two processes CAN open the same
+store at once (a second launch, a helper, a test). The open path therefore
+serializes the decision-to-mutation sequence on SQLite's own cross-process
+write lock — never on a process-local mutex, which two processes would not
+share.
+
+What each operation actually holds:
+
+- The **read-only preflight** holds only read locks on its own connection; it
+  writes nothing and is closed before anything else happens.
+- `PRAGMA journal_mode=WAL` (in `apply_bootstrap`) is refused inside a
+transaction and **does not use the busy handler**: a concurrent holder makes
+it answer `SQLITE_BUSY` immediately. The WAL conversion is therefore retried
+within the connection's own bound (`OPEN_BUSY_TIMEOUT`, also a bound on the
+connection's busy timeout) and then fails closed with SQLite's own error.
+- `apply_bootstrap`'s v1 install is a check-then-act sequence. The decision —
+  the `schema_version` table's PRESENCE, never a coerced version number — is
+  re-made INSIDE `BEGIN IMMEDIATE`, so exactly one of two processes opening
+the same brand-new store installs v1 and the other observes the completed
+install and does nothing. A store that already has the table takes no write
+lock at all (an unlocked peek short-circuits the common case and decides
+nothing).
+- **Each migration step runs in `BEGIN IMMEDIATE` and re-reads the recorded
+  version inside that lock.** A version read outside a lock is a snapshot
+  another process may invalidate before the first mutation; re-reading under
+the lock makes "this migration is pending" and "run it" one indivisible
+decision. A second opener of the same older store therefore observes the
+winner's committed step and SKIPS it, instead of applying a stale plan and
+failing on a duplicate `CREATE TABLE` / `ADD COLUMN`. The `current` value
+passed in is only an optimization; it is never trusted for the decision.
+  Per-migration transactionality is unchanged: each step is still one
+  transaction that runs the migration SQL and its version bump together, and
+  the v2–v6 SQL is byte-identical.
+- If a concurrent opener completes the migration while this opener is
+  building its **pre-migration backup**, the backup would no longer describe
+  the state this opener would migrate. Rather than reporting that as a false
+  backup failure (or migrating a state its backup does not match), the opener
+  re-gates on the newer version — bounded by `MAX_BACKUP_REGATES` — and, if
+  that version still needs migrating, takes THAT state's backup. When the
+  store is already current, no migration of its own runs at all.
+- An opener that cannot acquire a lock within `OPEN_BUSY_TIMEOUT` (5 s) fails
+  closed with SQLite's own `SQLITE_BUSY`; nothing is migrated and the store
+  is left valid and openable.
+
+The invariants the phase-6.5.3 regression tests pin (`store::open_race_tests`,
+crate-internal; barriers and seam callbacks, never sleeps): two concurrent
+opens of a genuine v1 store; two of a supported intermediate store; two
+openers held together at the exact point before their first mutation; a
+writer committing between the integrity read and recognition; and a writer
+committing between recognition and the first mutation. Each case asserts no
+stale plan is applied, no duplicate schema change is left behind, the final
+store is v6 and intact, and any published backup is itself integrity-checked
+and records the pre-migration version it protects.
+
 ### Corruption is quarantined, never replaced or repaired
 
 Only SQLite's own "this file is not a usable database" codes
@@ -639,6 +695,19 @@ integrity result is never smoothed into "healthy".
 
 When corruption IS established:
 
+- **The relocation acts only on the file whose corruption was OBSERVED.** The
+  integrity verdict and the rename are separated by the close Windows
+  requires, so the pathname is briefly unattended. The relocation is bound to
+  a file identity captured while the read-only connection still pinned that
+  file (Unix `st_dev`/`st_ino`; Windows volume serial + the 128-bit
+  `FILE_ID_INFO` file identifier, through `coresight-engine`'s
+  platform-neutral metadata boundary), re-established immediately before each
+  move. A path that now names a DIFFERENT file — or a file whose identity
+  could not be captured — is refused with `QuarantineFailed { step: "verify
+  file identity" }`, and NOTHING is moved; the typed error says the damaged
+  store was NOT quarantined, so it never falsely claims the observed damaged
+  file was preserved. A healthy database substituted at the path is therefore
+  never labelled as, or moved in place of, another file's corruption.
 - Every connection to the file is closed first (see the ordering rule above).
 - The database **and** any `-wal` / `-shm` sidecars are relocated into
   `<store>.quarantined` (or `<store>.quarantined.1`, … on a collision).
@@ -752,6 +821,27 @@ because authorship cannot be proven — would refuse real stores too.
 
 - The store is preserved, not recovered. Quarantine makes the data
   *findable*; nothing here can repair a damaged file.
+- **Quarantine identity is bound, not atomically enforced.** The identity is
+  re-checked as the last act before the rename, which detects a substituted
+  file, a restored file, or ordinary filesystem activity. It cannot close the
+  single-syscall window an ADVERSARIAL same-user process would need to rename
+  its own file onto the path between that check and the `rename` itself: no
+  portable primitive does (the alternative, holding a handle open across the
+  rename, is exactly what Windows forbids). Losing that race relocates a file
+  that was not the observed damaged one — it is moved, not deleted or
+  repaired, and the error reports the relocation that actually happened — so
+  the harm is bounded to a misplaced file, never data loss.
+- **Concurrent opens wait at most `OPEN_BUSY_TIMEOUT` (5 s) for a lock.** A
+  holder that outlasts that bound makes the opener fail closed with SQLite's
+  own `SQLITE_BUSY`; the store is left valid and openable, and the caller may
+  simply retry. The bound is deliberately finite rather than an unbounded
+  wait.
+- **The mutation-gate re-validation and migration are coherent, but the
+  validation itself is not held under one lock the whole way.** The lock
+  guarantees each migration decision and its SQL; the earlier recognition
+  verdict is re-confirmed by the bootstrap and by that per-step re-read, so a
+  store that changes mid-open is either migrated correctly or refused, never
+  migrated from a stale plan.
 - **Corruption found at the mutation gate is refused in place, not
   quarantined.** Gate 2's reads run on a read-write connection (the one
   that would write), and SQLite may discard or rebuild a `-wal`/`-shm` that
@@ -811,9 +901,12 @@ because authorship cannot be proven — would refuse real stores too.
   fresh store automatically and offering a rescan/repair UI flow.
 - Migrations remain atomic per step, with the version bump inside the same
   transaction — a failed migration rolls back rather than leaving a
-  half-migrated database. Phase 6.5 adds a verified backup in front of that,
-  because a rollback protects the *logical* state, not the pre-migration
-  bytes on disk against an unrecoverable failure.
+  half-migrated database. Each step is serialized against concurrent writers
+  on SQLite's write lock and re-reads the recorded version inside it
+  (Phase 6.5.3), so two openers apply each migration exactly once. Phase 6.5
+  adds a verified backup in front of that, because a rollback protects the
+  *logical* state, not the pre-migration bytes on disk against an
+  unrecoverable failure.
 - Scans are idempotent and resumable-by-restart: a crashed scan leaves a
   `failed` record and zero partial visibility (snapshot publishes atomically).
 - Phase 6.4 snapshots follow the same rule: commit is one transaction, and

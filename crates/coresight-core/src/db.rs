@@ -4,10 +4,28 @@
 //! forward-only migration semantics from `docs/DATABASE.md`. Full schema
 //! arrives in Phase 1/5.
 
+use std::time::{Duration, Instant};
+
 use rusqlite::{Connection, Result};
 
 /// Current schema version. Migrations are forward-only and numbered.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// How long a connection opened through this module waits for a database
+/// lock held by another process before SQLite reports `SQLITE_BUSY`
+/// (Phase 6.5.3).
+///
+/// CoreSight is a single-process application, but two processes CAN open
+/// the same store at the same time (a second launch, a helper, a test): one
+/// migrating while the other waits its turn. Waiting instead of failing
+/// immediately turns that collision into "the other process finished
+/// first", which the serialized open path then observes. It does NOT make a
+/// genuine deadlock recoverable, and it never reports success for a lock
+/// that was not actually acquired — if the holder outlasts this bound,
+/// SQLite's own `SQLITE_BUSY` is returned and the caller fails closed.
+///
+/// This is a connection-LOCAL setting and writes nothing to the database.
+pub const OPEN_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Forward-only migrations. Index i holds migration i+1.
 const MIGRATIONS: [&str; 1] = ["
@@ -50,8 +68,90 @@ const MIGRATIONS: [&str; 1] = ["
 ///
 /// Opening a path that does not exist CREATES an empty file, exactly as
 /// [`open`] always has — that is what creating a brand-new store means.
+///
+/// The connection carries [`OPEN_BUSY_TIMEOUT`]: a lock held by a
+/// concurrent process is waited out (up to that bound) rather than failing
+/// immediately. That is a connection-local setting; it still writes
+/// nothing to the database.
 pub fn open_connection(path: &std::path::Path) -> Result<Connection> {
-    Connection::open(path)
+    let conn = Connection::open(path)?;
+    // Connection-local, no database writes; the no-write guarantee of this
+    // function is unaffected.
+    conn.busy_timeout(OPEN_BUSY_TIMEOUT)?;
+    Ok(conn)
+}
+
+/// Switch the connection's database to WAL journaling.
+///
+/// SQLite explicitly REFUSES `PRAGMA journal_mode=WAL` inside a transaction,
+/// so this runs OUTSIDE any transaction (Phase 6.5.3). Nothing here is a
+/// transaction: a caller that later opens one does so after this pragma has
+/// completed.
+///
+/// ## The conversion does not use the busy timeout (measured)
+///
+/// A journal-mode change takes the database's exclusive lock, and SQLite
+/// does NOT invoke the busy handler for it: a concurrent holder makes the
+/// pragma answer `SQLITE_BUSY` immediately. The connection's
+/// [`OPEN_BUSY_TIMEOUT`] therefore cannot make this wait, so this function
+/// retries the conversion itself within the same bound — one attempt per
+/// millisecond, never an unbounded spin — and then fails closed with
+/// SQLite's own error rather than looping forever or pretending the
+/// conversion happened.
+///
+/// This WRITES to the database, which is why it belongs to
+/// [`apply_bootstrap`] and never to [`open_connection`].
+fn enable_wal(conn: &Connection) -> Result<()> {
+    let deadline = Instant::now() + OPEN_BUSY_TIMEOUT;
+    loop {
+        match ensure_wal_or_wait(conn) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if !is_busy(&e) || Instant::now() >= deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+/// One journal-mode attempt: read the current mode and, when it is not WAL,
+/// convert. Any `SQLITE_BUSY` from either statement is the caller's cue to
+/// wait and retry.
+fn ensure_wal_or_wait(conn: &Connection) -> Result<()> {
+    // Already WAL → nothing to convert and no exclusive lock to take. This
+    // is the overwhelmingly common case for an existing store.
+    let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+    if mode.eq_ignore_ascii_case("wal") {
+        return Ok(());
+    }
+    conn.execute_batch("PRAGMA journal_mode=WAL;")
+}
+
+/// Whether an SQLite error is lock contention (`SQLITE_BUSY`) — the one
+/// failure the retry loop above waits out.
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(ffi, _) if ffi.code == rusqlite::ErrorCode::DatabaseBusy
+    )
+}
+
+/// Whether the database already carries a `schema_version` table.
+///
+/// The v1 decision is the table's PRESENCE, never a coerced version
+/// number: a database that already has the table is never initialized over,
+/// whatever it records. Unusable metadata inside such a table is the
+/// caller's validation gate's business (a validated caller refuses it), not
+/// something this helper corrects.
+fn schema_version_table_exists(conn: &Connection) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 /// Apply the write-side bootstrap to an ALREADY-OPEN connection: WAL, ON
@@ -63,18 +163,51 @@ pub fn open_connection(path: &std::path::Path) -> Result<Connection> {
 /// a store this build could have written): the bootstrap adds tables to
 /// whatever database it is pointed at, which is only ever correct for a
 /// database the caller owns.
+///
+/// ## Serialized against concurrent first opens (Phase 6.5.3)
+///
+/// The v1 install is a check-then-act sequence, and two processes opening
+/// the same brand-new store would otherwise both see "no schema_version
+/// table" and both try to create it. The decision is therefore re-made
+/// INSIDE `BEGIN IMMEDIATE` — SQLite's own cross-process write lock, not a
+/// process-local mutex — with the connection's busy timeout waiting out a
+/// concurrent holder, so exactly one process observes "no table" and
+/// installs v1; the other observes the completed install and does nothing.
+/// The unlocked peek before the lock is only an optimization for the common
+/// case (a store that already has its schema); it decides nothing, and a
+/// store that already has the table never takes the write lock at all.
+///
+/// Both pragmas run OUTSIDE any transaction, as SQLite requires
+/// (`journal_mode=WAL` is explicitly refused inside one).
 pub fn apply_bootstrap(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    let current: u32 = conn
-        .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
-        .unwrap_or(0);
-    for (i, migration) in MIGRATIONS.iter().enumerate() {
-        let version = (i + 1) as u32;
-        if version > current {
-            conn.execute_batch(migration)?;
+    enable_wal(conn)?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+
+    if schema_version_table_exists(conn)? {
+        return Ok(());
+    }
+
+    // The serialization point. `BEGIN IMMEDIATE` acquires the write lock up
+    // front (waiting per `OPEN_BUSY_TIMEOUT`) — unlike a deferred
+    // transaction, it cannot fail later on an upgrade attempt after the
+    // check has already run.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let installed = (|| -> Result<()> {
+        // Re-made under the lock: this is the decision that counts.
+        if !schema_version_table_exists(conn)? {
+            // The one migration this crate ships; index 0 holds v1.
+            conn.execute_batch(MIGRATIONS[0])?;
+        }
+        Ok(())
+    })();
+    match installed {
+        Ok(()) => conn.execute_batch("COMMIT"),
+        Err(e) => {
+            // Best-effort rollback; the caller sees the original failure.
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
         }
     }
-    Ok(())
 }
 
 /// Opens (or creates) the database and applies pending migrations.
@@ -177,5 +310,103 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(journal.to_lowercase(), "wal");
+    }
+
+    /// (Phase 6.5.3, Workstream A) Two processes opening the same brand-new
+    /// store at the same time must both succeed and end up with exactly ONE
+    /// v1 install: the install decision is re-made inside `BEGIN IMMEDIATE`,
+    /// so the loser of the race observes the completed install instead of
+    /// trying to create the tables again (which would fail with "table
+    /// schema_version already exists"). The barrier starts both threads
+    /// together; EVERY interleaving must satisfy the same invariant, so the
+    /// test asserts it for whichever order the scheduler produces rather
+    /// than assuming one.
+    #[test]
+    fn concurrent_first_opens_bootstrap_exactly_once() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coresight.db");
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let conn = open(&path)?;
+                    schema_version(&conn)
+                })
+            })
+            .collect();
+        for handle in handles {
+            let version = handle
+                .join()
+                .unwrap()
+                .expect("a concurrent first open must succeed");
+            assert_eq!(version, SCHEMA_VERSION);
+        }
+
+        let conn = open(&path).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the v1 bootstrap must install exactly one row");
+        let objects: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('drives', 'scans')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(objects, 2, "both v1 tables must exist exactly once");
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    /// (Phase 6.5.3) The v1 decision is the version table's PRESENCE, not a
+    /// version number read and coerced: a database that already has a
+    /// `schema_version` table is never initialized over, whatever that table
+    /// records. The raw helper adds nothing; a validating caller (the
+    /// history store's gates) is what refuses unusable metadata.
+    #[test]
+    fn bootstrap_never_initializes_a_database_that_has_a_version_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foreign.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 CREATE TABLE marker (x INTEGER);
+                 INSERT INTO marker VALUES (7);",
+            )
+            .unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+        let version_rows: i64 = conn
+            .query_row("SELECT count(*) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version_rows, 0,
+            "a present version table must not be written by the bootstrap"
+        );
+        let drives: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'drives'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            drives, 0,
+            "the v1 schema must not be installed over a database that has a version table"
+        );
+        let x: i64 = conn
+            .query_row("SELECT x FROM marker", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(x, 7, "pre-existing data must be untouched");
     }
 }
