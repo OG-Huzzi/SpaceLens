@@ -2,9 +2,9 @@
 
 PHASE 6.5.2 — Remaining Phase 6.5 Safety Gaps (test-only public API, fail-closed integrity, full per-version recognition, preflight-to-write race)
 
-**Status: Phase 6.5.2 IMPLEMENTED — every local gate executed and green
-(table below); the exact-SHA CI is recorded by the immediate
-verification-record commit.** Started from baseline
+**Status: Phase 6.5.2 IMPLEMENTED + VERIFIED — every local gate executed
+and green (table below), and the implementation commit's exact-SHA CI is
+green on all four required jobs (table below).** Started from baseline
 `d62665a87e5c0eb58b4a2e31ad193dba8f58cf13` (the Phase 6.5.1
 verification-record commit). **Schema version stays 6** — no migration was
 added, and migration SQL v2–v6 is byte-identical to the baseline (all five
@@ -219,10 +219,18 @@ longer imports anything from `store_safety`.
 
 ### CI verification (exact SHA)
 
-Recorded by the immediate verification-record commit: the implementation
-commit's run id, `head_sha` match, attempt, and the four required job
-conclusions (`frontend`, `rust (ubuntu-latest)`, `rust (windows-latest)`,
-`rust (macos-latest)`), followed by that verification commit's own CI.
+| Commit | Meaning | CI run | head_sha | event | attempt | conclusion |
+|---|---|---|---|---|---|---|
+| `6d3c7b5d777ad331daef701b2d68800e4e2542b8` | Phase 6.5.2 implementation | 38739906275 | matches | push | 1 | success |
+
+All four required jobs reported completed / success: `frontend`,
+`rust (ubuntu-latest)`, `rust (windows-latest)`, `rust (macos-latest)`.
+Queried through the GitHub Actions API; the reported `head_sha` equals the
+commit exactly, and no other run was created for this SHA.
+
+This verification-record commit's own CI is verified through the same API
+and reported in the terminal result; a further record commit is created only
+if a run is red or needs correcting.
 
 ### Limitations (honest)
 

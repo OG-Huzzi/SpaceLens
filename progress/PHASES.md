@@ -125,9 +125,9 @@ current-state claims. Current-state documents use CoreSight.
     Status: `progress/CURRENT_PHASE.md`.
   - [ ] **PHASE 6.5.2 — remaining 6.5 safety gaps (test-only API surface,
     fail-closed integrity, full per-version recognition, preflight-to-write
-    race).** IMPLEMENTED — every local gate executed and green; the
-    exact-SHA CI is recorded by the immediate verification-record commit
-    (started from `d62665a87e5c0eb58b4a2e31ad193dba8f58cf13`).
+    race).** IMPLEMENTED + VERIFIED (from
+    `d62665a87e5c0eb58b4a2e31ad193dba8f58cf13`, implementation CI run
+    38739906275 all four jobs green).
     The hazard/backup/quarantine seams are crate-private (no
     `open_with_hazard`, no `#[doc(hidden)] pub`, no test-only feature); an
     `integrity_check` that returns NO rows is a failure to establish
