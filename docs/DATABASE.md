@@ -134,6 +134,14 @@ a defaulted `0`, `None`, or empty value.
   application-id re-keying).
 - The app refuses to open a NEWER DB (`StoreError::SchemaTooNew`, tells
   the user to upgrade); older stores migrate forward automatically.
+- A file that is a valid SQLite database but NOT a store this build can
+  recognize — no `schema_version` table, unusable version metadata, a
+  recorded version of 0, or a recorded version missing its core tables — is
+  refused UNWRITTEN with `StoreError::UnrecognizedSchema` (Phase 6.5.1). It
+  is not initialized, backed up, migrated, or quarantined: the mutating
+  bootstrap never runs on a database CoreSight does not own. A brand-new
+  EMPTY file is the one shape that IS initialized — refusing it would
+  refuse a first run.
 - Each migration step runs in ONE transaction with its version bump, so a
   failed migration rolls back rather than leaving a half-migrated
   database (asserted by test). Migrations are idempotent per state.
@@ -497,8 +505,9 @@ everything at least this long".
 
 ## Pre-migration backup and corrupt-store quarantine (Phase 6.5)
 
-Two guarantees about the FILE, enforced by `HistoryStore::open` in
-`crates/coresight-history/src/store_safety.rs`.
+Guarantees about the FILE, enforced by `HistoryStore::open` in
+`crates/coresight-history/src/store_safety.rs` (Phase 6.5, refined by the
+6.5.1 closures).
 
 ### Ordering: nothing is inspected after it has been written
 
@@ -510,12 +519,21 @@ checkpoint, cannot create sidecars, and cannot alter the file:
 1. No file at the path → brand new. Nothing to protect, nothing to back up.
 2. `PRAGMA integrity_check` returns anything other than `ok` → corruption
    established → quarantine (below).
-3. Recorded version NEWER than this build supports → `SchemaTooNew`, and the
+3. A file holding no schema objects at all → a store this build CREATES:
+   the bootstrap initializes it. (A brand-new EMPTY file is this case, not
+   the refusal case below; refusing it would refuse a first run.)
+4. Recorded version NEWER than this build supports → `SchemaTooNew`, and the
    file is left **completely untouched**: not migrated, not backed up, not
-   quarantined. A newer store is not this build's to modify.
-4. Recorded version OLDER than supported → take a verified backup. If it
+   quarantined. A newer store is not this build's to modify. Decided before
+   the shape check below, so a newer store's missing or renamed tables can
+   never be misread as "not ours".
+5. A readable SQLite file that is not recognizable as a store this build has
+   ever written → `UnrecognizedSchema`, left **unwritten**: not initialized,
+   not backed up, not migrated, not quarantined (below).
+6. Recorded version OLDER than supported → take a verified backup. If it
    cannot be created, verified, or published, `open` fails and the store is
    never migrated.
+7. Recorded version == supported and recognizable → open it as-is.
 
 The read-only handle is **closed before** any backup or relocation. This is
 load-bearing, not tidiness: SQLite holds the file open for the connection's
@@ -532,18 +550,31 @@ data, never a `Connection`.
   history; the Online Backup API reads through the WAL and restarts if the
   source changes mid-copy. (Asserted by
   `phase65_tests::a_backup_captures_data_held_only_in_the_uncheckpointed_wal`.)
-- Built into `<store>.backup-in-progress`, then re-opened by a **separate**
-  connection and checked for `PRAGMA integrity_check == ok` **and** the
-  source's pre-migration schema version — before it is published.
-- Published by renaming to `<store>.pre-migration-backup`. Names are
-  reserved with `create_new`, which succeeds only for an unused name, so a
-  second attempt gets `<store>.pre-migration-backup.1` and can never
-  overwrite. The reservation is adjacent to the source, so the rename is
+- Built into an attempt-specific temporary (`<store>.backup-in-progress`,
+  `<store>.backup-in-progress.1`, … on a collision), then re-opened by a
+  **separate** connection and checked for `PRAGMA integrity_check == ok`
+  **and** the source's pre-migration schema version — before it is
+  published.
+- Published by renaming to `<store>.pre-migration-backup`. **Both** the
+  temporary name and the final name are reserved per attempt with
+  `create_new`, which succeeds only for an unused name, so a second attempt
+  gets `.1`, `.2`, … names and can never overwrite, adopt, or share the
+  first attempt's artifacts, whether that attempt is running concurrently
+  or died before cleanup. A stale artifact is ignored and the counter
+  advances; nothing a later attempt did not create is ever deleted. The
+  reservations are adjacent to the source, so the rename is
   same-filesystem on every platform.
 - **Failure is closed.** If the copy, the verification, or the publication
-  fails, the temporary file *and* the empty reserved name are removed and
-  `open` returns `StoreError::BackupFailed { step, detail }`. A backup that
-  does not exist is never claimed to exist.
+  fails, exactly the temporary *and* the still-empty reserved name THIS
+  attempt created are removed and `open` returns
+  `StoreError::BackupFailed { step, detail }`. A backup that does not exist
+  is never claimed to exist, and no failure path removes a path the attempt
+  did not create.
+- **A failing attempt cannot delete a live one's work.** Proven with a
+  deterministic barrier (not a sleep) by
+  `store_safety::tests::concurrent_backup_attempts_never_share_or_delete_each_others_artifacts`:
+  attempt A fails at publication while attempt B holds a verified
+  temporary, and B still publishes its own backup intact.
 - A backup is taken only when a migration is genuinely required: a new
   database and an already-current schema produce none.
 - A migration that then fails rolls back its own transaction and **keeps** the
@@ -566,19 +597,79 @@ When corruption IS established:
   `<store>.quarantined` (or `<store>.quarantined.1`, … on a collision).
   Sidecars move too, so uncheckpointed WAL frames are preserved rather than
   silently discarded.
-- A partial failure attempts to restore the files already moved. If that
-  succeeds the store is left byte-identical and the error says the files were
-  NOT moved. If restoration also fails, the error names the artifacts that
-  could not be restored and where they are — it never claims a successful
-  quarantine.
+- A partial failure attempts to restore — in reverse order — exactly the
+  files this attempt moved. Destination names are derived from the
+  originals, so a restore can never overwrite a file this attempt did not
+  move. If every restore succeeds, the store is back where it was and the
+  error says its files are **unchanged where they were**; the emptied
+  destination is removed (a directory still holding an artifact is left in
+  place, so nothing is hidden). If a restore also fails, the error says the
+  store **could NOT be quarantined cleanly and its files are NOT all at
+  their original locations**, naming each artifact that could not be put
+  back and where it remains. It never claims a successful quarantine.
+- Both halves of that honesty are exercised with REAL moves to undo: the
+  injected failures fire on the last existing sidecar, after the main
+  database (and any earlier sidecar) has already moved, so the rollback
+  runs with a non-empty move list
+  (`phase65_tests::a_sidecar_relocation_failure_restores_everything_that_moved`,
+  `phase65_tests::an_unrestorable_main_file_is_reported_honestly_and_stays_quarantined`).
 - `open` then returns `StoreError::Corrupt` whose detail names the quarantine
   directory. **No replacement database is created at the original path, no
   repair is attempted, and no recovery of historical data is claimed.**
+
+### Corruption the bootstrap itself introduces is quarantined too
+
+The preflight above proves the file was intact when it was FOUND; it cannot
+see damage introduced by the writes `coresight_core::db::open` performs (the
+WAL pragma and the v1 bootstrap; a migration's own damage is still preceded
+by its verified backup). `open` therefore runs the integrity check a SECOND
+time on the already-open connection:
+
+- Clean → continue.
+- Problems, or an integrity result unreadable with a corruption code →
+  close the connection and quarantine, exactly like preflight corruption.
+  (Previously this path returned the error WITHOUT moving the store aside,
+  leaving a reliably corrupt store at a path every future open could keep
+  failing on.)
+- A result unreadable for a NON-corruption reason (an ordinary I/O failure)
+  → the store is left exactly where it is and the error is returned; an
+  environment problem is not evidence of damage.
+
+### A file this build cannot recognize is refused, never initialized over
+
+The bootstrap adds its schema to whatever file it is pointed at, so before
+anything may touch an existing file, the read-only snapshot must prove the
+file is a store this build has ever written. A readable SQLite database that
+holds objects but fails that proof is refused with
+`StoreError::UnrecognizedSchema` when it:
+
+- has no `schema_version` table (a foreign database);
+- has a `schema_version` table that does not hold exactly one non-negative
+  integer (no rows, several rows, a non-integer, a value beyond `u32`);
+- records version 0, which no CoreSight build has ever written;
+- records a version whose CORE tables are missing (`drives` + `scans` for
+  v1; `scan_runs` + `observations` for v2 and later — the pair every history
+  migration builds on).
+
+"Unusable" data is refused rather than coerced to 0, because 0 is exactly
+what would hand the file to the bootstrap. The refusal leaves the
+**database file and its `-wal` sidecar byte-identical**, deletes no sidecar,
+takes no backup, and adds nothing
+(`phase65_tests::a_foreign_sqlite_database_is_refused_and_left_byte_identical`;
+tests 16–19 cover the versioned-foreign, unusable-metadata, version-0, and
+empty-file cases). The one empty shape that IS initialized is a file holding
+no schema objects at all — refusing a brand-new EMPTY file would refuse a
+first run.
 
 ### Honest limitations
 
 - The store is preserved, not recovered. Quarantine makes the data
   *findable*; nothing here can repair a damaged file.
+- A `-shm` beside a `-wal` is SQLite's derived WAL index. Reading a
+  database through a `-wal` can rebuild it (its bytes are not stable by
+  construction), and it holds no committed data. The byte-identity contract
+  therefore covers the database file and its `-wal` — for the `-shm` this
+  code promises only that it is never deleted and never interpreted.
 - Publication is `remove` + `rename`, not one atomic step, so a crash in
   between can leave a stray EMPTY file under the backup name. The name is
   only ever published by renaming an already-verified file, so a name that
@@ -588,18 +679,26 @@ When corruption IS established:
 - Quarantine relocates files next to the store. It does not encrypt, upload,
   or otherwise transmit anything, and the crate still contains no logging or
   telemetry — paths reach only the returned error.
-- A store that fails to open for a reason that is neither corruption nor a
-  schema mismatch is simply reported; nothing is moved.
+- A store that fails to open for a reason that is none of corruption, a
+  schema mismatch, or an unrecognized file is simply reported; nothing is
+  moved.
 
 ## Corruption & recovery
 
 - `PRAGMA integrity_check` runs on EVERY open, before anything reads or
   migrates the file (IMPLEMENTED, Phase 6.1 audit: `HistoryStore::open`
   refuses a corrupt store with the typed `StoreError::Corrupt` — never
-  guess, never half-read).
+  guess, never half-read), and AGAIN after the bootstrap helper's own
+  writes (IMPLEMENTED, Phase 6.5.1), so corruption those writes introduce
+  is quarantined like any other instead of being left at a path that keeps
+  failing.
+- A valid SQLite file that is not a recognizable CoreSight store is refused
+  UNWRITTEN (`StoreError::UnrecognizedSchema`, Phase 6.5.1) instead of
+  having CoreSight tables added to it — see "A file this build cannot
+  recognize is refused, never initialized over" above.
 - Corrupt stores are now QUARANTINED (IMPLEMENTED, Phase 6.5) rather than
   only refused: see "Pre-migration backup and corrupt-store quarantine"
-  below. Still PLANNED, and deliberately out of scope for 6.5: starting a
+  above. Still PLANNED, and deliberately out of scope for 6.5: starting a
   fresh store automatically and offering a rescan/repair UI flow.
 - Migrations remain atomic per step, with the version bump inside the same
   transaction — a failed migration rolls back rather than leaving a

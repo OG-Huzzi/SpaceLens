@@ -1,5 +1,170 @@
 # CoreSight — Current State
 
+PHASE 6.5.1 — Safety Closure for the Phase 6.5 Open Path (concurrent backups, unrecognized schemas, post-bootstrap quarantine, rollback honesty)
+
+**Status: Phase 6.5.1 IMPLEMENTED — every local gate executed and green
+(table below); the exact-SHA CI is recorded by the immediate
+verification-record commit.** Started from baseline
+`1b458e82095e51031da46978d94f7f282ebb3297` (the Phase 6.5 red-run record).
+**Schema version stays 6** — no migration was added, and migration SQL v2–v6
+is byte-identical to the baseline (all five `MIGRATION_V*` constants
+extracted from `git show 1b458e8:…` and compared case-sensitively before
+committing). Nothing outside the history-store open path changed. **Phase
+6.6 and later phases are NOT authorized and were NOT started.**
+
+## Phase 6.5.1 — Safety closure for the Phase 6.5 open path
+
+Four defects in the Phase 6.5 open path — two of them shipped behind tests
+that could not fail — plus the regression tests that now prove each fix.
+
+### The four defects
+
+**A. Concurrent backup attempts shared and deleted one temporary path.**
+The backup used the fixed temporary `<store>.backup-in-progress` and began
+by deleting any file found there. Two attempts (two processes, or one after
+a crashed attempt) could delete each other's live temporary, copy into the
+SAME path, verify or publish each other's half-written artifact, and destroy
+a concurrent attempt's finished work on failure.
+
+**B. Valid non-CoreSight SQLite files reached the mutating bootstrap.** A
+readable database with no `schema_version` table read as `None` and was
+treated as CURRENT, so `coresight_core::db::open` — whose version read is
+`unwrap_or(0)` until the bootstrap installs a version table — ran the v1
+bootstrap and ADDED CoreSight tables to a foreign file. A foreign
+`schema_version` table with several rows silently read only the first row;
+version 0 and a recorded version missing its core tables were each treated
+as a store this build may open and migrate.
+
+**C. Corruption introduced by the bootstrap was not quarantined.** Integrity
+was checked only by the read-only preflight, i.e. only against the file's
+ORIGINAL state. Damage the helper's own writes introduced was detected by
+the next read, but the store was merely refused — left at a path every
+future open keeps failing on — instead of being quarantined like any other
+established corruption.
+
+**D. The rollback test never moved a file, and one message branch could
+lie.** The only rollback test injected its failure on the FIRST relocation
+(the main database), so the already-moved list was always empty: the restore
+loop never ran and its byte-identity assertions were trivially true — a
+broken rollback would have shipped green. The caller's wording for a genuine
+partial failure also said "its files are unchanged where they were" even
+when the main file had moved and could NOT be restored.
+
+### Fixes (smallest coherent form)
+
+- `crates/coresight-history/src/store_safety.rs` —
+  `reserve_backup_temporary` reserves a per-attempt temporary via the
+  existing `exclusive_path` (`.1`, `.2`, …); the stale-path `remove_file` is
+  gone (a stale artifact is ignored, never adopted, never deleted); the
+  destination name is reserved first and a failing temporary reservation
+  releases it; failure cleanup removes exactly this attempt's two names.
+  `Hazard::inject` fires only for its matching `Backup*` stage, so a hazard
+  aimed at quarantine can never fail a backup. New hazards
+  `QuarantineRelocateSidecar` / `QuarantineRestore` fail on the LAST
+  existing sidecar after real moves, forcing the rollback to run with a
+  non-empty move list; restores run in reverse order and failure entries
+  name each artifact and where it remains; only an emptied quarantine
+  directory is removed. `RecordedVersion::{Version, NoTable, Unusable}`
+  plus `inspect_snapshot` (integrity → object count → version → core
+  tables) implement strict recognition.
+- `crates/coresight-history/src/store.rs` —
+  `StoreError::UnrecognizedSchema { detail }`; `Inspection::Initialize` for
+  an object-less file; refusal order: integrity → quarantine; empty →
+  initialize; version newer → `SchemaTooNew`; unrecognized → refusal;
+  version older → verified backup; current → open. A second
+  `post_bootstrap_integrity` check runs on the already-open connection;
+  established corruption drops the connection FIRST and then quarantines; a
+  non-corruption unreadable result preserves the store and returns the
+  error. The quarantine caller message has three honest branches
+  (`QUARANTINE_RESTORE_STEP`-keyed): preserved under, not cleanly
+  quarantined, unchanged where they were.
+- `crates/coresight-history/tests/phase65_tests.rs` — regressions 15–25 and
+  helper updates; every pre-existing Phase 6.5 test passed unchanged.
+
+### The tests that prove each closure
+
+| Defect | Test | Property |
+|---|---|---|
+| A | `store_safety::tests::concurrent_backup_attempts_never_share_or_delete_each_others_artifacts` | barrier-driven interleaving (no sleep): A fails at publish while B holds a verified temporary; the two temporaries differ; B still publishes its own readable backup (version 2, rows intact); A's cleanup removed only A's names |
+| A | `store_safety::tests::a_stale_backup_artifact_is_neither_adopted_nor_deleted` | a crashed attempt's temporary and reserved name are never adopted nor deleted; the new attempt publishes under its own name |
+| B | 15 `a_foreign_sqlite_database_is_refused_and_left_byte_identical` | refused; db + `-wal` byte-identical; `-shm` not deleted; ZERO CoreSight tables added; foreign rows intact; no backup, no quarantine |
+| B | 16 `a_foreign_database_with_a_schema_version_table_is_refused` | a `schema_version` table alone is not recognizability; missing `scan_runs`/`observations` are named in the refusal |
+| B | 17 `unusable_version_metadata_is_refused_not_guessed` | no row / two rows / non-integer → refusal, never coerced to 0 (unit test adds missing-column and out-of-`u32` cases) |
+| B | 18 `a_store_recording_version_zero_is_refused` | refused (previously: backed up, then died inside the bootstrap) |
+| B | 19 `an_empty_database_file_is_initialized_not_refused` | a zero-byte file and a dropped-all-objects database still initialize to v6 |
+| B | 20 `an_existing_v1_store_is_backed_up_and_migrated` | an existing v1 store is recognized, backed up at version 1, and migrated |
+| C | 21 `post_bootstrap_corruption_is_quarantined_like_preflight_corruption` | the quarantine directory holds the file; the error names it; no replacement store at the original path |
+| C | 22 `a_post_bootstrap_io_failure_preserves_the_store_without_quarantine` | unreadable-with-I/O: store untouched, still openable afterwards, error surfaced as-is |
+| C | 23 `a_post_bootstrap_unreadable_corruption_result_is_quarantined` | unreadable-with-corruption-code: quarantined |
+| D | 24 `a_sidecar_relocation_failure_restores_everything_that_moved` | after a real move list (db + `-wal`) is rolled back the db and `-wal` are byte-identical, the `-shm` is back, and no empty directory remains |
+| D | 25 `an_unrestorable_main_file_is_reported_honestly_and_stays_quarantined` | the main file stays quarantined (byte-identical to what moved), the sidecars are restored, the error names the artifact and its location, and it claims neither a successful quarantine nor "unchanged" |
+
+### Decisions worth recording
+
+- **Core-table rule at v2+ (documented deviation).** A literal reading of
+  "v2+ needs `drives` + `scans` + `scan_runs` + `observations`" would refuse
+  this repository's own green fixtures: `migration_tests.rs`,
+  `audit_v2_regression_tests.rs`, `phase643_tests.rs` and `snapshot_tests.rs`
+  build v2/v6 stores carrying the history tables that never had
+  `drives`/`scans`, and no fixture opens at exactly v1 without them. The
+  rule implemented — and documented in `docs/DATABASE.md` — is the pair
+  each version's layer actually builds on: `drives` + `scans` at v1,
+  `scan_runs` + `observations` at v2 and later.
+- **`-shm` is not in the byte-identity contract (empirically forced).**
+  Scratch experiments proved that ANY read of a database with a `-wal`
+  beside it (healthy, rollback, corruption alike) makes SQLite rebuild the
+  `-shm` into a 32 KB wal-index; the `-wal` itself is never modified by a
+  read-only read. For a real WAL store the lock bytes live in the `-shm`,
+  so byte-identity after any read is unachievable in principle. The
+  contract is therefore: **database file + `-wal` byte-identical, no
+  sidecar deleted**; the `-shm` (a derived index holding no data) is
+  checked for survival, never for bytes. Reading with `immutable=1` to
+  force byte-identity was rejected as unsafe: it ignores uncheckpointed
+  WAL frames and could misjudge version/migration state.
+
+### Local verification (all executed, exit status checked)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | exit 0 |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| `cargo test --workspace` | exit 0 (62 test-result blocks, all ok) |
+| `cargo test --workspace --all-features` | exit 0 |
+| `cargo test --workspace --all-features -- --ignored` | exit 0 (includes the ignored perf smoke; no threshold was weakened) |
+| `npm ci` | exit 0 |
+| `npm audit --audit-level=high` | exit 0, 0 vulnerabilities |
+| `npm run build` | exit 0 |
+| `git diff --check` | exit 0, no output |
+
+Focused runs: `cargo test -p coresight-history --test phase65_tests` — 25
+passed (the 14 Phase 6.5 tests unchanged plus 11 new); the full
+`-p coresight-history` suites — all green; `store_safety` unit tests — 10
+passed. Migration SQL v2–v6 extracted from
+`git show 1b458e8:crates/coresight-history/src/store.rs` and compared
+case-sensitively against the working tree: all five constants byte-identical
+(lengths 1931 / 516 / 107 / 5704 / 86).
+
+### CI verification (exact SHA)
+
+Recorded by the immediate verification-record commit: the implementation
+commit's run id, `head_sha` match, attempt, and the four required job
+conclusions, followed by that verification commit's own CI.
+
+### Limitations (honest)
+
+- The `-shm` nuance above: the read that inspects a store with a `-wal` may
+  rebuild SQLite's derived WAL index. No sidecar is ever deleted by this
+  code, and no committed data lives in a `-shm`.
+- Backup publication remains `remove` + `rename`, not one atomic step (the
+  Phase 6.5 crash-window caveat is unchanged; `renameat2(RENAME_NOREPLACE)`
+  is still not portable and no dependency was added).
+- An unrecognized file is refused, not interpreted: nothing guesses a
+  version to "recover" it. A user whose store became unrecognizable must
+  inspect it manually; refusal preserves bytes, not usability.
+- Quarantine relocates files next to the store; a failing volume is not
+  copied out. No encryption, no network, no logging/telemetry — paths reach
+  only the returned error.
+
 PHASE 6.5 — SQLite Pre-Migration Backup & Corrupt-Store Quarantine
 
 **Status: Phase 6.5 VERIFIED** — started from baseline

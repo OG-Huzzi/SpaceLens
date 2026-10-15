@@ -112,6 +112,16 @@ current-state claims. Current-state documents use CoreSight.
   quarantine (including `-wal`/`-shm` sidecars) instead of being replaced or
   deleted. Schema stays v6; migration SQL v2–v6 unchanged. Status:
   `progress/CURRENT_PHASE.md`.
+  - [ ] **PHASE 6.5.1 — safety closure of the 6.5 open path.**
+    AUTHORIZED / IN PROGRESS (started from `1b458e82095e51031da46978d94f7f282ebb3297`).
+    Concurrent backup attempts own their artifact names and never adopt or
+    delete another attempt's; a valid SQLite file this build cannot recognize
+    is refused with its database file and `-wal` byte-identical instead of
+    being initialized over; corruption introduced by the bootstrap's own
+    writes is quarantined like the preflight's; a partially failed quarantine
+    reports exactly which files moved and which did not, proven with real
+    moves to roll back. Schema stays v6; migration SQL v2–v6 byte-identical.
+    Status: `progress/CURRENT_PHASE.md`.
 - [ ] **PHASE 7 — Application integration.** Per-app footprints + leftover
   attribution, uninstall planning (reversible). Success: top-50 common apps
   fixture-verified.
