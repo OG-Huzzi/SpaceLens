@@ -1,5 +1,61 @@
 # CoreSight — Current State
 
+PHASE 4.1 — Cleanup Planner, Safety Validator & Preview Model (in progress)
+
+**Status: IMPLEMENTED — local gate executed and green (fmt 0, clippy 0,
+`cargo test --workspace` 1008 passed / 0 failed).** Started from baseline
+`030a381e838acbbbd5fdd638cd7cb23d320464a0` (the `coresight-insights`
+integration commit). **Schema version stays 6** — no migration was added.
+**No state-changing action is executed in this phase** — the crate is
+pure planning.
+
+### jv16 PowerTools parity direction
+
+The user directed that CoreSight should offer **all** the tool scope of
+[jv16 PowerTools](https://jv16powertools.com/) (18 tools + widget, dark
+mode, multilingual, configurable — see the official features page), but
+at **~100x the quality**: not more features, but provably better work.
+This phase is the first step of that direction:
+
+- **Coverage parity, quality-first.** Every jv16 tool gets a CoreSight
+  equivalent. The first step is the shared foundation every cleanup-like
+  tool depends on: the planner, the safety validator, and the
+  preview/verify model (`crates/coresight-cleanup`).
+- **What changed.** New pure crate `coresight-cleanup`:
+  - `plan_cleanup(UsageReport, PlannerOptions) -> CleanupPlan` —
+    evidence → opportunities with full reasoning (what/why/how much/
+    what stays/what happens).
+  - Category policy per `docs/SECURITY_AND_SAFETY.md`: Cache,
+    TemporaryData, Logs are `Safe`; Downloads, Development, Archives
+    are `Review`; Applications, Documents, SystemData, UserData, Games,
+    Images, Video, Audio, ApplicationData, Other, Unknown are
+    **off-limits** and never proposed as actionable.
+  - `validate_plan` composes CoreSight's protection domains with the
+    existing `SafetyGate` from `coresight-capabilities`. A blocked plan
+    returns reasons, never partially executes.
+  - `CleanupPreview::from_plan` — the exact statement the user confirms
+    (destination + undo are mandatory; incomplete previews are blocked).
+  - `ActionKind` enumerates the jv16 surface (MoveToTrash, Delete, Wipe,
+    Uninstall, DisableStartup, ModifyRegistry, RenameFiles, SplitFile,
+    MergeFile, BlockDomain, ChangeSetting) so later tools classify
+    through the same validator. Destructive actions are **blocked** in
+    the current build until a separately authorized policy widens.
+- **Architecture purity is tested, not asserted.** A source-scan guard
+  (`crate_performs_no_io_or_execution`) proves the crate performs no
+  filesystem, process, network, or DB access.
+
+### What is NOT in this phase (explicit)
+
+- **No Trash/quarantine adapter and no execution.** The crate proposes
+  and validates; it never moves a file. The adapter is the next
+  authorized step (Phase 4.2).
+- **No UI wiring** (Phase 8), **no Tauri commands** (Phase 9), and no
+  installer/signing (Phase 11).
+- **No duplicate/big-file per-file tools yet** — the category planner is
+  the foundation they will build on.
+- **No registry modification, startup-item changes, DNS changes, or
+  wiping** — `ActionKind` variants exist for classification only.
+
 PHASE 6.5.3 — Concurrent Open Serialization & File-Identity Safety
 
 **Status: Phase 6.5.3 IMPLEMENTED — every local gate executed and green (table

@@ -78,6 +78,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "coresight-cleanup"
+version = "0.0.0"
+dependencies = [
+ "coresight-capabilities",
+ "coresight-classifier",
+ "coresight-engine",
+ "coresight-history",
+ "coresight-insights",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "coresight-core"
 version = "0.0.0"
 dependencies = [
