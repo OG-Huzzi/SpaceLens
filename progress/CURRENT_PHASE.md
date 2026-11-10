@@ -1,5 +1,24 @@
 # CoreSight — Current State
 
+CI PLATFORM MATRIX — Linux job removed (operator decision)
+
+**Status: APPLIED.** The `rust (ubuntu-latest)` job was removed from the CI
+matrix at the operator's direction. Linux is not a shipping target, so the job
+spent runner minutes proving portability nobody consumes.
+
+- Matrix is now `os: [windows-latest, macos-latest]`.
+- **No coverage is lost for shipping code**: macOS exercises the unix `cfg`
+  paths and Windows the win32 ones, so no conditional-compilation branch goes
+  untested.
+- The `frontend` job still runs on `ubuntu-latest` — that is a runner choice
+  for an `npm` build, not a Linux support claim.
+- No branch protection existed on `main`, so no required-check rule had to be
+  amended.
+- `docs/CROSS_PLATFORM.md`, `docs/APPLICATIONS.md` and the forward-looking
+  Phase 4 success criterion in `progress/PHASES.md` were updated to match.
+  **Historical run records elsewhere in `progress/` are unchanged** — they are
+  evidence of what actually ran and must not be rewritten.
+
 PHASE 4.3 + 8.0 — Resolved Plan Targets, Remaining Diagnostics, Finder, and the Five-Screen UI
 
 **Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,

@@ -31,9 +31,8 @@ function HomeContent({ home }: { home: HomeSummary }) {
   const coverage = home.coverage;
   const partial = coverage.completeness !== "complete";
   const safeActionable = home.safeReclaimableBytes;
-  const primaryLabel = partial
-    ? "Open cleanup review"
-    : safeActionable === null
+  const primaryLabel =
+    partial || safeActionable === null || home.actionableOpportunityCount === 0
       ? "Open cleanup review"
       : `Review ${formatBytes(safeActionable)} you can safely remove`;
 

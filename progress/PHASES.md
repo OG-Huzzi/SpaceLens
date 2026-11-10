@@ -58,7 +58,7 @@ current-state claims. Current-state documents use CoreSight.
     bracket. Status: `progress/PHASE_3_2_STATUS.md`.
 - [ ] **PHASE 4 — Cleanup + safety engine.** Planner, safety validator with veto
   tests, Trash/quarantine adapters, preview + verify. Success: adversarial
-  safety suite green on all three OSes in CI.
+  safety suite green on both shipping platforms (Windows + macOS) in CI.
 - [ ] **PHASE 5 — Indexing + storage history.** Snapshots, deltas, drive memory,
   retention. Success: "+80 GB why?" answered on fixtures with per-category deltas.
   - [x] **PHASE 5.1 — historical identity & event semantics repair.**

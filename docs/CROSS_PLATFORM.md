@@ -68,7 +68,10 @@ math, SQLite schema + migrations, IPC command/event shapes.
 ## Conformance mechanism (from Phase 1)
 
 - `platform-matrix` test suite: every trait gets the same behavioral tests on
-  all three OSes in CI (GitHub Actions runners).
+  both shipping platforms in CI (GitHub Actions `windows-latest` and
+  `macos-latest`). Linux is not a shipping target and is deliberately not a
+  gate; macOS covers the unix `cfg` paths, Windows covers the win32 ones, so no
+  conditional-compilation branch goes untested.
 - Fixture trees simulating junctions/symlinks/firmlinks/snapshots run on all
   platforms; OS-specific fixtures live in per-OS dirs and are reviewed for
   policy parity (same danger → same verdict everywhere).

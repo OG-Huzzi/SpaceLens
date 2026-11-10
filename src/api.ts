@@ -1538,7 +1538,14 @@ class MockCoreSightApi implements CoreSightApi {
       });
     }
     const categories = buildCategories(this.scenario === "partial");
-    return this.respond(buildHomeSummary(this.scenario, categories));
+    const summary = buildHomeSummary(this.scenario, categories);
+    const cleanup = buildCleanup(this.scenario, this.cleanedIds);
+    return this.respond({
+      ...summary,
+      safeReclaimableBytes: cleanup.safeRecoverableBytes,
+      reviewRecoverableBytes: cleanup.reviewRecoverableBytes,
+      actionableOpportunityCount: cleanup.items.length
+    });
   }
 
   public async getStorage(): Promise<StorageData> {

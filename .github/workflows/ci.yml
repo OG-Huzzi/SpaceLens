@@ -1,8 +1,11 @@
 # CoreSight CI.
 #
-# Verifies the full Rust workspace (coresight-core, coresight-engine,
-# coresight-classifier, coresight-identity, coresight-history,
-# coresight-apps) on all three target platforms and the frontend scaffold.
+# Verifies the full Rust workspace and the frontend on the two platforms
+# CoreSight actually ships to: Windows and macOS. Linux is deliberately NOT a
+# gate — it is not a shipping target, so a Linux job would spend runner minutes
+# proving portability nobody consumes. Both platform families are still
+# covered: macOS exercises the unix `cfg` paths, Windows exercises the win32
+# ones, so no conditional-compilation branch goes untested.
 # `--workspace` is what keeps new crates in the gate automatically: adding a
 # workspace member adds it to every Rust job here with no CI edit.
 # Native Tauri compilation is intentionally NOT attempted yet: the shell
@@ -27,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

@@ -356,7 +356,8 @@ Cross-host `cargo check --all-targets` passes from Windows for the hardened
 `coresight-macos` on `x86_64-apple-darwin`. Native Windows MSVC ran the full
 workspace tests and clippy. A full-workspace non-Windows cross-build, which
 would include `libsqlite3-sys`'s bundled C source, was not attempted; CI builds
-and tests the whole workspace natively on Ubuntu, Windows, and macOS.
+and tests the whole workspace natively on Windows and macOS (the two shipping
+targets — Linux is intentionally not a gate).
 
 ## 21. Known limitations
 
