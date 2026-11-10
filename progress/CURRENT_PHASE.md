@@ -1,5 +1,124 @@
 # CoreSight — Current State
 
+PHASE 4.2 — jv16 Parity Layer: File Tools, System Tools, Web Tools & Reversible Action Execution
+
+**Status: IMPLEMENTED — local gate executed and green (`cargo fmt --all
+--check` 0, `cargo clippy --workspace --all-targets --all-features -- -D
+warnings` 0, `cargo test --workspace` 1173 passed / 0 failed / 11
+ignored).** Started from baseline
+`b6bea0a98f842798cf2266c2c31b447ea9880d13` (the Phase 4.1 commit).
+**Schema version stays 6** — no migration was added.
+
+### What this phase adds
+
+Four new workspace crates, each isolating one part of the jv16 PowerTools
+scope (see `docs/JV16_PARITY.md` for the authoritative mapping):
+
+| Crate | Covers jv16 tools | Shape |
+|---|---|---|
+| `coresight-filetools` | Big File Finder (9), Duplicate Finder (10), File Renamer (11), File Splitter (12), File Merger (13) | **Pure planning.** No I/O, no process, no network, no persistence. |
+| `coresight-systools` | Startup Timer (5), System Examiner (6), Task Manager (16) | **Pure models/analysis.** Inventories and explains; cannot disable, stop, or modify anything. |
+| `coresight-webtools` | Web Blocker (17), Internet Optimizer (18), plus cookie/privacy findings from System Cleaner (2) | **Pure planning.** Produces block-list and DNS-ranking plans; never writes the hosts file, never changes DNS, never touches the network. |
+| `coresight-actions` | File Deleter (14) — the reversible half | **The only crate that moves a file.** Reversible Trash/quarantine only. |
+
+`coresight-cleanup` stays provably I/O-free: the executor lives in
+`coresight-actions`, not beside the planner, so the planning crate's
+source-scan guard remains meaningful.
+
+### The safety chain, now end to end
+
+```
+coresight-cleanup::plan_cleanup      → proposal with reasoning
+coresight-cleanup::validate_plan     → veto (off-limits / partial / preview / bytes / gate)
+coresight-actions::authorize         → typed token; refuses anything but MoveToTrash
+coresight-actions::execute           → reversible move + rollback on any failure
+coresight-actions::verify            → re-stat what moved; never counts unconfirmed bytes
+```
+
+`AuthorizedPlan` has private fields and one constructor. `execute` additionally
+requires a `ConfirmedPreview` matching the plan id and byte total. The crate
+documents plainly what this guarantees (same plan, same numbers) and what it
+cannot (that a human actually read the preview) — the honesty rule applies to
+the safety types too.
+
+### Evidence discipline carried into every new crate
+
+- **Duplicates require a verified hash.** No hash ⇒ unknown, counted, never
+  grouped. Hard-link aliases collapse to one object with zero recoverable
+  bytes. Equal hash but different size is *not* a duplicate.
+- **Unknown age is not old age.** A missing `modified` never satisfies an age
+  filter; such files are excluded and counted.
+- **Rename plans are refused, not repaired**: duplicate targets, duplicate
+  sources, empty names, path separators in names, and rename cycles all
+  produce typed errors instead of a plan that would destroy data.
+- **Split/merge are plans with declared sizes**, so a truncated part is an
+  error rather than a silently corrupt merge.
+- **Startup items**: a privileged source (launch daemon, HKLM, Services) is
+  `OffLimits` even when its name matches a safe-vendor pattern. `Unknown`
+  sources are `OffLimits` — never offer to disable what you cannot classify.
+- **Task inventory**: apps and processes are a modelled distinction;
+  unattributable processes are counted, never dropped, and two app ids sharing
+  a display name are never merged.
+- **Web/DNS/privacy**: every rejected, duplicated, and whitelisted entry is
+  counted with a reason; `total_estimated_bytes` is `None` when any finding's
+  estimate is `None`; DNS ranking is never latency-only and never auto-switches.
+
+### Test growth
+
+1008 → **1173** (workspace, 0 failed, 11 ignored). New coverage:
+`coresight-filetools` 68, `coresight-systools` 24, `coresight-webtools` 42,
+`coresight-actions` 34.
+
+### Known limitations of `coresight-actions` — recorded, not hidden
+
+These are real gaps in the execution layer. They are listed here because a
+safety-critical crate that overstates its guarantee is worse than one that
+states its limits. Each needs closing before this code is allowed to touch a
+real user's files.
+
+1. **Target↔plan membership is unprovable.** `CleanupPlan` is category-level
+   and carries no path list, so `execute` cannot verify that the `targets` it
+   is handed are the items the user previewed. The token authorizes action
+   kinds and tiers only; the `ConfirmedPreview` binds plan id and plan byte
+   total, not the target list or their real sizes. **A caller that resolves a
+   wider path set than the preview would move unreviewed files.** Fix: plans
+   must carry resolved paths (Phase 4.3) before any UI wiring.
+2. **This is not the OS Trash.** `default_trash_directory()` is a plain
+   directory. Files are invisible to Finder/Explorer Trash, never purged by
+   the OS, and still consume disk. A real Trash integration is Phase 4.4.
+3. **No crash atomicity.** Each move is an independent `rename`; rollback only
+   covers failures this process observes. A kill between moves leaves a split
+   set with no report, and there is no `fsync`/durability step.
+4. **Reservation window.** `create_new` proves a destination name free but
+   cannot hold it until `rename`. A hostile same-user process targeting that
+   exact fresh name could have its file replaced. Two CoreSight processes
+   cannot collide (deterministic, never reuse a taken name). Closing it needs
+   `renameat2(RENAME_NOREPLACE)`, which is not portable.
+5. **A failed file rename can leave a zero-byte placeholder** at a fresh
+   destination name — no data, no user file touched, but visible.
+6. **`ConfirmedPreview` cannot prove a human looked.** Any caller can build one
+   from the plan it is about to execute. The type guarantees plan-id and byte
+   agreement only — the "user saw it" discipline is a UI-layer rule.
+7. **Byte honesty limits.** `freed_bytes` is a source-side measurement;
+   `verify` re-stats destinations but does not prove disk reclamation, and
+   directory sizes are best-effort lower bounds. Hard-linked files count their
+   logical size, which may overstate reclaimable space.
+8. **Cross-volume moves fail and roll back** — there is no copy-then-delete
+   path, by design.
+
+### What is NOT in this phase (explicit)
+
+- **No destructive execution anywhere.** `Delete` and `Wipe` exist in
+  `ActionKind` for classification only, and `authorize()` refuses every action
+  kind except `MoveToTrash` — so even a policy that permitted destruction
+  cannot reach these paths.
+- **No registry writes, no hosts-file writes, no DNS changes, no startup-item
+  changes, no process termination.** Those are plans and models only.
+- **No UI wiring and no Tauri commands** (Phases 8 and 9).
+- **Screenshots (7), File Wiper (15), System Fixer (1), Update Fixer (8),
+  Finder (4), and full Software Uninstaller (3) remain PLANNED** — see the
+  parity matrix for the exact status of all 18 tools and 4 platform features.
+
 PHASE 4.1 — Cleanup Planner, Safety Validator & Preview Model (in progress)
 
 **Status: IMPLEMENTED — local gate executed and green (fmt 0, clippy 0,

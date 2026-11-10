@@ -1,0 +1,19 @@
+[package]
+name = "coresight-filetools"
+version = "0.0.0"
+edition = "2021"
+description = "CoreSight file tools — pure, evidence-backed planning for duplicate detection, big-file discovery, bulk rename, file split and file merge. Performs no filesystem access, no execution, no network, no persistence."
+license = "UNLICENSED"
+
+[lib]
+name = "coresight_filetools"
+crate-type = ["lib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+coresight-classifier = { path = "../coresight-classifier" }
+coresight-history = { path = "../coresight-history" }
+
+[dev-dependencies]
+serde_json = "1"
+coresight-engine = { path = "../coresight-engine" }

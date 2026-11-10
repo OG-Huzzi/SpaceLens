@@ -1,0 +1,18 @@
+[package]
+name = "coresight-systools"
+version = "0.0.0"
+edition = "2021"
+description = "CoreSight system tools — pure models and analysis for startup-item inventory, system examination reports, and application (not process) task inventory. Performs no filesystem access, no registry access, no execution, no network, no persistence."
+license = "UNLICENSED"
+
+[lib]
+name = "coresight_systools"
+crate-type = ["lib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+coresight-classifier = { path = "../coresight-classifier" }
+coresight-apps = { path = "../coresight-apps" }
+
+[dev-dependencies]
+serde_json = "1"
