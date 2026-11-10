@@ -14,6 +14,11 @@
 //! * **Preview before action.** A [`Preview`] is generated from the plan
 //!   and is complete only when it names the destination and the undo
 //!   path. The validator blocks any plan whose preview is incomplete.
+//! * **Resolve before authorizing.** [`resolve_plan`] turns a plan plus one
+//!   [`Snapshot`](coresight_history::Snapshot) into the concrete files and
+//!   directories that a preview and an execution token must both be held to.
+//!   It is pure: the snapshot is data, not a disk read, and the module
+//!   reports the plan bytes it could not pin instead of hiding them.
 //! * **Safety veto, not persuasion.** The validator composes the
 //!   existing [`SafetyGate`](coresight_capabilities::safety::SafetyGate)
 //!   with CoreSight's protection domains (off-limits categories,
@@ -41,10 +46,14 @@
 
 pub mod planner;
 pub mod preview;
+pub mod resolve;
 pub mod validate;
 
 pub use planner::{plan_cleanup, PlannerOptions};
 pub use preview::{CleanupPreview, PreviewItem};
+pub use resolve::{
+    resolve_plan, PlanTarget, ResolveError, ResolveOptions, ResolvedItem, ResolvedPlan, TargetKind,
+};
 pub use validate::{validate_plan, validate_with_policy, ValidationReport, ValidationVerdict};
 
 /// Safety tier for one cleanup opportunity (UX contract, docs/UX_ARCHITECTURE.md).

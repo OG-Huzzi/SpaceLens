@@ -14,8 +14,10 @@ serde = { version = "1", features = ["derive"] }
 coresight-classifier = { path = "../coresight-classifier" }
 coresight-insights = { path = "../coresight-insights" }
 coresight-capabilities = { path = "../coresight-capabilities" }
+# `resolve` reads a `Snapshot` as plain data; it performs no history-store or
+# filesystem I/O. The dependency is on the pure model types only.
+coresight-history = { path = "../coresight-history" }
 
 [dev-dependencies]
 serde_json = "1"
 coresight-engine = { path = "../coresight-engine" }
-coresight-history = { path = "../coresight-history" }

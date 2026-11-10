@@ -1,5 +1,62 @@
 # CoreSight — Current State
 
+PHASE 4.3 + 8.0 — Resolved Plan Targets, Remaining Diagnostics, Finder, and the Five-Screen UI
+
+**Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` 0,
+`cargo test --workspace` **1249 passed / 0 failed / 11 ignored**,
+`npm run build` 0, `npm audit --audit-level=high` **0 vulnerabilities**.
+Started from baseline `dd95bd3f89fa6488cf721983b4c8c8f5c835b51b`.
+**Schema version stays 6** — no migration was added.
+
+### 4.3 — the target↔plan membership gap is CLOSED
+
+The Phase 4.2 record listed this as the most serious limitation of the
+execution layer. It is now fixed:
+
+- `coresight-cleanup::resolve_plan(plan, snapshot, options) -> ResolvedPlan`
+  turns a category-level plan into concrete `PlanTarget`s. Rules: category
+  must match exactly; entries with an observation error, an unknown size, or a
+  non-file/non-dir kind are **never** targets and are counted; a directory
+  target absorbs its same-category descendants so a nested path is never moved
+  twice; `unmapped_bytes` records plan bytes that could not be pinned to a real
+  file and is never silently zeroed; the target budget is a hard limit
+  (`TargetBudgetExceeded`) rather than a truncation, because a truncated target
+  list is a plan the user did not review.
+- `coresight-actions::authorize` now takes the `ResolvedPlan`, validates that it
+  actually describes the `CleanupPlan` (id, item count, per-item id/category/
+  tier, derived totals), and freezes an immutable path set.
+- `execute` rejects any target outside that set with
+  `ExecuteError::TargetNotInPlan`, checked **before the first move**.
+- `ConfirmedPreview` now binds plan id **+ resolved target count + resolved
+  byte total**, so a confirmation for a 3-file preview cannot authorise a
+  9-file execution.
+
+Proven by `execute_rejects_a_target_that_is_not_in_the_authorized_plan`,
+`execute_moves_exactly_the_targets_resolved_from_a_snapshot`, and
+`a_confirmation_for_a_three_target_preview_cannot_authorise_a_nine_target_execution`.
+
+**Residual gaps (still open, recorded honestly):** a stale snapshot means the
+token binds *paths*, not object identity, so a file replaced between scan and
+move would still be moved; a caller that fabricates a `ResolvedPlan` can
+authorise paths no human saw (types protect the honest resolve→confirm→execute
+path, not lying in-process code); directory dedupe is per category, so a
+directory in one category plus a descendant in another both authorise and the
+second move rolls back; directory byte totals are logical lower bounds.
+
+### 8.0 — the five-screen UI
+
+`src/` replaced the Phase 0 scaffold with Home / Storage / Cleanup / History /
+Drives, each carrying explicit empty, loading, error and incomplete states, plus
+a typed `CoreSightApi` with a deterministic in-memory `createMockApi()`,
+dark mode via CSS custom properties, and accessibility work (landmarks, labelled
+controls, keyboard-operable lists, `aria-live` scan status, reduced-motion).
+
+Invariants a reviewer must re-check: no action button outside Cleanup;
+`null` renders as "Unknown" and never `0 B`; off-limits categories are shown
+with a reason rather than hidden; partial scans announce themselves.
+**No live IPC exists yet** — Phase 9 replaces the mock with Tauri commands.
+
 PHASE 4.2 — jv16 Parity Layer: File Tools, System Tools, Web Tools & Reversible Action Execution
 
 **Status: IMPLEMENTED — local gate executed and green (`cargo fmt --all
@@ -76,13 +133,46 @@ safety-critical crate that overstates its guarantee is worse than one that
 states its limits. Each needs closing before this code is allowed to touch a
 real user's files.
 
-1. **Target↔plan membership is unprovable.** `CleanupPlan` is category-level
-   and carries no path list, so `execute` cannot verify that the `targets` it
-   is handed are the items the user previewed. The token authorizes action
-   kinds and tiers only; the `ConfirmedPreview` binds plan id and plan byte
-   total, not the target list or their real sizes. **A caller that resolves a
-   wider path set than the preview would move unreviewed files.** Fix: plans
-   must carry resolved paths (Phase 4.3) before any UI wiring.
+1. **Target↔plan membership — CLOSED (was unprovable; closed in the Phase 4.2
+   follow-up).**
+   `CleanupPlan` remains category-level, but
+   `coresight_cleanup::resolve_plan` now resolves it against one
+   `coresight_history::Snapshot` into a `ResolvedPlan`: concrete file and
+   directory targets per item (deterministic path order), each target's
+   logical bytes, `unmapped_bytes` for plan bytes that could not be pinned to a
+   target, and a count of entries skipped as unobservable, unsized, linked, or
+   otherwise not movable. `authorize(plan, resolved, policy)` refuses a
+   resolved plan that does not describe exactly that plan's items (plan id,
+   item count, item ids, categories, tiers, and the declared target count /
+   byte total versus the actual target lists) and freezes the flattened paths
+   into `AuthorizedPlan::authorized_paths()`. `execute` rejects any target
+   outside that set with `ExecuteError::TargetNotInPlan`, checking the whole
+   list before the first move — a caller that resolves a wider path set than
+   the preview now moves nothing. `ConfirmedPreview` additionally binds the
+   resolved plan's `target_count` and `total_bytes` (not the category-level
+   claim), so a confirmation rendered for a 3-file preview cannot authorize a
+   9-target execution. The old fix note ("plans must carry resolved paths") is
+   satisfied by this resolution step; the plan type itself stays
+   category-level by design.
+   **Residual gaps:** (a) resolution is only as fresh as its snapshot — the
+   token binds the reviewed **paths**, not filesystem object identity, so a
+   stale snapshot, or a path replaced between scan and move, means the right
+   path can hold a different object; (b) `ResolvedPlan`'s fields are plain
+   data, so a caller that fabricates one can still authorize paths no human
+   saw — the types protect the honest resolve → confirm → execute path, not
+   in-process code that lies (and `move_to_trash` remains public); (c) the
+   directory deduplication rule works within one category, so a directory
+   target in one category and a descendant target in another are both
+   authorized, and the executor will fail that second move and roll back;
+   (d) directory bytes are a logical lower bound over fully observed regular
+   files with known sizes (no allocated size, sparse/hard-link unaware), so a
+   directory target's bytes and `unmapped_bytes` can understate the space a
+   move touches; (e) the executor's existing sidecar rule still moves
+   `<name>-wal` / `<name>-shm` alongside their database without those sidecars
+   being separate `PlanTarget`s, and a sidecar that is also an independently
+   resolved target makes the second move fail and roll back. Membership checks
+   the named targets, exactly as before — it does not widen to the sidecar
+   set.
 2. **This is not the OS Trash.** `default_trash_directory()` is a plain
    directory. Files are invisible to Finder/Explorer Trash, never purged by
    the OS, and still consume disk. A real Trash integration is Phase 4.4.

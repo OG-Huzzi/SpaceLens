@@ -11,8 +11,15 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use common::{assert_inside, authorized_plan_for, confirmation_for};
-use coresight_actions::{execute, verify, DirectoryTrash, ExecuteError, TrashDestination};
+use common::{
+    assert_inside, authorized_plan_for, cleanup_item, cleanup_plan, confirmation_for,
+    reversible_policy,
+};
+use coresight_actions::{
+    authorize, execute, verify, ConfirmedPreview, DirectoryTrash, ExecuteError, TrashDestination,
+};
+use coresight_cleanup::{resolve_plan, ActionKind, ResolveOptions};
+use coresight_history::{ClassificationRef, ObservedEntry, ObservedKind, RunId, Snapshot};
 
 #[test]
 fn execute_moves_every_target_and_reports_the_moved_bytes() {
@@ -26,7 +33,7 @@ fn execute_moves_every_target_and_reports_the_moved_bytes() {
     assert_inside(root, &first);
     assert_inside(root, &second);
 
-    let authorized = authorized_plan_for(10);
+    let authorized = authorized_plan_for(vec![(first.clone(), 5), (second.clone(), 5)]);
     let confirmed = confirmation_for(&authorized);
     let report = execute(
         &authorized,
@@ -62,7 +69,9 @@ fn rollback_restores_every_file_already_moved() {
     assert_inside(root, &first);
     assert_inside(root, &missing);
 
-    let authorized = authorized_plan_for(5);
+    // Both paths are part of the reviewed set: the missing one is authorized
+    // so the failure under test is the move, not membership.
+    let authorized = authorized_plan_for(vec![(first.clone(), 5), (missing.clone(), 0)]);
     let confirmed = confirmation_for(&authorized);
     let error = execute(
         &authorized,
@@ -138,7 +147,7 @@ fn partial_rollback_names_the_file_it_could_not_restore_and_never_returns_ok() {
         first_source: first.clone(),
         calls: Cell::new(0),
     };
-    let authorized = authorized_plan_for(9);
+    let authorized = authorized_plan_for(vec![(first.clone(), 5), (second.clone(), 4)]);
     let confirmed = confirmation_for(&authorized);
     let error = execute(
         &authorized,
@@ -193,7 +202,7 @@ fn an_empty_target_list_is_refused_before_anything_is_touched() {
     let workspace = tempfile::tempdir().expect("a private tempdir");
     let root = workspace.path();
     let trash_dir = root.join("trash");
-    let authorized = authorized_plan_for(0);
+    let authorized = authorized_plan_for(vec![(root.join("unused.bin"), 5)]);
     let confirmed = confirmation_for(&authorized);
 
     let error = execute(
@@ -221,7 +230,7 @@ fn a_repeated_target_is_refused_before_the_first_move() {
     fs::write(&first, b"alpha").expect("writable");
     assert_inside(root, &first);
 
-    let authorized = authorized_plan_for(5);
+    let authorized = authorized_plan_for(vec![(first.clone(), 5)]);
     let confirmed = confirmation_for(&authorized);
     let error = execute(
         &authorized,
@@ -254,7 +263,7 @@ fn a_resolver_failure_on_the_first_target_reports_a_zero_entry_rollback() {
     fs::write(&first, b"alpha").expect("writable");
     assert_inside(root, &first);
 
-    let authorized = authorized_plan_for(5);
+    let authorized = authorized_plan_for(vec![(first.clone(), 5)]);
     let confirmed = confirmation_for(&authorized);
     let error = execute(
         &authorized,
@@ -269,4 +278,145 @@ fn a_resolver_failure_on_the_first_target_reports_a_zero_entry_rollback() {
         other => panic!("expected ExecuteError::RolledBack, got {other:?}"),
     }
     assert_eq!(fs::read(&first).expect("readable"), b"alpha");
+}
+
+#[test]
+fn execute_rejects_a_target_that_is_not_in_the_authorized_plan() {
+    let workspace = tempfile::tempdir().expect("a private tempdir");
+    let root = workspace.path();
+    let trash_dir = root.join("trash");
+    let reviewed = root.join("reviewed.bin");
+    let unreviewed = root.join("unreviewed.bin");
+    fs::write(&reviewed, b"12345").expect("writable");
+    fs::write(&unreviewed, b"67890").expect("writable");
+    assert_inside(root, &reviewed);
+    assert_inside(root, &unreviewed);
+
+    // The user reviewed exactly one path.
+    let authorized = authorized_plan_for(vec![(reviewed.clone(), 5)]);
+    assert_eq!(
+        authorized.authorized_paths().collect::<Vec<_>>(),
+        vec![reviewed.as_path()],
+        "the token freezes exactly the reviewed path"
+    );
+    assert!(authorized.is_path_authorized(&reviewed));
+    assert!(
+        !authorized.is_path_authorized(&unreviewed),
+        "a path outside the resolved plan is not authorized"
+    );
+
+    let confirmed = confirmation_for(&authorized);
+    // The reviewed path comes FIRST, so the test proves the whole list is
+    // validated before the first move rather than stopping at the bad entry.
+    let error = execute(
+        &authorized,
+        &confirmed,
+        &DirectoryTrash::new(&trash_dir),
+        &[reviewed.clone(), unreviewed.clone()],
+    )
+    .expect_err("a caller-resolved wider path set must be refused");
+
+    match error {
+        ExecuteError::TargetNotInPlan { path } => assert_eq!(path, unreviewed),
+        other => panic!("expected ExecuteError::TargetNotInPlan, got {other:?}"),
+    }
+    assert!(
+        reviewed.exists(),
+        "the authorized first target must not move when any target is unauthorized"
+    );
+    assert!(
+        unreviewed.exists(),
+        "the unreviewed file must not be touched"
+    );
+    assert!(
+        !trash_dir.exists(),
+        "membership is checked before any destination is resolved"
+    );
+
+    // Not a vacuous fixture: the same token and confirmation still execute the
+    // reviewed subset.
+    let report = execute(
+        &authorized,
+        &confirmed,
+        &DirectoryTrash::new(&trash_dir),
+        std::slice::from_ref(&reviewed),
+    )
+    .expect("the reviewed subset is authorized");
+    assert_eq!(report.moved.len(), 1);
+    assert!(!reviewed.exists());
+    assert_inside(root, &report.moved[0].destination);
+}
+
+#[test]
+fn execute_moves_exactly_the_targets_resolved_from_a_snapshot() {
+    fn observed(path: &Path, size: u64) -> ObservedEntry {
+        ObservedEntry {
+            path: path.to_path_buf(),
+            kind: ObservedKind::File,
+            size: Some(size),
+            object: None,
+            modified: None,
+            classification: Some(ClassificationRef {
+                category: "CACHE".to_string(),
+                subcategory: None,
+            }),
+            content_sha256: None,
+            observation_error: None,
+        }
+    }
+
+    let workspace = tempfile::tempdir().expect("a private tempdir");
+    let root = workspace.path();
+    let trash = DirectoryTrash::new(root.join("trash"));
+    let first = root.join("cache").join("one.bin");
+    let second = root.join("cache").join("two.bin");
+    fs::create_dir_all(first.parent().expect("the fixture parent")).expect("the fixture directory");
+    fs::write(&first, b"11111").expect("writable");
+    fs::write(&second, b"222").expect("writable");
+    assert_inside(root, &first);
+    assert_inside(root, &second);
+
+    // A real file that the snapshot never observed: resolution cannot
+    // authorize it, so it must be refused even though it exists.
+    let unobserved = root.join("not-observed.bin");
+    fs::write(&unobserved, b"zz").expect("writable");
+    assert_inside(root, &unobserved);
+
+    let snapshot = Snapshot {
+        run_id: RunId("run:resolve".to_string()),
+        entries: vec![observed(&first, 5), observed(&second, 3)],
+    };
+    let plan = cleanup_plan(
+        "plan:resolved",
+        vec![cleanup_item("CACHE:8", 8, ActionKind::MoveToTrash)],
+    );
+    let resolved = resolve_plan(&plan, &snapshot, &ResolveOptions::default())
+        .expect("both observed files resolve");
+    assert_eq!(resolved.target_count, 2);
+    assert_eq!(resolved.total_bytes, 8);
+    let authorized = authorize(plan, resolved, reversible_policy())
+        .expect("the resolved plan is reversible and complete");
+    let confirmed = ConfirmedPreview::from_resolved(authorized.resolved());
+    let targets: Vec<PathBuf> = authorized
+        .authorized_paths()
+        .map(Path::to_path_buf)
+        .collect();
+    assert_eq!(targets.len(), 2);
+
+    let mut widened = targets.clone();
+    widened.push(unobserved.clone());
+    let error = execute(&authorized, &confirmed, &trash, &widened)
+        .expect_err("an unobserved path must not be executable");
+    match error {
+        ExecuteError::TargetNotInPlan { path } => assert_eq!(path, unobserved),
+        other => panic!("expected ExecuteError::TargetNotInPlan, got {other:?}"),
+    }
+    assert!(first.exists() && second.exists() && unobserved.exists());
+
+    let report = execute(&authorized, &confirmed, &trash, &targets)
+        .expect("exactly the resolved paths execute");
+    assert_eq!(report.moved.len(), 2);
+    assert_eq!(report.freed_bytes, 8);
+    assert!(!first.exists() && !second.exists());
+    assert!(unobserved.exists(), "the unobserved file was never touched");
 }

@@ -3,9 +3,14 @@
 //! ## The contract it enforces
 //!
 //! * An [`AuthorizedPlan`] and a matching [`ConfirmedPreview`] are required
-//!   before anything is touched. The confirmation must name the same plan id
-//!   and the same byte total, or [`ExecuteError::NotConfirmed`] is returned
-//!   and no path is inspected.
+//!   before anything is touched. The confirmation must name the same plan id,
+//!   the same **resolved** target count, and the same **resolved** byte total,
+//!   or [`ExecuteError::NotConfirmed`] is returned and no path is inspected.
+//! * Every target must be one of the paths frozen into the [`AuthorizedPlan`]
+//!   by [`authorize`](crate::authorize). A target outside that set is
+//!   [`ExecuteError::TargetNotInPlan`], refused before the first move: the
+//!   executor can no longer be handed a wider path set than the preview that
+//!   was confirmed.
 //! * An empty target list is [`ExecuteError::NothingToDo`]; a repeated target
 //!   is [`ExecuteError::DuplicateTarget`], refused before the first move so a
 //!   caller cannot make the executor fail against itself.
@@ -17,18 +22,19 @@
 //!
 //! ## What `targets` is (and is not)
 //!
-//! [`CleanupPlan`](coresight_cleanup::CleanupPlan) is category-level: it
-//! carries action kinds, tiers, reasoning, and byte totals, but it has **no
-//! path list**. `targets` are therefore the *caller-resolved concrete paths
-//! for the plan's items* — the files and directories the user saw in the
-//! preview. The executor cannot widen the plan (it has no way to invent a
-//! path), but it also cannot prove a given target belongs to it; there is no
-//! membership test to perform because the plan contains no paths. The token
-//! authorizes the plan's *action kinds and tiers* — always exactly
-//! [`ActionKind::MoveToTrash`](coresight_cleanup::ActionKind) — not a set of
-//! paths. Path resolution and the honesty of the mapping from plan items to
-//! concrete paths are the caller's responsibility, and the preview
-//! confirmation binds the plan's numbers, not the target list.
+//! `targets` are the concrete paths the caller actually wants moved for this
+//! run. They are checked, one by one, against the immutable path set
+//! [`AuthorizedPlan::authorized_paths`] minted from the resolved plan, so an
+//! unreviewed path is refused instead of moved. Membership is **byte-exact**:
+//! the executor does not canonicalize, normalize, or case-fold a path, because
+//! a spelling the user never reviewed must not become executable.
+//!
+//! Membership proves *the path was in the reviewed set at resolution time*. It
+//! does not prove that the filesystem object currently at that path is the one
+//! the snapshot observed: a stale snapshot, or a file replaced between
+//! resolution and execution, is outside what a path list can bind. It also
+//! does not require `targets` to cover the whole authorized set — a caller may
+//! execute a user-deselected subset, and the report says exactly what moved.
 //!
 //! ## Ordering
 //!
@@ -76,6 +82,15 @@ pub enum ExecuteError {
     },
     /// No targets were supplied. Nothing was touched.
     NothingToDo,
+    /// A target is not one of the paths the resolved plan authorized.
+    ///
+    /// This is the membership gate: a caller that resolves a wider path set
+    /// than the preview it confirmed is refused here, before the first move,
+    /// so an unreviewed file cannot be moved.
+    TargetNotInPlan {
+        /// The unauthorized target.
+        path: PathBuf,
+    },
     /// The same target appears more than once. Nothing was touched.
     ///
     /// The second attempt would fail after the first had moved the entry (the
@@ -118,6 +133,11 @@ impl fmt::Display for ExecuteError {
                 )
             }
             ExecuteError::NothingToDo => f.write_str("no targets were supplied"),
+            ExecuteError::TargetNotInPlan { path } => write!(
+                f,
+                "target {} is not part of the resolved plan this token authorizes",
+                path.display()
+            ),
             ExecuteError::DuplicateTarget { target } => {
                 write!(f, "target {} appears more than once", target.display())
             }
@@ -164,8 +184,10 @@ impl std::error::Error for ExecuteError {}
 ///
 /// # Preconditions
 ///
-/// * `confirmed` must name the same plan id and byte total as `authorized`.
-/// * `targets` must be non-empty and contain no duplicates.
+/// * `confirmed` must name the same plan id, resolved target count, and
+///   resolved byte total as `authorized`.
+/// * `targets` must be non-empty and contain no duplicates, and every target
+///   must be in [`AuthorizedPlan::authorized_paths`].
 /// * Each target must exist and be movable into the destination the resolver
 ///   names (same volume, permissions).
 ///
@@ -198,12 +220,21 @@ pub fn execute(
             ),
         });
     }
-    if confirmed.total_bytes() != authorized.total_recoverable_bytes() {
+    if confirmed.target_count() != authorized.resolved_target_count() {
         return Err(ExecuteError::NotConfirmed {
             detail: format!(
-                "the confirmation shows {} bytes but the plan totals {}",
+                "the confirmation shows {} targets but the resolved plan has {}",
+                confirmed.target_count(),
+                authorized.resolved_target_count()
+            ),
+        });
+    }
+    if confirmed.total_bytes() != authorized.resolved_total_bytes() {
+        return Err(ExecuteError::NotConfirmed {
+            detail: format!(
+                "the confirmation shows {} bytes but the resolved plan totals {}",
                 confirmed.total_bytes(),
-                authorized.total_recoverable_bytes()
+                authorized.resolved_total_bytes()
             ),
         });
     }
@@ -216,6 +247,17 @@ pub fn execute(
         if !seen.insert(target.as_path()) {
             return Err(ExecuteError::DuplicateTarget {
                 target: target.clone(),
+            });
+        }
+    }
+
+    // The membership gate: every target must be one of the paths frozen into
+    // the token. Checked for the whole list before the first move, so a list
+    // that is half-authorized moves nothing at all.
+    for target in targets {
+        if !authorized.is_path_authorized(target) {
+            return Err(ExecuteError::TargetNotInPlan {
+                path: target.clone(),
             });
         }
     }

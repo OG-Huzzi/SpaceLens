@@ -1,12 +1,15 @@
 //! CoreSight **file-tools planning** — the pure, evidence-first layer for
-//! four jv16-PowerTools-class features: duplicate finding, big-file
-//! discovery, bulk rename, and file split/merge.
+//! five jv16-PowerTools-class features: duplicate finding, big-file
+//! discovery, bulk rename, file split/merge, and semantic name search.
 //!
 //! The crate is a **planner, not an executor**. Every function here reads
 //! only caller-provided facts and returns a reviewable plan. It performs no
 //! filesystem access, starts no process, opens no socket, and writes nothing
 //! (no persistence). The adapter that actually renames, splits, merges, or
-//! removes files is a later, separately authorized layer.
+//! removes files is a later, separately authorized layer. The Finder is the
+//! single exception to "no ambient reads": [`search`] reads the wall clock
+//! once for its age criterion, and [`search_at`] makes that instant an
+//! argument for callers that need a reproducible report.
 //!
 //! ## Evidence contracts
 //!
@@ -24,6 +27,10 @@
 //! * **Reject the dangerous plan.** Bulk rename refuses duplicate targets,
 //!   empty or invalid names, duplicate sources, and any target cycle rather
 //!   than leaving the executor to discover them mid-flight.
+//! * **Search hits explain themselves.** [`search`] matches an entry's OWN
+//!   name and never its parent path, publishes one sentence per satisfied
+//!   criterion, and never lets an unknown size, unknown age, or undecodable
+//!   category satisfy a criterion.
 //! * **Deterministic.** Every output is ordered by explicit keys; the same
 //!   input set in any order produces an identical plan.
 //! * **Bounded.** Group/member/result caps are explicit and every omitted
@@ -51,7 +58,14 @@ use coresight_classifier::Category;
 use coresight_history::{ObjectId, ObservedEntry, ObservedKind, Snapshot};
 use serde::{Deserialize, Serialize};
 
-/// Seconds in one day, used by the big-file age filter.
+mod finder;
+
+pub use finder::{
+    search, search_at, SearchHit, SearchKind, SearchOptions, SearchQuery, SearchReport,
+};
+
+/// Seconds in one day, used by the age criteria of the big-file finder and
+/// of the semantic Finder.
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Maximum number of zero-padding digits accepted by

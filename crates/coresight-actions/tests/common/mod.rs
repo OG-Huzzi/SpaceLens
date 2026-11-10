@@ -15,7 +15,10 @@
 use std::path::{Path, PathBuf};
 
 use coresight_capabilities::safety::ExecutionPolicy;
-use coresight_cleanup::{ActionKind, CleanupItem, CleanupPlan, SafetyTier};
+use coresight_cleanup::{
+    ActionKind, CleanupItem, CleanupPlan, PlanTarget, ResolvedItem, ResolvedPlan, SafetyTier,
+    TargetKind,
+};
 
 use coresight_actions::{authorize, AuthorizedPlan, ConfirmedPreview};
 
@@ -85,18 +88,77 @@ pub fn cleanup_plan(id: &str, items: Vec<CleanupItem>) -> CleanupPlan {
     }
 }
 
-/// A token for a one-item reversible plan worth `bytes`.
-pub fn authorized_plan_for(bytes: u64) -> AuthorizedPlan {
-    let plan = cleanup_plan(
-        "plan:exec",
-        vec![cleanup_item("CACHE:1", bytes, ActionKind::MoveToTrash)],
+/// A resolved plan that pins `plan`'s items to `per_item` targets, in order.
+///
+/// Every target is a regular file with the stated logical size. The declared
+/// `target_count` and `total_bytes` are derived from the target lists they
+/// describe, exactly as `resolve_plan` would derive them, so the fixture is a
+/// legitimate witness for `authorize`.
+pub fn resolved_plan(plan: &CleanupPlan, per_item: Vec<Vec<(PathBuf, u64)>>) -> ResolvedPlan {
+    assert_eq!(
+        per_item.len(),
+        plan.items.len(),
+        "fixture bug: one target list per plan item"
     );
-    authorize(plan, reversible_policy()).expect("the fixture plan is reversible and complete")
+    let mut items = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut target_count = 0usize;
+    for (item, targets) in plan.items.iter().zip(per_item) {
+        let targets: Vec<PlanTarget> = targets
+            .into_iter()
+            .map(|(path, bytes)| PlanTarget {
+                path,
+                bytes,
+                kind: TargetKind::File,
+            })
+            .collect();
+        for target in &targets {
+            total_bytes = total_bytes.saturating_add(target.bytes);
+            target_count += 1;
+        }
+        items.push(ResolvedItem {
+            item_id: item.id.clone(),
+            category: item.category,
+            tier: item.tier,
+            targets,
+        });
+    }
+    ResolvedPlan {
+        plan_id: plan.id.clone(),
+        items,
+        total_bytes,
+        target_count,
+        unmapped_bytes: plan.total_recoverable_bytes.saturating_sub(total_bytes),
+        unresolved_entries: 0,
+    }
 }
 
-/// The confirmation a UI would build from the preview of `authorized`.
+/// A token for a one-item reversible plan whose resolved targets are exactly
+/// `targets`.
+///
+/// The plan's claimed bytes are the sum of the target bytes, so the fixture
+/// has no unmapped bytes and the preview numbers are the plan's numbers.
+pub fn authorized_plan_for(targets: Vec<(PathBuf, u64)>) -> AuthorizedPlan {
+    let total = targets
+        .iter()
+        .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
+    let plan = cleanup_plan(
+        "plan:exec",
+        vec![cleanup_item("CACHE:1", total, ActionKind::MoveToTrash)],
+    );
+    let resolved = resolved_plan(&plan, vec![targets]);
+    authorize(plan, resolved, reversible_policy())
+        .expect("the fixture plan is reversible and complete")
+}
+
+/// The confirmation a UI would build from the resolved preview of
+/// `authorized`.
 pub fn confirmation_for(authorized: &AuthorizedPlan) -> ConfirmedPreview {
-    ConfirmedPreview::new(authorized.plan_id(), authorized.total_recoverable_bytes())
+    ConfirmedPreview::new(
+        authorized.plan_id(),
+        authorized.resolved_total_bytes(),
+        authorized.resolved_target_count(),
+    )
 }
 
 /// Fail if `path` does not resolve inside `root`.

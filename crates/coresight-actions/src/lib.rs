@@ -11,23 +11,32 @@
 //! ## The three gates between a plan and a moved file
 //!
 //! 1. **[`authorize()`] is the only way to obtain an [`AuthorizedPlan`].** It
-//!    runs [`validate_with_policy`](coresight_cleanup::validate_with_policy)
-//!    and returns the validator's binding reasons as
+//!    requires the plan **and** the [`ResolvedPlan`](coresight_cleanup::ResolvedPlan)
+//!    that resolved it against a concrete snapshot, checks that the resolved
+//!    plan describes exactly this plan's items, and runs
+//!    [`validate_with_policy`](coresight_cleanup::validate_with_policy),
+//!    returning the validator's binding reasons as
 //!    [`AuthorizeError::Blocked`] when the verdict is blocked, so a plan that
 //!    contains a destructive action can never hold a token under a policy
 //!    that forbids destructive actions. It then refuses any item whose action
 //!    is not [`ActionKind::MoveToTrash`](coresight_cleanup::ActionKind): this
 //!    crate has no deletion primitive, so a token for a `Delete` plan would
-//!    authorize something the executor cannot honestly perform. The fields
-//!    are private and there is no other constructor, no builder, and no
-//!    mutable accessor.
-//! 2. **[`execute()`] requires a [`ConfirmedPreview`]** whose plan id and byte
-//!    total match the authorized plan. A mismatch is
-//!    [`ExecuteError::NotConfirmed`] and no file is touched: execution cannot
-//!    begin on a plan the caller has not confirmed. The intended flow is
-//!    `CleanupPreview::from_plan(&plan)` → render → the user confirms →
-//!    `ConfirmedPreview::new(preview.plan_id, preview.total_bytes)`.
-//! 3. **Every move is recorded and every failure rolls back.** On the first
+//!    authorize something the executor cannot honestly perform. Finally it
+//!    freezes the resolved target paths into an immutable set exposed as
+//!    [`AuthorizedPlan::authorized_paths`]. The fields are private and there
+//!    is no other constructor, no builder, and no mutable accessor.
+//! 2. **[`execute()`] requires a [`ConfirmedPreview`]** whose plan id,
+//!    **resolved target count**, and **resolved byte total** match the
+//!    authorized plan. A mismatch is [`ExecuteError::NotConfirmed`] and no
+//!    file is touched: execution cannot begin on a plan the caller has not
+//!    confirmed. The intended flow is `resolve_plan` → render the resolved
+//!    targets → the user confirms → `ConfirmedPreview::from_resolved`.
+//! 3. **Every target must belong to the authorized plan.** A path outside
+//!    [`AuthorizedPlan::authorized_paths`] is
+//!    [`ExecuteError::TargetNotInPlan`], checked for the whole list before the
+//!    first move. A caller that resolves a wider path set than the preview
+//!    showed can no longer move the extra files.
+//! 4. **Every move is recorded and every failure rolls back.** On the first
 //!    failure, every pair recorded so far is restored in reverse order. If
 //!    all restores succeed the error is [`ExecuteError::RolledBack`]; if any
 //!    restore fails it is [`ExecuteError::PartialRollback`], which names the
@@ -61,16 +70,18 @@
 //!   the platform trash API (Finder / `IFileOperation`); this module is the
 //!   portable, testable, honest substitute. A file parked in this directory
 //!   still occupies disk space.
-//! * **Path resolution is the caller's responsibility.** [`CleanupPlan`](coresight_cleanup::CleanupPlan)
-//!   (see `coresight-cleanup`) is category-level: it carries action kinds,
-//!   tiers, byte totals, and reasoning, but **no path list**. `execute`
-//!   therefore cannot prove that a target belongs to the plan and does not
-//!   pretend to: `targets` are the caller-resolved concrete paths for the
-//!   plan's items. The token authorizes the plan's *action kinds and tiers*
-//!   (only [`ActionKind::MoveToTrash`](coresight_cleanup::ActionKind) items),
-//!   not a set of paths. A caller that resolves a wider path set than the
-//!   preview showed would move files the user never reviewed; that failure
-//!   lives above this crate, and the confirmation check does not catch it.
+//! * **Membership is checked; freshness is not provable.** [`authorize`]
+//!   takes a [`ResolvedPlan`](coresight_cleanup::ResolvedPlan) resolved
+//!   against a snapshot and freezes its paths; [`execute`] refuses any target
+//!   outside that set. The token therefore binds the reviewed **paths**, not
+//!   the filesystem objects currently at them: a stale snapshot, or a path
+//!   replaced/re-created between resolution and execution, means the path was
+//!   reviewed but its contents may differ. And [`ResolvedPlan`]'s fields are
+//!   plain data — a caller that fabricates one can still authorize paths no
+//!   human saw. The guarantee is against an honest caller who resolves a plan
+//!   and then widens the target list, not against in-process code that lies.
+//!   Namespaces, reparse points, and hard links are neither detected nor
+//!   refused here; resolution deliberately performs no I/O.
 //! * **No atomic multi-file transaction.** Each move is an independent
 //!   `rename`; a process killed mid-execute leaves files split between source
 //!   and destination with no rollback, because rollback runs only for

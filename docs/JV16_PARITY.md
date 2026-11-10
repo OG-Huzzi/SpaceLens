@@ -23,14 +23,14 @@ done until the bar is met and tested.
 
 | # | jv16 tool | CoreSight equivalent | Status | Quality bar (what "better" means concretely) |
 |---|---|---|---|---|
-| 1 | System Fixer | Diagnostics + typed findings (`coresight-systools`) | PLANNED | Every finding names its evidence; every repair is previewed, reversible, logged. No auto-fix without a typed safety verdict. |
+| 1 | System Fixer | Diagnostics engine (`coresight-systools::fixer`) | **IMPLEMENTED** | 9 evidence-only rules over caller-supplied facts. **A skipped check is not a passing check** — a rule whose observation is absent/failed/blank is counted in `skipped`, never reported as clean. No rule claims `repairable`; every repair step is `InspectOnly`. |
 | 2 | System Cleaner | Cleanup planner (`coresight-cleanup` + `coresight-insights`) | **IMPLEMENTED** | Category-level opportunities with what/why/how-much/what-stays/consequence; Safe/Review/OffLimits tiers enforced by a vetoing validator; partial knowledge blocks safe-tier plans. |
 | 3 | Software Uninstaller | Application inventory + footprint evidence (`coresight-apps`) | PARTIAL (discovery IMPLEMENTED, uninstall planning PLANNED) | Leftovers reconstructed from evidence (manifest, bundle metadata, install root), never from what the app self-reports. Per-item explanation. Reversible via restore. |
-| 4 | Finder | Semantic search | PLANNED | Search by category, size, age, hash — not raw path substrings. Results explain why they matched. |
+| 4 | Finder | `coresight-filetools::search` | **IMPLEMENTED** | Semantic, self-explaining search: every hit lists the criteria it actually satisfied. Unknown size/age never satisfies a bound in either mode. Name-only text matching (never a parent directory). |
 | 5 | Startup Timer | Startup inventory + explanation (`coresight-systools`) | **IMPLEMENTED** | Each startup item explained: what it does, why it runs, what disabling it costs. Privileged sources are OffLimits, never offered. |
 | 6 | System Examiner | Structured system report (`coresight-systools`) | **IMPLEMENTED** | Typed `Option` facts (unknown ≠ zero) + explicit source coverage so a partial report cannot read as complete. |
 | 7 | Screenshots | Local screenshot + export | PLANNED | Local-only by default. No cloud upload of user content. |
-| 8 | Update Fixer | Diagnostics (shared with #1) | PLANNED | Same bar as #1: evidence, preview, reversibility. |
+| 8 | Update Fixer | `coresight-systools::fixer::update_findings` | **IMPLEMENTED** | `Unknown` update state is neither healthy nor broken — its own finding with an explicit "could not determine". An error without a reported code says the code was not reported rather than inventing one. |
 | 9 | Big File Finder | `coresight-filetools::find_big_files` | **IMPLEMENTED** | Age evidence is required to call something "old"; unknown mtime is excluded and counted, never treated as old. |
 | 10 | Duplicate Finder | `coresight-filetools::find_duplicates` | **IMPLEMENTED** | **Hash-verified only.** No hash ⇒ not a duplicate. Hard-link aliases collapse to one object (recoverable space 0). Never groups by name/size/time. |
 | 11 | File Renamer | `coresight-filetools::plan_rename` | **IMPLEMENTED** | A full before/after plan, rejected on duplicate targets, duplicate sources, empty names, separators in names, and rename cycles. |
@@ -47,9 +47,27 @@ done until the bar is met and tested.
 | jv16 feature | CoreSight equivalent | Status | Note |
 |---|---|---|---|
 | Widget | Ambient scan indicator | PLANNED | Fits the "scanning is ambient, never blocking" UX rule; no floating window sprawl. |
-| Dark Mode | Theme support | PLANNED | System-theme following; part of the Phase 8 UI work. |
+| Dark Mode | System-theme dark mode via CSS custom properties | **IMPLEMENTED** | `prefers-color-scheme` driven; colours are tokens, not scattered hex literals. |
 | Multilingual UI | Contract-first strings | PLANNED | All user-facing strings live behind the `coresight.v1.*` contract, never hard-coded in components. |
 | Fully configurable | Typed settings | PLANNED | Preferences are typed; hiding a tool is a view preference, not a code change. |
+
+## Phase 8 UI status
+
+The five screens exist (`src/screens/`): **Home, Storage, Cleanup, History,
+Drives**, each with explicit empty / loading / error / partial states.
+
+Invariants the UI enforces, and which a reviewer should re-check on every change:
+
+| Invariant | Where it lives |
+|---|---|
+| Actions live in Cleanup only | No `<button>` in Home/Storage/History/Drives |
+| Unknown ≠ zero | `src/lib/format.ts` renders `"Unknown"` for every `null`, never `0 B` |
+| Off-limits categories are shown with a reason, not hidden | `CleanupScreen.tsx` off-limits panel |
+| Partial scans say they are partial | Coverage banner fed by the API's `coverage` field |
+| No filesystem logic in the UI | The UI displays paths; it never builds them |
+
+The UI is backed by `createMockApi()` — a deterministic in-memory fixture.
+**No live IPC exists yet**; Phase 9 replaces the mock with Tauri commands.
 
 ## Deliberate divergences (where CoreSight refuses to copy jv16)
 

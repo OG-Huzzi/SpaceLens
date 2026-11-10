@@ -17,3 +17,7 @@ coresight-capabilities = { path = "../coresight-capabilities" }
 [dev-dependencies]
 tempfile = "3"
 serde_json = "1"
+# Integration tests build a real `Snapshot` and resolve it through
+# `coresight_cleanup::resolve_plan`, so the membership gate is exercised
+# end-to-end rather than against a hand-built resolved plan.
+coresight-history = { path = "../coresight-history" }

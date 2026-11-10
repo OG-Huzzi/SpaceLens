@@ -1,10 +1,11 @@
-//! CoreSight **system tools** — pure, read-only inventory and explanation for
-//! three jv16 PowerTools-style surfaces, at CoreSight's honesty standard.
+//! CoreSight **system tools** — pure, read-only models and analysis for four
+//! jv16 PowerTools-style surfaces, at CoreSight's honesty standard.
 //!
 //! jv16 PowerTools ships a startup manager with a boot timer, a "System
-//! Examiner" hardware/software dump, and a process-based task manager. This
-//! crate models the *facts and the reasoning* behind those surfaces. It knows
-//! nothing about the machine it runs on and cannot change it.
+//! Examiner" hardware/software dump, a process-based task manager, a "System
+//! Fixer", and an "Update Fixer". This crate models the *facts and the
+//! reasoning* behind those surfaces. It knows nothing about the machine it
+//! runs on and cannot change it.
 //!
 //! ## What is here
 //!
@@ -18,6 +19,10 @@
 //! * [`tasks`] — application-level task inventory: processes are attributed
 //!   to an application identity, and processes that map to no application are
 //!   counted in `unattributed_processes` instead of disappearing.
+//! * [`fixer`] — a rule-based diagnostic engine over caller-supplied check
+//!   observations, plus a repair **proposal** whose every step is
+//!   [`fixer::RepairAction::InspectOnly`]. A rule without usable evidence is
+//!   counted as skipped; no rule in this build is repairable.
 //!
 //! ## Contract: inventory, never action
 //!
@@ -27,6 +32,20 @@
 //! is a *classification for a later, separately authorized UI action*; it is
 //! not an action performed here, and this crate contains no code path that
 //! could perform it.
+//!
+//! ## Contract: a skipped check is not a passing check
+//!
+//! [`fixer::DiagnosticRun::skipped`] counts rules that had no usable evidence.
+//! It never means "this rule passed": absent, failed, and blank observations
+//! are all counted as skipped, and [`fixer::run`] has no code path that can
+//! turn one into a clean result.
+//!
+//! ## Contract: no repair capability is claimed
+//!
+//! [`fixer::RuleFinding::repairable`] is `false` for every rule because this
+//! crate has no repair executor, and [`fixer::plan_repairs`] returns
+//! inspection steps only. The plan exists so the UI has a shape to render, not
+//! because a fix is available.
 //!
 //! ## Contract: unknown is not empty, and unknown is not safe
 //!
@@ -50,6 +69,8 @@
 //!   network, no persistence, no clock, no environment inspection.
 //! * No startup mutation of any kind, no "fix" action, and no diagnostic
 //!   claim beyond the evidence supplied by the caller.
+//! * No repair execution, no service control, no installer, no update
+//!   application, and no privilege escalation.
 //! * No guessing: source kinds are explicit, and the only "safe to disable"
 //!   names come from [`KNOWN_SAFE_VENDOR_UPDATER_PATTERNS`], a deliberately
 //!   tiny, documented list.
@@ -59,6 +80,8 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod fixer;
 
 pub mod startup {
     //! Startup-item inventory and explanation.
@@ -1493,6 +1516,11 @@ pub mod tasks {
 }
 
 pub use coresight_apps::ApplicationId;
+pub use fixer::{
+    default_rules, plan_repairs, run, update_findings, CheckObservation, DiagnosticRule,
+    DiagnosticRun, RepairAction, RepairPlan, RepairStep, RuleFinding, SystemFacts, UpdateCheck,
+    UpdateFinding, UpdateState,
+};
 pub use startup::{
     analyze_startup, known_vendor_updater_pattern, SourceCount, SourceKind, StartupFinding,
     StartupFolderScope, StartupItem, StartupOptions, StartupReport, StartupSource, StartupTier,
