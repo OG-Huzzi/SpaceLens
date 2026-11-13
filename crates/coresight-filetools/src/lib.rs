@@ -398,7 +398,13 @@ pub fn find_big_files(
                 continue;
             };
             let Ok(age) = now.duration_since(modified) else {
-                // A timestamp later than `now` proves nothing about age.
+                // A timestamp later than `now` proves nothing about age — clock
+                // skew, a restored backup, or a file written by a process with
+                // a wrong clock. It is excluded from the age-filtered result,
+                // but it MUST be counted as unknown: silently dropping it would
+                // leave `is_conclusive()` true and let the caller describe an
+                // incomplete report as the complete set of old large files.
+                unknown_age_entries = unknown_age_entries.saturating_add(1);
                 continue;
             };
             let required_seconds = min_age_days.saturating_mul(SECONDS_PER_DAY);
@@ -709,6 +715,33 @@ fn apply_rule(stem: &str, rule: &RenameRule, sequence_index: u64) -> String {
     }
 }
 
+/// Whether a produced name cannot be stored as a regular file name.
+///
+/// A rename plan is a promise the executor can move a file to this name. A
+/// Windows reserved device name, or a name ending in a space or a dot, breaks
+/// that promise: the name either names a device or is not storable as written.
+/// Refusing at planning time is the safe direction — the user is told the rule
+/// cannot be applied rather than left with a half-applied rename.
+fn is_unstorable_name(name: &str, original_name: &str) -> bool {
+    // Only reject a trailing space/dot the rule INTRODUCED. A pre-existing one
+    // is preserved (the file already exists under that name).
+    if name.ends_with(' ') && !original_name.ends_with(' ') {
+        return true;
+    }
+    if name.ends_with('.') && !original_name.ends_with('.') {
+        return true;
+    }
+    let stem = match name.split_once('.') {
+        Some((stem, _)) => stem,
+        None => name,
+    };
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r))
+}
+
 /// Builds one target path: transform the stem, reattach the original
 /// extension, keep the parent directory, and validate the result.
 fn build_target_name(
@@ -771,6 +804,22 @@ fn build_target_name(
         || new_name.contains('\\')
         || new_name.contains('\0')
     {
+        return Err(RenameError::InvalidName {
+            path: path.to_path_buf(),
+            name: new_name,
+        });
+    }
+    // A name ending in a space or a dot is not reliably storable, and a Windows
+    // reserved device name (`CON`, `NUL`, `COM1`, …) names a device rather than
+    // a file. Renaming a real file to either would produce a target the
+    // executor cannot honour, so the plan is refused instead.
+    //
+    // Exception: a trailing space or dot that the source name ALREADY has is
+    // preserved, not created. The file exists under that name today, so
+    // keeping it cannot produce an unstorable target — only *introducing* one
+    // can. (This is why the original name is passed in.)
+    let original_name = file_name.to_str().unwrap_or_default();
+    if is_unstorable_name(&new_name, original_name) {
         return Err(RenameError::InvalidName {
             path: path.to_path_buf(),
             name: new_name,

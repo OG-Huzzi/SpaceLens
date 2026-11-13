@@ -67,6 +67,15 @@
 //! and, in this build, correctly refuse. Scanning and history are not
 //! available by design.
 //!
+//! The ten aggregate view commands (`getGlobalStatus`, `getHomeSummary`,
+//! `getStorage`, `getCleanup`, `getDuplicateReport`, `getBigFileReport`,
+//! `getStartupReport`, `getDnsRanking`, `getBlockListPlan`,
+//! `getPrivacySummary`) are served from the latest completed scan plus the
+//! startup inventory, DNS ranking, block-list plan, and privacy findings the
+//! shell registers. They mirror `src/api.ts` field for field and return
+//! `SESSION_UNAVAILABLE` — never sample data — when the session lacks the
+//! facts.
+//!
 //! # Deliberate limitations (stated, not hidden)
 //!
 //! * No scan backend, history store, or executor is attached.
@@ -76,6 +85,13 @@
 //!   are derived from a retained previous scan.
 //! * A Category row is a semantic bucket; concrete paths exist only in a
 //!   plan preview, where they use the workspace's lossless path encoding.
+//! * Aggregate views read no clock. `generatedAt` and big-file ages use the
+//!   scan's registered completion instant; drive health, cleanup item age,
+//!   and scan progress (`startedAt`, `currentArea`, `etaSeconds`) are `null`
+//!   because this build records no evidence for them.
+//! * `DataCoverage::excludedAreas` is empty because a `ScanRecord` carries no
+//!   exclusion report; the field is not an assertion that nothing was
+//!   excluded.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -83,14 +99,19 @@
 pub mod command;
 pub mod dispatch;
 pub mod error;
+mod reports;
 pub mod response;
 pub mod session;
 mod time;
+pub mod views;
 
 pub use command::{
-    CancelScanRequest, Command, ConfirmPlanRequest, ExecutePlanRequest, GetCategoriesRequest,
-    GetDriveSummaryRequest, GetHistoryRequest, GetOpportunitiesRequest, ListDrivesRequest,
-    PreviewPlanRequest, StartScanRequest,
+    CancelScanRequest, Command, ConfirmPlanRequest, ExecutePlanRequest, GetBigFileReportRequest,
+    GetBlockListPlanRequest, GetCategoriesRequest, GetCleanupRequest, GetDnsRankingRequest,
+    GetDriveSummaryRequest, GetDuplicateReportRequest, GetGlobalStatusRequest, GetHistoryRequest,
+    GetHomeSummaryRequest, GetOpportunitiesRequest, GetPrivacySummaryRequest,
+    GetStartupReportRequest, GetStorageRequest, ListDrivesRequest, PreviewPlanRequest,
+    StartScanRequest,
 };
 pub use dispatch::{dispatch, dispatch_json, dispatch_value};
 pub use error::{codes, ApiError, Envelope};
@@ -101,3 +122,14 @@ pub use response::{
     ScanSummaryRef, ScanTotals, SnapshotCategoryDelta, SnapshotDelta, StartScanResponse,
 };
 pub use session::{ScanBackend, ScanRecord, Session, SessionError};
+pub use views::{
+    BigFileReportView, BigFileView, BlockListEntryView, BlockListPlanView, CategoryDeltaView,
+    CategoryTotals, ChangeSinceLastScanView, CleanupDataView, CleanupEvidence, CleanupEvidenceKind,
+    CleanupItemView, CleanupTier, DataCompleteness, DataCoverage, DnsExcludedCandidate,
+    DnsExclusionReasonView, DnsPrivacyPolicyView, DnsRankedCandidate, DnsRankingView,
+    DriveConnectionView, DriveHealthView, DriveKindView, DriveView, DuplicateGroupView,
+    DuplicateMemberView, DuplicateReportView, GlobalStatusView, HomeSummaryView,
+    PrivacyFindingKindView, PrivacyFindingView, PrivacySummaryView, RejectedDomainView,
+    ScanStateView, ScanStatusView, StartupItemView, StartupReportView, StartupTierView,
+    StorageDataView, StorageLocation,
+};

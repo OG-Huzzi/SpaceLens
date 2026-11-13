@@ -182,7 +182,13 @@ fn a_future_timestamp_is_not_evidence_of_age() {
     );
 
     assert!(report.candidates.is_empty());
-    assert_eq!(report.unknown_age_entries, 0);
+    // A future timestamp is unjudgeable, not "recent". Dropping it without
+    // counting would leave `is_conclusive()` true and let a caller describe an
+    // incomplete report as the complete set of old large files.
+    assert_eq!(
+        report.unknown_age_entries, 1,
+        "an unjudgeable timestamp must be counted as unknown age"
+    );
 }
 
 #[test]

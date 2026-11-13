@@ -48,6 +48,7 @@ pub mod planner;
 pub mod preview;
 pub mod resolve;
 pub mod validate;
+pub mod wipe;
 
 pub use planner::{plan_cleanup, PlannerOptions};
 pub use preview::{CleanupPreview, PreviewItem};
@@ -55,6 +56,10 @@ pub use resolve::{
     resolve_plan, PlanTarget, ResolveError, ResolveOptions, ResolvedItem, ResolvedPlan, TargetKind,
 };
 pub use validate::{validate_plan, validate_with_policy, ValidationReport, ValidationVerdict};
+pub use wipe::{
+    plan_wipe, plausible_deniability_supported, StorageMedium, WipeAssurance, WipeBlocker,
+    WipeOptions, WipePlan, WipeStep, WipeTarget,
+};
 
 /// Safety tier for one cleanup opportunity (UX contract, docs/UX_ARCHITECTURE.md).
 #[derive(

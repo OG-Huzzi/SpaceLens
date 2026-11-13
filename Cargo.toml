@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/coresight-core", "crates/coresight-engine", "crates/coresight-classifier", "crates/coresight-identity", "crates/coresight-history", "crates/coresight-apps", "crates/coresight-capabilities", "crates/coresight-macos", "crates/coresight-system-model", "crates/coresight-insights", "crates/coresight-cleanup", "crates/coresight-filetools", "crates/coresight-systools", "crates/coresight-webtools", "crates/coresight-actions", "crates/coresight-ipc"]
+members = ["crates/coresight-core", "crates/coresight-engine", "crates/coresight-classifier", "crates/coresight-identity", "crates/coresight-history", "crates/coresight-apps", "crates/coresight-capabilities", "crates/coresight-macos", "crates/coresight-system-model", "crates/coresight-insights", "crates/coresight-cleanup", "crates/coresight-filetools", "crates/coresight-systools", "crates/coresight-webtools", "crates/coresight-actions", "crates/coresight-ipc", "crates/coresight-adversarial"]
 
 # The Tauri shell crate (src-tauri) is a config-level contract and is NOT a
 # workspace member until MSVC-based CI exists, because linking Tauri on

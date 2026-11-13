@@ -3,32 +3,45 @@ import {
   CONTRACT_VERSION,
   isContractCompatible,
   type CoreSightApi,
-  type MockScenario,
-  type ScanStatus
+  type MockScenario
 } from "./api";
 import { createApi, isTauriRuntime } from "./api/tauriApi";
 import { useApiData } from "./hooks/useApiData";
-import { formatCount, formatDateTime } from "./lib/format";
+import { t, type MessageKey } from "./i18n";
+import { SCREEN_IDS, type ScreenId } from "./settings/schema";
+import { SettingsProvider, useSettings } from "./settings/SettingsProvider";
+import { ScanStatusStrip } from "./components/ScanStatusStrip";
 import { HomeScreen } from "./screens/HomeScreen";
 import { StorageScreen } from "./screens/StorageScreen";
 import { CleanupScreen } from "./screens/CleanupScreen";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { DrivesScreen } from "./screens/DrivesScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
 
-type ScreenId = "home" | "storage" | "cleanup" | "history" | "drives";
+/**
+ * Settings is a route, not a sixth pillar: the five pillar screens keep their
+ * one-question-per-screen contract, and Settings lives beside them in the shell
+ * as a drawer destination.
+ */
+type RouteId = ScreenId | "settings";
 
-const SCREENS: ReadonlyArray<{ id: ScreenId; label: string }> = [
-  { id: "home", label: "Home" },
-  { id: "storage", label: "Storage" },
-  { id: "cleanup", label: "Cleanup" },
-  { id: "history", label: "History" },
-  { id: "drives", label: "Drives" }
-];
+const SCREEN_LABELS: Record<ScreenId, MessageKey> = {
+  home: "app.nav.home",
+  storage: "app.nav.storage",
+  cleanup: "app.nav.cleanup",
+  history: "app.nav.history",
+  drives: "app.nav.drives"
+};
 
-function readScreenFromHash(): ScreenId {
+function isScreenId(value: string): value is ScreenId {
+  return (SCREEN_IDS as readonly string[]).includes(value);
+}
+
+function readRouteFromHash(): RouteId {
   const value = window.location.hash.replace(/^#\/?/, "");
-  const match = SCREENS.find((screen) => screen.id === value);
-  return match?.id ?? "home";
+  if (value === "settings") return "settings";
+  if (isScreenId(value)) return value;
+  return "home";
 }
 
 function readMockScenario(): MockScenario {
@@ -40,24 +53,6 @@ function readMockScenario(): MockScenario {
   return "ready";
 }
 
-function scanSummary(scan: ScanStatus): string {
-  if (scan.state === "idle") return "No completed scan yet";
-  if (scan.state === "scanning") {
-    return `Scanning · ${formatCount(scan.filesSeen, "entry", "entries")} seen${
-      scan.currentArea ? ` · ${scan.currentArea}` : ""
-    }`;
-  }
-  if (scan.state === "failed") return "Last scan failed · figures may be stale";
-  if (scan.state === "partial") {
-    return `Last scan completed with limits · ${formatCount(
-      scan.coverage.unreadableEntries,
-      "entry",
-      "entries"
-    )} could not be read`;
-  }
-  return `Scan complete · ${formatDateTime(scan.completedAt)}`;
-}
-
 function AppHeader({
   api,
   screen,
@@ -65,26 +60,23 @@ function AppHeader({
   onNavigate
 }: {
   api: CoreSightApi;
-  screen: ScreenId;
+  screen: RouteId;
   liveEngine: boolean;
-  onNavigate: () => void;
+  onNavigate: (next: RouteId) => void;
 }) {
-  const status = useApiData(() => api.getGlobalStatus(), [api]);
-
-  let scanText = "Reading scan status…";
-  let tone = "loading";
-  if (status.status === "error") {
-    scanText = "Scan status unavailable";
-    tone = "attention";
-  } else if (status.status === "ready") {
-    scanText = scanSummary(status.data.scan);
-    tone = status.data.scan.state;
-  }
+  const { settings } = useSettings();
+  const visibleScreens = SCREEN_IDS.filter((id) => settings.visibleScreens[id]);
+  const homeTarget: ScreenId = visibleScreens[0] ?? "home";
 
   return (
     <header className="app-header">
       <div className="app-header__topline">
-        <a className="brand" href="#home" onClick={onNavigate} aria-label="CoreSight home">
+        <a
+          className="brand"
+          href={`#${homeTarget}`}
+          onClick={() => onNavigate(homeTarget)}
+          aria-label={t("app.brand.home")}
+        >
           <span className="brand__mark" aria-hidden="true">
             <span />
             <span />
@@ -93,38 +85,42 @@ function AppHeader({
           <span className="brand__wordmark">CoreSight</span>
         </a>
 
-        <div className={`scan-indicator scan-indicator--${tone}`}>
-          <span className="scan-indicator__dot" aria-hidden="true" />
-          <span className="scan-indicator__label" aria-live="polite" aria-atomic="true">
-            {scanText}
-          </span>
-        </div>
-
         <span
           className="simulated-badge"
           title={
             liveEngine
-              ? "Reading the local CoreSight engine through the coresight.v1 contract."
-              : "Rendering deterministic local fixture data; no engine is attached."
+              ? t("app.header.engineLiveTitle")
+              : t("app.header.enginePreviewTitle")
           }
         >
-          {liveEngine ? "Local engine" : "Local preview"}
+          {liveEngine ? t("app.header.engineLive") : t("app.header.enginePreview")}
         </span>
       </div>
 
-      <nav className="primary-nav" aria-label="Primary">
+      <ScanStatusStrip api={api} showAdvancedDetails={settings.showAdvancedDetails} />
+
+      <nav className="primary-nav" aria-label={t("app.nav.label")}>
         <ul>
-          {SCREENS.map((item) => (
-            <li key={item.id}>
+          {visibleScreens.map((item) => (
+            <li key={item}>
               <a
-                href={`#${item.id}`}
-                aria-current={screen === item.id ? "page" : undefined}
-                onClick={onNavigate}
+                href={`#${item}`}
+                aria-current={screen === item ? "page" : undefined}
+                onClick={() => onNavigate(item)}
               >
-                {item.label}
+                {t(SCREEN_LABELS[item])}
               </a>
             </li>
           ))}
+          <li className="primary-nav__utility">
+            <a
+              href="#settings"
+              aria-current={screen === "settings" ? "page" : undefined}
+              onClick={() => onNavigate("settings")}
+            >
+              {t("app.nav.settings")}
+            </a>
+          </li>
         </ul>
       </nav>
     </header>
@@ -136,37 +132,38 @@ function ContractMismatch({ received, expected }: { received: string; expected: 
     <div className="screen">
       <header className="page-header">
         <div className="page-header__copy">
-          <p className="eyebrow">Contract check</p>
-          <h1 tabIndex={-1}>This UI cannot read the installed data contract</h1>
+          <p className="eyebrow">{t("contract.eyebrow")}</p>
+          <h1 tabIndex={-1}>{t("contract.title")}</h1>
           <p className="page-header__intro">
-            The locally returned contract is <code>{received}</code>, while this shell supports{" "}
-            <code>{expected}</code>. CoreSight refuses to guess at incompatible fields.
+            {t("contract.bodyBefore")}
+            <code>{received}</code>
+            {t("contract.bodyBetween")}
+            <code>{expected}</code>
+            {t("contract.bodyAfter")}
           </p>
         </div>
       </header>
       <section className="state-panel state-panel--error" role="alert">
-        <h2>No screens were populated</h2>
-        <p>
-          Update the app so the frontend and engine share a compatible contract version. No data
-          was changed and no cleanup path was opened.
-        </p>
+        <h2>{t("contract.panelTitle")}</h2>
+        <p>{t("contract.panelBody")}</p>
       </section>
     </div>
   );
 }
 
-export default function App() {
+function AppShell() {
+  const { settings } = useSettings();
   const scenario = useMemo(readMockScenario, []);
   const liveEngine = useMemo(isTauriRuntime, []);
   const api = useMemo(() => createApi({ mock: { scenario } }), [scenario]);
-  const [screen, setScreen] = useState<ScreenId>(readScreenFromHash);
+  const [route, setRoute] = useState<RouteId>(readRouteFromHash);
   const [focusCategoryId, setFocusCategoryId] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const mounted = useRef(false);
 
   useEffect(() => {
     const onHashChange = () => {
-      setScreen(readScreenFromHash());
+      setRoute(readRouteFromHash());
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
@@ -180,7 +177,7 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "auto" });
     const heading = mainRef.current?.querySelector("h1");
     if (heading instanceof HTMLElement) heading.focus({ preventScroll: true });
-  }, [screen]);
+  }, [route]);
 
   const globalStatus = useApiData(() => api.getGlobalStatus(), [api]);
   const contractCompatible =
@@ -188,14 +185,27 @@ export default function App() {
       ? isContractCompatible(globalStatus.data.contractVersion)
       : true;
 
-  function handleNavigate() {
+  function handleNavigate(next: RouteId) {
     setFocusCategoryId(null);
+    // Update immediately so navigation never waits on the browser's
+    // `hashchange` event; the hash still changes for bookmarking and history.
+    setRoute(next);
   }
 
   function openCategoryInStorage(categoryId: string) {
     setFocusCategoryId(categoryId);
     window.location.hash = "storage";
   }
+
+  // A screen switched off in Settings is not reachable by route either: the
+  // preference hides the destination, nothing about its capability changes.
+  const firstVisible: ScreenId = SCREEN_IDS.find((id) => settings.visibleScreens[id]) ?? "home";
+  const screen: RouteId =
+    route === "settings"
+      ? "settings"
+      : settings.visibleScreens[route]
+        ? route
+        : firstVisible;
 
   let content: ReactNode;
   if (!contractCompatible && globalStatus.status === "ready") {
@@ -207,6 +217,9 @@ export default function App() {
     );
   } else {
     switch (screen) {
+      case "settings":
+        content = <SettingsScreen />;
+        break;
       case "storage":
         content = <StorageScreen api={api} focusCategoryId={focusCategoryId} />;
         break;
@@ -228,26 +241,29 @@ export default function App() {
   return (
     <>
       <a className="skip-link" href="#content">
-        Skip to content
+        {t("app.skipToContent")}
       </a>
-      <AppHeader
-        api={api}
-        screen={screen}
-        liveEngine={liveEngine}
-        onNavigate={handleNavigate}
-      />
+      <AppHeader api={api} screen={screen} liveEngine={liveEngine} onNavigate={handleNavigate} />
       <main id="content" ref={mainRef} tabIndex={-1}>
         {content}
       </main>
       <footer className="app-footer">
+        <p>{t("app.footer.privacy")}</p>
         <p>
-          CoreSight analyses storage locally. No paths, names, or hashes leave this device.
-        </p>
-        <p>
-          Phase 8 UI shell · contract {CONTRACT_VERSION} ·{" "}
-          {liveEngine ? "live local engine" : "deterministic mock data"}
+          {t("app.footer.build", {
+            contract: CONTRACT_VERSION,
+            mode: liveEngine ? t("app.footer.modeLive") : t("app.footer.modePreview")
+          })}
         </p>
       </footer>
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <SettingsProvider>
+      <AppShell />
+    </SettingsProvider>
   );
 }

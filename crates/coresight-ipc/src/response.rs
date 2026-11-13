@@ -21,6 +21,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::views::{
+    BigFileReportView, BlockListPlanView, CleanupDataView, DnsRankingView, DuplicateReportView,
+    GlobalStatusView, HomeSummaryView, PrivacySummaryView, StartupReportView, StorageDataView,
+};
+
 /// The `startScan` success payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -421,6 +426,36 @@ pub enum Response {
     /// `listDrives` result (a `Drive[]` payload).
     #[serde(rename = "coresight.v1.listDrives")]
     Drives(Vec<Drive>),
+    /// `getGlobalStatus` result.
+    #[serde(rename = "coresight.v1.getGlobalStatus")]
+    GlobalStatus(GlobalStatusView),
+    /// `getHomeSummary` result.
+    #[serde(rename = "coresight.v1.getHomeSummary")]
+    HomeSummary(HomeSummaryView),
+    /// `getStorage` result.
+    #[serde(rename = "coresight.v1.getStorage")]
+    Storage(StorageDataView),
+    /// `getCleanup` result.
+    #[serde(rename = "coresight.v1.getCleanup")]
+    Cleanup(CleanupDataView),
+    /// `getDuplicateReport` result.
+    #[serde(rename = "coresight.v1.getDuplicateReport")]
+    DuplicateReport(DuplicateReportView),
+    /// `getBigFileReport` result.
+    #[serde(rename = "coresight.v1.getBigFileReport")]
+    BigFileReport(BigFileReportView),
+    /// `getStartupReport` result.
+    #[serde(rename = "coresight.v1.getStartupReport")]
+    StartupReport(StartupReportView),
+    /// `getDnsRanking` result.
+    #[serde(rename = "coresight.v1.getDnsRanking")]
+    DnsRanking(DnsRankingView),
+    /// `getBlockListPlan` result.
+    #[serde(rename = "coresight.v1.getBlockListPlan")]
+    BlockListPlan(BlockListPlanView),
+    /// `getPrivacySummary` result.
+    #[serde(rename = "coresight.v1.getPrivacySummary")]
+    PrivacySummary(PrivacySummaryView),
 }
 
 impl Response {
@@ -437,6 +472,16 @@ impl Response {
             Response::ExecutePlan(_) => "coresight.v1.executePlan",
             Response::History(_) => "coresight.v1.getHistory",
             Response::Drives(_) => "coresight.v1.listDrives",
+            Response::GlobalStatus(_) => "coresight.v1.getGlobalStatus",
+            Response::HomeSummary(_) => "coresight.v1.getHomeSummary",
+            Response::Storage(_) => "coresight.v1.getStorage",
+            Response::Cleanup(_) => "coresight.v1.getCleanup",
+            Response::DuplicateReport(_) => "coresight.v1.getDuplicateReport",
+            Response::BigFileReport(_) => "coresight.v1.getBigFileReport",
+            Response::StartupReport(_) => "coresight.v1.getStartupReport",
+            Response::DnsRanking(_) => "coresight.v1.getDnsRanking",
+            Response::BlockListPlan(_) => "coresight.v1.getBlockListPlan",
+            Response::PrivacySummary(_) => "coresight.v1.getPrivacySummary",
         }
     }
 }

@@ -44,7 +44,7 @@ function HomeContent({ home }: { home: HomeSummary }) {
           title="How is your storage doing?"
           description="One calm summary of the drives CoreSight can see, with every number tied to its context."
         />
-        <CoverageBanner coverage={coverage} context="storage scan" />
+        <CoverageBanner coverage={coverage} context="storageScan" />
         <EmptyState
           title="No drive summary yet"
           description="CoreSight has not completed a storage scan on this device. Nothing is being measured in the background."
@@ -76,7 +76,7 @@ function HomeContent({ home }: { home: HomeSummary }) {
         }
       />
 
-      <CoverageBanner coverage={coverage} context="storage scan" />
+      <CoverageBanner coverage={coverage} context="storageScan" />
 
       <section className="home-hero" aria-labelledby="reclaim-heading">
         <div className="home-hero__lead">

@@ -59,12 +59,16 @@ pub mod codes {
     pub const DRIVE_NOT_FOUND: &str = "DRIVE_NOT_FOUND";
     /// Selected opportunities cannot be pinned to concrete targets.
     pub const PLAN_UNRESOLVABLE: &str = "PLAN_UNRESOLVABLE";
+    /// The session holds no completed scan or no registered report for a
+    /// command that requires one. This is the honest "not available here"
+    /// outcome; the dispatcher never substitutes sample data or zeros.
+    pub const SESSION_UNAVAILABLE: &str = "SESSION_UNAVAILABLE";
 
     /// Every code this crate can emit (or reserves from the contract).
     ///
     /// The list is asserted unique by the contract tests so a typo cannot
     /// silently create a second spelling of the same outcome.
-    pub const ALL: [&str; 17] = [
+    pub const ALL: [&str; 18] = [
         SCAN_IN_PROGRESS,
         DRIVE_OFFLINE,
         PLAN_REJECTED_UNSAFE,
@@ -82,6 +86,7 @@ pub mod codes {
         PLAN_NOT_CONFIRMED,
         DRIVE_NOT_FOUND,
         PLAN_UNRESOLVABLE,
+        SESSION_UNAVAILABLE,
     ];
 }
 

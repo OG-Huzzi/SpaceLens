@@ -12,9 +12,9 @@ import { useApiData } from "../hooks/useApiData";
 import {
   formatAge,
   formatBytes,
-  formatCount,
   formatDateTime
 } from "../lib/format";
+import { t, tCount } from "../i18n";
 import {
   CoverageBanner,
   DataValue,
@@ -37,21 +37,20 @@ function toActionError(error: unknown): ApiError {
   if (isApiError(error)) return error;
   return {
     code: "UNEXPECTED_UI_ERROR",
-    message: "This action could not be completed.",
-    detail: "Nothing was moved. Return to the opportunities list and try again."
+    message: t("cleanup.error.message"),
+    detail: t("cleanup.error.detail")
   };
 }
 
+function entryCount(value: number | null): string {
+  if (value === null) return t("state.unknown");
+  return tCount(value, "unit.entry.one", "unit.entry.other");
+}
+
 function blockingReason(item: CleanupItem, scanIncomplete: boolean): string | null {
-  if (scanIncomplete) {
-    return "Cleanup is blocked because the scan is incomplete. A complete scan is required before any file can move.";
-  }
-  if (!item.previewable) {
-    return "This item has no complete preview route and cannot be confirmed.";
-  }
-  if (item.recoverableBytes === null) {
-    return "The recoverable amount is unknown, so CoreSight cannot build a complete preview.";
-  }
+  if (scanIncomplete) return t("cleanup.blocking.scanIncomplete");
+  if (!item.previewable) return t("cleanup.blocking.noPreview");
+  if (item.recoverableBytes === null) return t("cleanup.blocking.unknownBytes");
   return null;
 }
 
@@ -74,17 +73,15 @@ function CleanupList({
   return (
     <div className="screen screen--cleanup">
       <PageHeader
-        eyebrow="Cleanup"
-        title="What can I safely remove?"
-        description="Ranked opportunities with their reasoning attached. One review, one preview, one explicit confirmation."
+        eyebrow={t("cleanup.eyebrow")}
+        title={t("cleanup.title")}
+        description={t("cleanup.description")}
         aside={
           <div className="snapshot-stamp">
-            <span>Last scan</span>
+            <span>{t("cleanup.stamp.lastScan")}</span>
             <strong>{formatDateTime(data.lastScanAt)}</strong>
             <span className="snapshot-stamp__note">
-              {partial
-                ? "Partial scan · cleanup actions blocked"
-                : "Actions available on this screen only"}
+              {partial ? t("cleanup.stamp.partial") : t("cleanup.stamp.actionsHere")}
             </span>
           </div>
         }
@@ -94,47 +91,45 @@ function CleanupList({
 
       <section className="cleanup-summary" aria-labelledby="cleanup-summary-title">
         <div>
-          <p className="eyebrow">Safe estimate</p>
+          <p className="eyebrow">{t("cleanup.summary.safeEyebrow")}</p>
           <h2 id="cleanup-summary-title">
             <DataValue partial={partial}>{formatBytes(data.safeRecoverableBytes)}</DataValue>
           </h2>
-          <p>Across safe-tier opportunities. Nothing is moved automatically.</p>
+          <p>{t("cleanup.summary.safeBody")}</p>
         </div>
         <div>
-          <p className="eyebrow">Needs review</p>
+          <p className="eyebrow">{t("cleanup.summary.reviewEyebrow")}</p>
           <p className="cleanup-summary__figure">
             <DataValue partial={partial}>{formatBytes(data.reviewRecoverableBytes)}</DataValue>
           </p>
-          <p>Review-only opportunities, never bundled into a safe action.</p>
+          <p>{t("cleanup.summary.reviewBody")}</p>
         </div>
         <div className="cleanup-summary__rules">
-          <strong>No clean-everything path exists.</strong>
-          <p>
-            Each opportunity has its own preview. Off-limits categories stay visible below with
-            the reason they cannot be selected.
-          </p>
+          <strong>{t("cleanup.rules.title")}</strong>
+          <p>{t("cleanup.rules.body")}</p>
         </div>
       </section>
 
       {scanIncomplete ? (
         <InlineNotice tone="attention">
-          <strong>Actions are disabled while this scan is incomplete.</strong>
-          <p>
-            Safe-tier plans require complete knowledge. The opportunities remain visible so you
-            can inspect what CoreSight found, but nothing can be previewed for confirmation.
-          </p>
+          <strong>{t("cleanup.blocked.title")}</strong>
+          <p>{t("cleanup.blocked.body")}</p>
         </InlineNotice>
       ) : null}
 
       <section className="panel" aria-labelledby="opportunities-heading">
         <SectionHeading
           id="opportunities-heading"
-          title="Opportunities"
-          description="Engine order. Expand one item to read why it is suggested, what stays untouched, and what happens next."
+          title={t("cleanup.opportunities.title")}
+          description={t("cleanup.opportunities.description")}
           aside={
             <span className="eyebrow">
               <DataValue partial={partial}>
-                {formatCount(actionItems.length, "opportunity", "opportunities")}
+                {tCount(
+                  actionItems.length,
+                  "unit.opportunity.one",
+                  "unit.opportunity.other"
+                )}
               </DataValue>
             </span>
           }
@@ -142,16 +137,16 @@ function CleanupList({
 
         {actionItems.length === 0 ? (
           <EmptyState
-            title="No cleanup opportunities right now"
+            title={t("cleanup.empty.noScanTitle")}
             description={
               data.lastScanAt === null
-                ? "There is no completed scan to produce cleanup opportunities. This is an absence of data, not a claim that nothing can be cleaned."
-                : "The last completed scan found nothing eligible for safe or review cleanup. This is an empty result, not a hidden recommendation."
+                ? t("cleanup.empty.noScanDescription")
+                : t("cleanup.empty.noItemsDescription")
             }
             nextStep={
               data.lastScanAt === null
-                ? "Once a complete scan finishes, safe and review opportunities will appear here with their reasoning."
-                : "Keep the off-limits summary below for context. New opportunities appear after the next completed scan."
+                ? t("cleanup.empty.noScanNext")
+                : t("cleanup.empty.noItemsNext")
             }
           />
         ) : (
@@ -169,7 +164,7 @@ function CleanupList({
                       <p>{item.whatItIs}</p>
                     </div>
                     <div className="cleanup-card__recoverable">
-                      <span>Expected recovery</span>
+                      <span>{t("cleanup.card.expectedRecovery")}</span>
                       <DataValue partial={partial}>
                         {formatBytes(item.recoverableBytes)}
                       </DataValue>
@@ -179,26 +174,30 @@ function CleanupList({
                       type="button"
                       aria-expanded={expanded}
                       aria-controls={`cleanup-detail-${item.id}`}
-                      aria-label={`${
-                        expanded ? "Hide details for" : "Read details for"
-                      } ${item.title}`}
+                      aria-label={
+                        expanded
+                          ? t("cleanup.card.hideDetailsFor", { title: item.title })
+                          : t("cleanup.card.readDetailsFor", { title: item.title })
+                      }
                       onClick={() => setExpandedId(expanded ? null : item.id)}
                     >
-                      {expanded ? "Hide details" : "Read the details"}
+                      {expanded
+                        ? t("cleanup.card.hideDetails")
+                        : t("cleanup.card.readDetails")}
                     </button>
                   </div>
 
                   <div className="cleanup-card__quick-facts">
                     <DataValue partial={partial}>
                       {item.estimatedAgeDays === null
-                        ? "Age unknown"
-                        : `Oldest evidence: ${formatAge(item.estimatedAgeDays)}`}
+                        ? t("cleanup.card.ageUnknown")
+                        : t("cleanup.card.oldestEvidence", {
+                            age: formatAge(item.estimatedAgeDays)
+                          })}
                     </DataValue>
-                    <DataValue partial={partial}>
-                      {formatCount(item.itemCount, "entry", "entries")}
-                    </DataValue>
+                    <DataValue partial={partial}>{entryCount(item.itemCount)}</DataValue>
                     {item.recoverableBytes === null ? (
-                      <span>Recovery amount unknown</span>
+                      <span>{t("cleanup.card.recoveryUnknown")}</span>
                     ) : null}
                   </div>
 
@@ -209,21 +208,21 @@ function CleanupList({
                     >
                       <div className="explanation-grid">
                         <section>
-                          <h4>Why CoreSight suggests this</h4>
+                          <h4>{t("cleanup.card.why")}</h4>
                           <p>{item.why}</p>
                         </section>
                         <section>
-                          <h4>What stays untouched</h4>
+                          <h4>{t("cleanup.card.stays")}</h4>
                           <p>{item.whatStaysUntouched}</p>
                         </section>
                         <section>
-                          <h4>What happens after removal</h4>
+                          <h4>{t("cleanup.card.consequence")}</h4>
                           <p>{item.consequence}</p>
                         </section>
                       </div>
 
                       {item.evidence.length > 0 ? (
-                        <ul className="evidence-list" aria-label="Evidence">
+                        <ul className="evidence-list" aria-label={t("cleanup.card.evidence")}>
                           {item.evidence.map((note) => (
                             <li key={`${item.id}-${note.label}`}>
                               <span className="evidence-list__kind">{note.kind}</span>
@@ -238,11 +237,8 @@ function CleanupList({
 
                       <div className="cleanup-card__action">
                         <div>
-                          <strong>Preview is mandatory.</strong>
-                          <p>
-                            The next step shows exactly what would move, where it would go, and
-                            how to undo it. No file moves until you confirm.
-                          </p>
+                          <strong>{t("cleanup.card.previewMandatory")}</strong>
+                          <p>{t("cleanup.card.previewMandatoryBody")}</p>
                           {reason ? (
                             <p className="blocked-reason" id={blockedId}>
                               {reason}
@@ -256,7 +252,7 @@ function CleanupList({
                           aria-describedby={reason ? blockedId : undefined}
                           onClick={() => onPreview(item)}
                         >
-                          Preview what would move
+                          {t("cleanup.card.previewButton")}
                         </button>
                       </div>
                     </div>
@@ -271,19 +267,23 @@ function CleanupList({
       <section className="panel panel--offlimits" aria-labelledby="offlimits-heading">
         <SectionHeading
           id="offlimits-heading"
-          title="Visibly excluded"
-          description="Off-limits categories are not hidden. They are shown so the boundary is clear, with no action path."
+          title={t("cleanup.offlimits.title")}
+          description={t("cleanup.offlimits.description")}
           aside={
             <span className="eyebrow">
-              {formatCount(offLimits.length, "excluded category", "excluded categories")}
+              {tCount(
+                offLimits.length,
+                "unit.excludedCategory.one",
+                "unit.excludedCategory.other"
+              )}
             </span>
           }
         />
         {offLimits.length === 0 ? (
           <p className="microcopy">
             {data.lastScanAt === null
-              ? "No off-limits categories are available without a completed scan."
-              : "No off-limits categories were reported for this drive."}
+              ? t("cleanup.offlimits.emptyNoScan")
+              : t("cleanup.offlimits.empty")}
           </p>
         ) : (
           <ul className="offlimits-list">
@@ -295,18 +295,19 @@ function CleanupList({
                 </div>
                 <p>{item.whatItIs}</p>
                 <p className="offlimits-list__reason">
-                  <strong>Why it is excluded:</strong>{" "}
-                  {item.offLimitsReason ?? "Protected by engine policy."}
+                  <strong>{t("cleanup.offlimits.why")}</strong>{" "}
+                  {item.offLimitsReason ?? t("cleanup.offlimits.fallbackReason")}
                 </p>
                 <p className="microcopy">
-                  {item.observedBytes === null
-                    ? "Size unknown — this category is never counted as reclaimable."
-                    : (
-                      <DataValue partial={partial}>
-                        {formatBytes(item.observedBytes)} observed. This is context, not
-                        recoverable space.
-                      </DataValue>
-                    )}
+                  {item.observedBytes === null ? (
+                    t("cleanup.offlimits.sizeUnknown")
+                  ) : (
+                    <DataValue partial={partial}>
+                      {t("cleanup.offlimits.observed", {
+                        size: formatBytes(item.observedBytes)
+                      })}
+                    </DataValue>
+                  )}
                 </p>
               </li>
             ))}
@@ -349,21 +350,21 @@ function PreviewView({
   return (
     <div className="screen screen--cleanup">
       <PageHeader
-        eyebrow="Cleanup · Preview"
-        title={`Review: ${item.title}`}
-        description="Step two of two. This is the exact statement you confirm; nothing has moved yet."
+        eyebrow={t("cleanup.preview.pageEyebrow")}
+        title={t("cleanup.preview.title", { title: item.title })}
+        description={t("cleanup.preview.description")}
       />
       <button className="back-link" type="button" onClick={onBack}>
-        <span aria-hidden="true">←</span> Back to opportunities
+        <span aria-hidden="true">←</span> {t("cleanup.preview.back")}
       </button>
 
       {previewState.status === "loading" ? (
         <section className="state-panel state-panel--loading" role="status" aria-live="polite">
           <div className="state-panel__heading">
             <span className="spinner" aria-hidden="true" />
-            <h2>Building the exact preview</h2>
+            <h2>{t("cleanup.preview.building")}</h2>
           </div>
-          <p>Checking the selected items, destination, undo route, and byte accounting.</p>
+          <p>{t("cleanup.preview.buildingBody")}</p>
         </section>
       ) : null}
 
@@ -371,24 +372,26 @@ function PreviewView({
 
       {preview ? (
         <>
-          <CoverageBanner coverage={preview.coverage} context="cleanup preview" />
+          <CoverageBanner coverage={preview.coverage} context="cleanupPreview" />
           <article className="preview-sheet" aria-labelledby="preview-heading">
             <header className="preview-sheet__header">
-              <p className="eyebrow">Exact preview · nothing has moved</p>
+              <p className="eyebrow">{t("cleanup.preview.eyebrow")}</p>
               <h2 id="preview-heading">{item.title}</h2>
               <p>{preview.consequence}</p>
               <div className="preview-sheet__total">
-                <span>Would be moved</span>
+                <span>{t("cleanup.preview.wouldMove")}</span>
                 <DataValue partial={preview.coverage.completeness !== "complete"}>
                   {formatBytes(preview.totalBytes)}
                 </DataValue>
-                <span>{formatCount(preview.items.length, "preview line", "preview lines")}</span>
+                <span>
+                  {tCount(preview.items.length, "unit.previewLine.one", "unit.previewLine.other")}
+                </span>
               </div>
             </header>
 
             <div className="preview-columns">
               <section aria-labelledby="what-moves-heading">
-                <h3 id="what-moves-heading">Exactly what would move</h3>
+                <h3 id="what-moves-heading">{t("cleanup.preview.heading")}</h3>
                 <ul className="preview-items">
                   {preview.items.map((previewItem) => (
                     <li key={previewItem.title}>
@@ -400,9 +403,7 @@ function PreviewView({
                         <DataValue partial={preview.coverage.completeness !== "complete"}>
                           {formatBytes(previewItem.bytes)}
                         </DataValue>
-                        <span>
-                          {formatCount(previewItem.itemCount, "entry", "entries")}
-                        </span>
+                        <span>{entryCount(previewItem.itemCount)}</span>
                       </div>
                     </li>
                   ))}
@@ -410,13 +411,13 @@ function PreviewView({
               </section>
 
               <section aria-labelledby="where-heading">
-                <h3 id="where-heading">Where it goes</h3>
+                <h3 id="where-heading">{t("cleanup.preview.where")}</h3>
                 <p className="preview-route">
-                  {preview.destination ?? "Destination unknown — confirmation is blocked."}
+                  {preview.destination ?? t("cleanup.preview.destinationUnknown")}
                 </p>
-                <h3>How to undo</h3>
-                <p>{preview.howToUndo ?? "Undo route unknown — confirmation is blocked."}</p>
-                <h3>What stays untouched</h3>
+                <h3>{t("cleanup.preview.undo")}</h3>
+                <p>{preview.howToUndo ?? t("cleanup.preview.undoUnknown")}</p>
+                <h3>{t("cleanup.preview.stays")}</h3>
                 <ul className="stays-list">
                   {preview.whatStaysUntouched.map((statement) => (
                     <li key={statement}>{statement}</li>
@@ -427,7 +428,7 @@ function PreviewView({
 
             {preview.warnings.length > 0 ? (
               <div className="preview-warnings" role="note">
-                <strong>Warnings to read before confirming</strong>
+                <strong>{t("cleanup.preview.warnings")}</strong>
                 <ul>
                   {preview.warnings.map((warning) => (
                     <li key={warning}>{warning}</li>
@@ -438,11 +439,8 @@ function PreviewView({
 
             {!preview.complete || scanIncomplete ? (
               <InlineNotice tone="attention">
-                <strong>This preview cannot be confirmed.</strong>
-                <p>
-                  A destination, undo route, byte amount, or complete scan is missing. CoreSight
-                  blocks the plan rather than offering a partial confirmation.
-                </p>
+                <strong>{t("cleanup.preview.cannotConfirm")}</strong>
+                <p>{t("cleanup.preview.cannotConfirmBody")}</p>
               </InlineNotice>
             ) : null}
 
@@ -453,14 +451,11 @@ function PreviewView({
                 <input
                   type="checkbox"
                   checked={acknowledged}
-                  aria-label="I have read exactly what would move, where it would go, and how to undo it."
+                  aria-label={t("cleanup.confirm.acknowledgementAria")}
                   onChange={(event) => setAcknowledged(event.target.checked)}
                   disabled={!preview.complete || scanIncomplete || executing}
                 />
-                <span>
-                  I have read exactly what would move, where it would go, and how to undo it. I
-                  understand that Trash only protects these items until Trash is emptied.
-                </span>
+                <span>{t("cleanup.confirm.acknowledgement")}</span>
               </label>
               <button
                 className="button button--primary"
@@ -468,14 +463,16 @@ function PreviewView({
                 disabled={confirmBlocked}
                 onClick={() => onConfirm(preview)}
               >
-                {executing ? "Confirming…" : "Confirm move to Trash"}
+                {executing ? t("cleanup.confirm.working") : t("cleanup.confirm.button")}
               </button>
-              <p className="microcopy">
-                One opportunity at a time. No action is taken for any other cleanup item.
-              </p>
+              <p className="microcopy">{t("cleanup.confirm.microcopy")}</p>
             </div>
             <div className="visually-hidden" role="status" aria-live="polite">
-              {executing ? "Confirming cleanup" : acknowledged ? "Confirmation checked" : ""}
+              {executing
+                ? t("cleanup.confirm.liveConfirming")
+                : acknowledged
+                  ? t("cleanup.confirm.liveChecked")
+                  : ""}
             </div>
           </article>
         </>
@@ -496,46 +493,44 @@ function ResultView({
   return (
     <div className="screen screen--cleanup">
       <PageHeader
-        eyebrow="Cleanup · Confirmation"
-        title="Confirmation recorded"
-        description={`The cleanup for “${itemTitle}” passed through the preview gate.`}
+        eyebrow={t("cleanup.result.eyebrow")}
+        title={t("cleanup.result.title")}
+        description={t("cleanup.result.description", { title: itemTitle })}
       />
       <section className="result-panel" aria-labelledby="result-heading">
         <span className="result-panel__mark" aria-hidden="true">
           ✓
         </span>
-        <p className="eyebrow">Result</p>
+        <p className="eyebrow">{t("cleanup.result.panelEyebrow")}</p>
         <h2 id="result-heading">
-          {execution.simulated
-            ? "UI preview completed in memory"
-            : "Cleanup request accepted"}
+          {execution.simulated ? t("cleanup.result.simulated") : t("cleanup.result.accepted")}
         </h2>
         <p>{execution.note}</p>
         <dl className="result-facts">
           <div>
-            <dt>Freed bytes</dt>
+            <dt>{t("cleanup.result.freedBytes")}</dt>
             <dd>
               {execution.freedBytes === null
-                ? "Unknown"
+                ? t("state.unknown")
                 : formatBytes(execution.freedBytes)}
             </dd>
           </div>
           <div>
-            <dt>Entries confirmed</dt>
+            <dt>{t("cleanup.result.entriesConfirmed")}</dt>
             <dd>
               {execution.movedItems === null
-                ? "Unknown"
-                : formatCount(execution.movedItems, "entry", "entries")}
+                ? t("state.unknown")
+                : entryCount(execution.movedItems)}
             </dd>
           </div>
           <div>
-            <dt>Verification</dt>
+            <dt>{t("cleanup.result.verification")}</dt>
             <dd>{execution.verification}</dd>
           </div>
         </dl>
         {execution.leftovers.length > 0 ? (
           <div className="inline-message inline-message--attention">
-            <strong>Leftovers were reported</strong>
+            <strong>{t("cleanup.result.leftovers")}</strong>
             <ul>
               {execution.leftovers.map((leftover) => (
                 <li key={leftover}>{leftover}</li>
@@ -543,12 +538,9 @@ function ResultView({
             </ul>
           </div>
         ) : null}
-        <p className="microcopy">
-          No permanent deletion is offered. In this Phase 8 shell the mock adapter does not touch
-          the filesystem; Phase 9 wires the authorized IPC action.
-        </p>
+        <p className="microcopy">{t("cleanup.result.microcopy")}</p>
         <button className="button button--primary" type="button" onClick={onReturn}>
-          Review remaining opportunities
+          {t("cleanup.result.return")}
         </button>
       </section>
     </div>
@@ -569,7 +561,7 @@ function CleanupContent({
   const [acknowledged, setAcknowledged] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [execution, setExecution] = useState<CleanupExecution | null>(null);
-  const [resultTitle, setResultTitle] = useState<string>("selected cleanup");
+  const [resultTitle, setResultTitle] = useState<string>(t("cleanup.result.defaultItem"));
   const [actionError, setActionError] = useState<ApiError | null>(null);
   const viewMode = execution !== null ? "result" : previewState !== null ? "preview" : "list";
 
@@ -601,7 +593,11 @@ function CleanupContent({
         confirmed: true,
         acknowledgedWarnings: preview.warnings
       });
-      setResultTitle(previewState?.status === "ready" ? previewState.item.title : "selected cleanup");
+      setResultTitle(
+        previewState?.status === "ready"
+          ? previewState.item.title
+          : t("cleanup.result.defaultItem")
+      );
       setExecution(result);
       setPreviewState(null);
     } catch (error: unknown) {
@@ -656,22 +652,21 @@ function CleanupContent({
 export function CleanupScreen({ api }: { api: CoreSightApi }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const state = useApiData(() => api.getCleanup(), [api, refreshKey]);
+  const eyebrow = t("cleanup.eyebrow");
+  const title = t("cleanup.title");
+  const description = t("cleanup.description");
 
   if (state.status === "loading") {
     return (
-      <ScreenLoading
-        eyebrow="Cleanup"
-        title="What can I safely remove?"
-        description="Ranked opportunities with their reasoning attached. One review, one preview, one explicit confirmation."
-      />
+      <ScreenLoading eyebrow={eyebrow} title={title} description={description} />
     );
   }
   if (state.status === "error") {
     return (
       <ScreenError
-        eyebrow="Cleanup"
-        title="What can I safely remove?"
-        description="Ranked opportunities with their reasoning attached. One review, one preview, one explicit confirmation."
+        eyebrow={eyebrow}
+        title={title}
+        description={description}
         error={state.error}
       />
     );

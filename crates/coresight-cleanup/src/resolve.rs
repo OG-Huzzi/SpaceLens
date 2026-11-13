@@ -251,6 +251,60 @@ fn path_bytes(path: &Path) -> &[u8] {
     path.as_os_str().as_encoded_bytes()
 }
 
+/// Whether an observed path can honestly be published as a move target.
+///
+/// # Why this exists
+///
+/// A `PlanTarget` is a promise that the executor may move exactly this path.
+/// A path that names no file cannot be that promise, and letting one through
+/// would put a traversal marker or an unstorable name into a move list that a
+/// user is asked to approve.
+///
+/// Rejected:
+/// * an empty path, or a final component of `.` / `..` — a traversal marker
+///   names a directory relative to elsewhere, never the file that was observed;
+/// * an embedded NUL — no filesystem accepts one, so the entry cannot be a
+///   real observed file;
+/// * a Windows reserved device name (`CON`, `NUL`, `PRN`, `AUX`, `COM1`…`LPT9`),
+///   with or without an extension — these name devices, not files;
+/// * a final component ending in a space or a dot — not reliably storable, so
+///   the name we would move may not be the name that exists.
+///
+/// The check is deliberately **conservative**: it may decline a path that some
+/// filesystem would accept. Declining under-proposes, which is the safe
+/// direction; accepting a bad path over-proposes, which is not.
+fn is_movable_path(path: &Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    // A non-UTF-8 name is still a real name on Unix; there is no textual
+    // check to run, and rejecting it would drop legitimately observed files.
+    let Some(text) = path.to_str() else {
+        return true;
+    };
+    if text.contains('\0') {
+        return false;
+    }
+    let Some(last) = text.rsplit(['/', '\\']).next() else {
+        return false;
+    };
+    if last.is_empty() || last == "." || last == ".." {
+        return false;
+    }
+    if last.ends_with(' ') || last.ends_with('.') {
+        return false;
+    }
+    let stem = match last.split_once('.') {
+        Some((stem, _)) => stem,
+        None => last,
+    };
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    !RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r))
+}
+
 /// Saturating sum of the logical sizes of the fully observed regular files
 /// strictly beneath `directory`.
 ///
@@ -358,6 +412,15 @@ pub fn resolve_plan(
 
             // Rule 2 — an entry we could not fully observe is never a target.
             if entry.observation_error.is_some() {
+                unresolved_entries = unresolved_entries.saturating_add(1);
+                continue;
+            }
+
+            // Rule 0 — a path that cannot name a file is never a target. A
+            // target is a promise that the executor may move exactly this
+            // path; a traversal marker, an embedded NUL or a reserved device
+            // name cannot be that promise.
+            if !is_movable_path(&entry.path) {
                 unresolved_entries = unresolved_entries.saturating_add(1);
                 continue;
             }

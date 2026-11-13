@@ -11,7 +11,7 @@
 //! # Result framing
 //!
 //! Every command returns the crate's `Envelope<Response>` verbatim, so the UI
-//! sees one shape for all ten commands:
+//! sees one shape for all twenty commands:
 //!
 //! ```json
 //! { "ok":    { "kind": "coresight.v1.listDrives", "payload": [ /* Drive[] */ ] } }
@@ -47,9 +47,20 @@
 //! | `coresight.v1.executePlan`                 | `execute_plan`       |
 //! | `coresight.v1.getHistory`                  | `get_history`        |
 //! | `coresight.v1.listDrives`                  | `list_drives`        |
+//! | `coresight.v1.getGlobalStatus`             | `get_global_status`  |
+//! | `coresight.v1.getHomeSummary`              | `get_home_summary`   |
+//! | `coresight.v1.getStorage`                  | `get_storage`        |
+//! | `coresight.v1.getCleanup`                  | `get_cleanup`        |
+//! | `coresight.v1.getDuplicateReport`          | `get_duplicate_report` |
+//! | `coresight.v1.getBigFileReport`            | `get_big_file_report` |
+//! | `coresight.v1.getStartupReport`            | `get_startup_report` |
+//! | `coresight.v1.getDnsRanking`               | `get_dns_ranking`    |
+//! | `coresight.v1.getBlockListPlan`            | `get_block_list_plan` |
+//! | `coresight.v1.getPrivacySummary`           | `get_privacy_summary` |
 //!
 //! Arguments use the documented camelCase shape, e.g.
-//! `invoke("start_scan", { driveId, fullRescan })`.
+//! `invoke("start_scan", { driveId, fullRescan })`. The ten aggregate view
+//! commands take no arguments.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -57,8 +68,11 @@ use std::sync::Mutex;
 
 use coresight_ipc::{
     ApiError, CancelScanRequest, Command, ConfirmPlanRequest, Envelope, ExecutePlanRequest,
-    GetCategoriesRequest, GetDriveSummaryRequest, GetHistoryRequest, GetOpportunitiesRequest,
-    ListDrivesRequest, PreviewPlanRequest, Response, Session, StartScanRequest,
+    GetBigFileReportRequest, GetBlockListPlanRequest, GetCategoriesRequest, GetCleanupRequest,
+    GetDnsRankingRequest, GetDriveSummaryRequest, GetDuplicateReportRequest, GetGlobalStatusRequest,
+    GetHistoryRequest, GetHomeSummaryRequest, GetOpportunitiesRequest, GetPrivacySummaryRequest,
+    GetStartupReportRequest, GetStorageRequest, ListDrivesRequest, PreviewPlanRequest, Response,
+    Session, StartScanRequest,
 };
 use tauri::State;
 
@@ -190,6 +204,78 @@ fn list_drives(state: State<'_, ShellState>) -> Envelope<Response> {
     forward(state, Command::ListDrives(ListDrivesRequest {}))
 }
 
+// ---------------------------------------------------------------------------
+// Aggregate view commands (`src/api.ts` shapes).
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_global_status(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(
+        state,
+        Command::GetGlobalStatus(GetGlobalStatusRequest {}),
+    )
+}
+
+#[tauri::command]
+fn get_home_summary(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(state, Command::GetHomeSummary(GetHomeSummaryRequest {}))
+}
+
+#[tauri::command]
+fn get_storage(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(state, Command::GetStorage(GetStorageRequest {}))
+}
+
+#[tauri::command]
+fn get_cleanup(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(state, Command::GetCleanup(GetCleanupRequest {}))
+}
+
+#[tauri::command]
+fn get_duplicate_report(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(
+        state,
+        Command::GetDuplicateReport(GetDuplicateReportRequest {}),
+    )
+}
+
+#[tauri::command]
+fn get_big_file_report(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(
+        state,
+        Command::GetBigFileReport(GetBigFileReportRequest {}),
+    )
+}
+
+#[tauri::command]
+fn get_startup_report(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(
+        state,
+        Command::GetStartupReport(GetStartupReportRequest {}),
+    )
+}
+
+#[tauri::command]
+fn get_dns_ranking(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(state, Command::GetDnsRanking(GetDnsRankingRequest {}))
+}
+
+#[tauri::command]
+fn get_block_list_plan(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(
+        state,
+        Command::GetBlockListPlan(GetBlockListPlanRequest {}),
+    )
+}
+
+#[tauri::command]
+fn get_privacy_summary(state: State<'_, ShellState>) -> Envelope<Response> {
+    forward(
+        state,
+        Command::GetPrivacySummary(GetPrivacySummaryRequest {}),
+    )
+}
+
 fn main() {
     let state = ShellState {
         session: Mutex::new(Session::new()),
@@ -207,7 +293,17 @@ fn main() {
             confirm_plan,
             execute_plan,
             get_history,
-            list_drives
+            list_drives,
+            get_global_status,
+            get_home_summary,
+            get_storage,
+            get_cleanup,
+            get_duplicate_report,
+            get_big_file_report,
+            get_startup_report,
+            get_dns_ranking,
+            get_block_list_plan,
+            get_privacy_summary
         ])
         .run(tauri::generate_context!())
         .expect("CoreSight could not start: the Tauri runtime failed to initialise");

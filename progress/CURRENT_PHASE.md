@@ -1,5 +1,82 @@
 # CoreSight — Current State
 
+PHASE 9.1 + 10.0 — Live IPC Endpoints, File Wiper Planning, Platform Features, and an Adversarial Suite That Found Seven Real Defects
+
+**Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` 0,
+`cargo test --workspace` **1499 passed / 0 failed / 11 ignored**,
+`npm test` **72 passed**, `npm run build` 0, `npm audit` **0 vulnerabilities**.
+Schema version stays 6.
+
+### The live app is now connected
+
+Ten aggregate commands were added to `coresight-ipc` and wired through the
+shell, so the five screens no longer depend solely on the mock:
+`getGlobalStatus`, `getHomeSummary`, `getStorage`, `getCleanup`,
+`getDuplicateReport`, `getBigFileReport`, `getStartupReport`, `getDnsRanking`,
+`getBlockListPlan`, `getPrivacySummary` — each projected from
+`coresight-insights` / `coresight-cleanup` / `coresight-filetools` /
+`coresight-systools` / `coresight-webtools`, each with a typed
+`SESSION_UNAVAILABLE` when the session holds no usable data (never an empty
+success). Response shapes mirror `src/api.ts` field-for-field, and a test
+asserts that.
+
+Fields that could not be backed by real evidence are `null`, not invented:
+`ScanStatus.startedAt`, `currentArea`, `etaSeconds`; `Drive.health` (always
+"unknown"); `CleanupItem.estimatedAgeDays`; `DataCoverage.excludedAreas`.
+
+### The adversarial suite found seven real defects — all fixed
+
+This is the most valuable output of the phase. `crates/coresight-adversarial`
+attacks the honesty claims of every planning crate. Seven tests initially
+failed as **genuine product defects**, and were fixed rather than ignored:
+
+| # | Defect | Fix |
+|---|---|---|
+| 1 | `resolve_plan` accepted `""`, `"."`, `".."` as concrete cleanup targets | `is_movable_path` guard at the planning boundary |
+| 2 | `resolve_plan` had **no** path sanity check — NUL-bearing and Windows reserved device names became targets | same guard: NUL, `CON`/`NUL`/`COM1`…, trailing space/dot |
+| 3 | `plan_rename` accepted `CON.txt` and a rule-created trailing space | `is_unstorable_name`, carefully scoped so a **pre-existing** trailing dot is still preserved |
+| 4 | `StartupReport` tie-break omitted the source payload, so order fell back to input order | `StartupSource` is now `Ord`; payload is the final tie-break |
+| 5 | `rank_dns` scored a **negative** failure rate as 150% reliable, ranking a broken server first | rates outside `0..=1` are rejected as malformed |
+| 6 | `rank_dns` with a **NaN** `max_failure_rate` accepted every server (`rate > NaN` is always false) | a non-finite ceiling is refused, not treated as "no limit" |
+| 7 | `find_big_files` silently dropped a future mtime without counting it, so the report read as conclusive | counted in `unknown_age_entries` |
+
+Ignored-test count returned to its pre-existing baseline of 11: every defect
+test is now **running**, not skipped.
+
+### File Wiper planning (jv16 #15)
+
+`coresight-cleanup::wipe` refuses to over-claim. Solid-state and copy-on-write
+media always yield `RequiresFullDiskSanitisation` and are blocked as
+`MediumDefeatsOverwrite`; `Unknown` media is `BestEffortOnly` and blocked —
+never silently upgraded to magnetic. Snapshots block even on magnetic media.
+`total_bytes` is `None` when any target's size is unknown. jv16's
+"fake files for plausible deniability" is **declined outright** with a written
+rationale. This build wipes nothing.
+
+### Platform features: configurable, multilingual, widget
+
+- **Settings** (`coresight.settings.v1`): typed, versioned, `localStorage`-backed
+  — theme, reduced motion, density, advanced details, visible screens, locale.
+  Corrupt payloads and unknown versions fall back to defaults; refusing to hide
+  the last visible screen; a blocked-storage path degrades to session-only
+  rather than throwing.
+- **i18n**: compile-time-safe keys with `en` + `de`. **Honestly partial** —
+  app shell, Settings, shared state components, Cleanup safety copy and the
+  scan strip are localised; Home/Storage/History/Drives page copy and
+  engine-provided strings are not.
+- **Widget**: a read-only `role="status"` scan strip. No controls, because a
+  start/cancel affordance on every screen would violate "actions live in
+  Cleanup only".
+
+### Still open
+
+- A third locale, and localising the four remaining screens' page copy.
+- The scan strip reads status once per mount; live progress needs the Phase 9
+  event bridge (`coresight.v1.scanProgress`), which is not built.
+- Screenshots (jv16 #7) remains the only PLANNED tool.
+- Packaging, signing and an installer are untouched.
+
 CI PLATFORM MATRIX — Linux job removed (operator decision)
 
 **Status: APPLIED.** The `rust (ubuntu-latest)` job was removed from the CI

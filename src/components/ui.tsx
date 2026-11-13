@@ -1,6 +1,13 @@
 import { useId, type CSSProperties, type ReactNode } from "react";
 import type { ApiError, DataCoverage, SafetyTier } from "../api";
-import { formatCount, formatPercent } from "../lib/format";
+import { formatPercent } from "../lib/format";
+import { t, tCount, type MessageKey } from "../i18n";
+
+/**
+ * Shared state surfaces. Every fixed string here is localised; the strings a
+ * screen passes in as props (titles, descriptions) are still the screen's own
+ * copy and remain English in the screens that have not been localised yet.
+ */
 
 export interface PageHeaderProps {
   eyebrow: string;
@@ -49,13 +56,10 @@ export function SectionHeading({
   );
 }
 
-export function PartialTag({ label = "partial" }: { label?: string }) {
+export function PartialTag({ label }: { label?: string }) {
   return (
-    <span
-      className="quality-tag"
-      title="This figure comes from a partial source; it is not a complete total."
-    >
-      {label}
+    <span className="quality-tag" title={t("state.partialTag.title")}>
+      {label ?? t("state.partialTag.label")}
     </span>
   );
 }
@@ -77,12 +81,33 @@ export function DataValue({
   );
 }
 
+/** Each context renders its own heading so translations keep correct grammar. */
+export type CoverageContext =
+  | "scan"
+  | "storageScan"
+  | "cleanupPreview"
+  | "duplicateAnalysis"
+  | "largeFileResult";
+
+const INCOMPLETE_HEADING: Record<CoverageContext, MessageKey> = {
+  scan: "state.coverage.incomplete.scan",
+  storageScan: "state.coverage.incomplete.storageScan",
+  cleanupPreview: "state.coverage.incomplete.cleanupPreview",
+  duplicateAnalysis: "state.coverage.incomplete.duplicateAnalysis",
+  largeFileResult: "state.coverage.incomplete.largeFileResult"
+};
+
+function coveredCount(value: number | null): string {
+  if (value === null) return t("state.unknown");
+  return tCount(value, "unit.entry.one", "unit.entry.other");
+}
+
 export function CoverageBanner({
   coverage,
   context = "scan"
 }: {
   coverage: DataCoverage;
-  context?: string;
+  context?: CoverageContext;
 }) {
   const headingId = useId();
   if (
@@ -94,6 +119,9 @@ export function CoverageBanner({
   }
 
   const incomplete = coverage.completeness !== "complete";
+  const unreadable = coveredCount(coverage.unreadableEntries);
+  const unknownSizes = coveredCount(coverage.unknownSizeEntries);
+
   return (
     <aside className="notice notice--partial" aria-labelledby={headingId} role="note">
       <span className="notice__mark" aria-hidden="true">
@@ -102,43 +130,24 @@ export function CoverageBanner({
       <div className="notice__body">
         <h2 id={headingId}>
           {incomplete
-            ? `This ${context} is incomplete`
-            : "Some entries are outside this result"}
+            ? t(INCOMPLETE_HEADING[context])
+            : t("state.coverage.outsideHeading")}
         </h2>
         <p>
-          {incomplete
-            ? "Totals here are lower bounds, not complete totals. Aggregate figures from this source carry a partial label."
-            : "The figures below describe only the entries the engine could evaluate."}
+          {incomplete ? t("state.coverage.incompleteBody") : t("state.coverage.outsideBody")}
         </p>
         <ul className="notice__facts">
-          <li
-            aria-label={`Unreadable entries: ${
-              coverage.unreadableEntries === null
-                ? "Unknown"
-                : formatCount(coverage.unreadableEntries, "entry", "entries")
-            }`}
-          >
-            <strong>Unreadable entries:</strong>{" "}
-            {coverage.unreadableEntries === null
-              ? "Unknown"
-              : formatCount(coverage.unreadableEntries, "entry", "entries")}
+          <li aria-label={t("state.coverage.unreadableAria", { value: unreadable })}>
+            <strong>{t("state.coverage.unreadableLabel")}</strong> {unreadable}
           </li>
-          <li
-            aria-label={`Unknown sizes: ${
-              coverage.unknownSizeEntries === null
-                ? "Unknown"
-                : formatCount(coverage.unknownSizeEntries, "entry", "entries")
-            }`}
-          >
-            <strong>Unknown sizes:</strong>{" "}
-            {coverage.unknownSizeEntries === null
-              ? "Unknown"
-              : formatCount(coverage.unknownSizeEntries, "entry", "entries")}
+          <li aria-label={t("state.coverage.unknownSizesAria", { value: unknownSizes })}>
+            <strong>{t("state.coverage.unknownSizesLabel")}</strong> {unknownSizes}
           </li>
         </ul>
         {coverage.excludedAreas.length > 0 ? (
           <p className="notice__excluded">
-            <strong>Not included:</strong> {coverage.excludedAreas.join(" · ")}
+            <strong>{t("state.coverage.notIncluded")}</strong>{" "}
+            {coverage.excludedAreas.join(" · ")}
           </p>
         ) : null}
         {coverage.note ? <p className="notice__note">{coverage.note}</p> : null}
@@ -147,17 +156,17 @@ export function CoverageBanner({
   );
 }
 
-const TIER_LABEL: Record<SafetyTier, string> = {
-  SAFE: "Safe",
-  REVIEW: "Review",
-  OFF_LIMITS: "Off-limits"
+const TIER_LABEL: Record<SafetyTier, MessageKey> = {
+  SAFE: "tier.safe",
+  REVIEW: "tier.review",
+  OFF_LIMITS: "tier.offLimits"
 };
 
 export function TierBadge({ tier }: { tier: SafetyTier }) {
   return (
     <span className={`tier-badge tier-badge--${tier.toLowerCase().replace("_", "-")}`}>
       <span className="tier-badge__mark" aria-hidden="true" />
-      {TIER_LABEL[tier]}
+      {t(TIER_LABEL[tier])}
     </span>
   );
 }
@@ -187,8 +196,10 @@ export function SizeBar({
   const style: CSSProperties | undefined = width ? { width } : undefined;
   const ariaLabel =
     share === null
-      ? `${label}: share unknown`
-      : `${label}: ${formatPercent(share)}${partial ? ", from a partial source" : ""}`;
+      ? t("state.sizeBar.unknown", { label })
+      : `${t("state.sizeBar.share", { label, percent: formatPercent(share) })}${
+          partial ? t("state.sizeBar.partialSuffix") : ""
+        }`;
 
   return (
     <span
@@ -220,15 +231,15 @@ export function ScreenLoading({
       <section className="state-panel state-panel--loading" role="status" aria-live="polite">
         <div className="state-panel__heading">
           <span className="spinner" aria-hidden="true" />
-          <h2>Reading the local snapshot</h2>
+          <h2>{t("state.loading.heading")}</h2>
         </div>
-        <p>Large scans can take a moment. This screen will update when the data is ready.</p>
+        <p>{t("state.loading.body")}</p>
         <div className="skeleton-stack" aria-hidden="true">
           <span />
           <span />
           <span />
         </div>
-        <span className="visually-hidden">Loading</span>
+        <span className="visually-hidden">{t("state.loading.label")}</span>
       </section>
     </div>
   );
@@ -249,18 +260,15 @@ export function ScreenError({
     <div className="screen">
       <PageHeader eyebrow={eyebrow} title={title} description={description} />
       <section className="state-panel state-panel--error" role="alert">
-        <p className="eyebrow">Could not load this screen</p>
+        <p className="eyebrow">{t("state.error.eyebrow")}</p>
         <h2>{error.message}</h2>
         {error.detail ? <p>{error.detail}</p> : null}
         <p className="state-panel__code">
-          Reference <code>{error.code}</code>
+          {t("state.error.reference")} <code>{error.code}</code>
         </p>
-        <p>
-          Nothing was changed. Leave this screen and open it again; if the snapshot is still
-          unavailable, restart CoreSight.
-        </p>
+        <p>{t("state.error.nothingChanged")}</p>
         <a className="text-link" href="#home">
-          Return to Home
+          {t("state.error.returnHome")}
         </a>
       </section>
     </div>
@@ -291,7 +299,9 @@ export function InlineError({ error }: { error: ApiError }) {
     <div className="inline-message inline-message--error" role="alert">
       <strong>{error.message}</strong>
       {error.detail ? <p>{error.detail}</p> : null}
-      <span className="inline-message__code">Reference {error.code}</span>
+      <span className="inline-message__code">
+        {t("state.error.reference")} {error.code}
+      </span>
     </div>
   );
 }

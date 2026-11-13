@@ -1,0 +1,24 @@
+[package]
+name = "coresight-adversarial"
+version = "0.0.0"
+edition = "2021"
+description = "CoreSight adversarial input suite — hostile, degenerate and contradictory inputs aimed at the planning and IPC layers. Test-only: this crate has no product code and must never be depended on by product crates."
+license = "UNLICENSED"
+
+[lib]
+name = "coresight_adversarial"
+crate-type = ["lib"]
+
+[dependencies]
+
+[dev-dependencies]
+serde_json = "1"
+coresight-classifier = { path = "../coresight-classifier" }
+coresight-history = { path = "../coresight-history" }
+coresight-engine = { path = "../coresight-engine" }
+coresight-insights = { path = "../coresight-insights" }
+coresight-cleanup = { path = "../coresight-cleanup" }
+coresight-filetools = { path = "../coresight-filetools" }
+coresight-webtools = { path = "../coresight-webtools" }
+coresight-systools = { path = "../coresight-systools" }
+coresight-ipc = { path = "../coresight-ipc" }

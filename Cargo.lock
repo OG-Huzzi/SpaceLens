@@ -58,6 +58,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "coresight-adversarial"
+version = "0.0.0"
+dependencies = [
+ "coresight-classifier",
+ "coresight-cleanup",
+ "coresight-engine",
+ "coresight-filetools",
+ "coresight-history",
+ "coresight-insights",
+ "coresight-ipc",
+ "coresight-systools",
+ "coresight-webtools",
+ "serde_json",
+]
+
+[[package]]
 name = "coresight-apps"
 version = "0.0.0"
 dependencies = [

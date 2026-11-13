@@ -356,7 +356,7 @@ function StorageContent({
           />
           <CoverageBanner
             coverage={data.duplicateReport.coverage}
-            context="duplicate analysis"
+            context="duplicateAnalysis"
           />
           <div className="evidence-panel__summary">
             <span>Recoverable, verified</span>
@@ -459,7 +459,7 @@ function StorageContent({
             title="Large files"
             description={`Files above ${formatBytes(data.bigFileReport.thresholdBytes)}. Unknown age is never treated as old.`}
           />
-          <CoverageBanner coverage={data.bigFileReport.coverage} context="large-file result" />
+          <CoverageBanner coverage={data.bigFileReport.coverage} context="largeFileResult" />
           {data.bigFileReport.files.length === 0 ? (
             <p className="microcopy">No files crossed the current size threshold.</p>
           ) : (

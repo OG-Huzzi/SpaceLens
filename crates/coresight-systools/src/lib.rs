@@ -227,7 +227,7 @@ pub mod startup {
     /// Variants are never merged: a launch daemon and a user login item have
     /// different privileges, so the model must not present them as the same
     /// thing.
-    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     #[serde(rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase")]
     pub enum StartupSource {
         /// A value under a registry `Run` key.
@@ -770,6 +770,16 @@ pub mod startup {
                 .then_with(|| left.item.command.cmp(&right.item.command))
                 .then_with(|| left.item.owner.cmp(&right.item.owner))
                 .then_with(|| left.item.enabled.cmp(&right.item.enabled))
+                .then_with(|| {
+                    // Final tie-break: the source PAYLOAD (scope, hive, key
+                    // path, label, unit, schedule). Two items can share tier,
+                    // source family, name, id, command and owner yet differ
+                    // only here — a per-user Startup entry and an all-users
+                    // one, for instance. Without this their relative order
+                    // would fall back to input order, and a report whose order
+                    // depends on input order cannot be diffed between scans.
+                    left.item.source.cmp(&right.item.source)
+                })
         });
     }
 

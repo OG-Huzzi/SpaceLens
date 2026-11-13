@@ -1,5 +1,8 @@
+/* Theme is an explicit preference on the root element. When the preference is
+   "system" the attribute is absent and the media query at the bottom of this
+   block decides. Keep the two dark token lists identical. */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 
@@ -41,8 +44,41 @@
   --duration: 150ms;
 }
 
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111514;
+  --surface: #191f1d;
+  --surface-muted: #212826;
+  --surface-recessed: #2b3330;
+  --text: #eef2ef;
+  --text-muted: #a9b3ae;
+  --text-faint: #909a95;
+  --border: #333b38;
+  --border-strong: #4a5550;
+
+  --accent: #86cbb7;
+  --accent-hover: #a3ddcc;
+  --accent-soft: #1f3731;
+  --accent-contrast: #0f1815;
+
+  --safe: #8dcba8;
+  --safe-soft: #21362a;
+  --review: #e0b978;
+  --review-soft: #3a2f1e;
+  --review-border: #5b482a;
+  --off: #a5aca8;
+  --off-soft: #292f2c;
+  --danger: #e3a09a;
+  --danger-soft: #3a2422;
+
+  --focus: #92d7c3;
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 20%);
+  --shadow-float: 0 18px 44px rgb(0 0 0 / 24%);
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
+    color-scheme: dark;
     --bg: #111514;
     --surface: #191f1d;
     --surface-muted: #212826;
@@ -2809,19 +2845,35 @@ a.delta-row:hover {
   }
 }
 
+/* Reduced motion follows the OS unless the preference explicitly overrides it:
+   `[data-reduced-motion="allow"]` opts out of the media rule, `="reduce"`
+   applies it without the OS. "system" leaves the attribute off. */
 @media (prefers-reduced-motion: reduce) {
-  html {
+  :root:not([data-reduced-motion="allow"]) {
     scroll-behavior: auto;
   }
 
-  *,
-  *::before,
-  *::after {
+  :root:not([data-reduced-motion="allow"]) *,
+  :root:not([data-reduced-motion="allow"]) *::before,
+  :root:not([data-reduced-motion="allow"]) *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+:root[data-reduced-motion="reduce"] {
+  scroll-behavior: auto;
+}
+
+:root[data-reduced-motion="reduce"] *,
+:root[data-reduced-motion="reduce"] *::before,
+:root[data-reduced-motion="reduce"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
 }
 
 @keyframes spin {
@@ -2839,5 +2891,273 @@ a.delta-row:hover {
     opacity: 1;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Ambient scan strip (read-only "widget")
+   -------------------------------------------------------------------------- */
+
+.scan-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(100%, var(--content-width));
+  min-height: 24px;
+  margin: 0 auto;
+  padding: 0 24px 9px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.scan-strip__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.scan-strip--complete .scan-strip__dot {
+  background: var(--safe);
+}
+
+.scan-strip--partial .scan-strip__dot,
+.scan-strip--unavailable .scan-strip__dot {
+  background: var(--review);
+}
+
+.scan-strip--failed .scan-strip__dot {
+  background: var(--danger);
+}
+
+.scan-strip--scanning .scan-strip__dot,
+.scan-strip--loading .scan-strip__dot {
+  background: var(--accent);
+  animation: soft-pulse 1.8s ease-in-out infinite;
+}
+
+.scan-strip__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Indeterminate on purpose: the contract has no total, only entries seen. */
+.scan-strip__meter {
+  position: relative;
+  flex: 0 0 86px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-recessed);
+}
+
+.scan-strip__meter span {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 38%;
+  border-radius: inherit;
+  background: var(--accent);
+  animation: strip-sweep 1.5s ease-in-out infinite;
+}
+
+.scan-strip__detail {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes strip-sweep {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(280%);
+  }
+}
+
+.primary-nav__utility {
+  margin-left: auto;
+}
+
+/* --------------------------------------------------------------------------
+   Settings
+   -------------------------------------------------------------------------- */
+
+.settings-panel {
+  margin-top: 16px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 2px 0;
+}
+
+.settings-row__label {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.settings-select {
+  min-height: 34px;
+  padding: 5px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settings-fieldset {
+  margin: 18px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.settings-fieldset legend {
+  padding: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settings-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px 20px;
+  margin-top: 9px;
+}
+
+.settings-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.settings-choice input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.settings-choice input:disabled + span {
+  color: var(--text-faint);
+}
+
+.settings-hint {
+  max-width: 66ch;
+  margin: 6px 0 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.settings-note {
+  max-width: 72ch;
+  margin: 0 0 13px;
+  padding: 10px 13px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-xs);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.settings-screen-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px 22px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-facts {
+  display: grid;
+  gap: 7px;
+  margin: 2px 0 12px;
+}
+
+.settings-facts > div {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.settings-facts dt {
+  flex: 0 0 128px;
+  color: var(--text-muted);
+}
+
+.settings-facts dd {
+  margin: 0;
+  color: var(--text);
+}
+
+.settings-warning {
+  margin: 6px 0 0;
+  padding: 8px 11px;
+  border: 1px solid var(--review-border);
+  border-radius: var(--radius-xs);
+  background: var(--review-soft);
+  color: var(--review);
+  font-size: 12px;
+}
+
+.settings-reset {
+  margin-top: 16px;
+}
+
+/* --------------------------------------------------------------------------
+   Density preference
+   -------------------------------------------------------------------------- */
+
+:root[data-density="compact"] body {
+  font-size: 14px;
+}
+
+:root[data-density="compact"] main {
+  padding-top: 26px;
+  padding-bottom: 54px;
+}
+
+:root[data-density="compact"] .app-header__topline {
+  padding-top: 12px;
+  padding-bottom: 8px;
+}
+
+:root[data-density="compact"] .primary-nav a {
+  padding-top: 7px;
+  padding-bottom: 8px;
+}
+
+:root[data-density="compact"] .panel {
+  padding: 18px;
+}
+
+:root[data-density="compact"] .cleanup-card {
+  padding: 12px 0;
+}
+
+:root[data-density="compact"] .cleanup-summary {
+  padding: 18px 19px;
+}
+
 
 

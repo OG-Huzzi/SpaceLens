@@ -1,5 +1,6 @@
-//! The ten typed commands of `coresight.v1.*` (`docs/API_CONTRACTS.md`
-//! §Commands).
+//! The typed commands of `coresight.v1.*` (`docs/API_CONTRACTS.md`
+//! §Commands): the original ten engine commands plus the ten aggregate view
+//! commands consumed by `src/api.ts`.
 //!
 //! On the wire every command is an adjacent-tagged pair:
 //!
@@ -112,6 +113,46 @@ pub struct GetHistoryRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListDrivesRequest {}
 
+/// The `coresight.v1.getGlobalStatus` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetGlobalStatusRequest {}
+
+/// The `coresight.v1.getHomeSummary` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetHomeSummaryRequest {}
+
+/// The `coresight.v1.getStorage` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetStorageRequest {}
+
+/// The `coresight.v1.getCleanup` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetCleanupRequest {}
+
+/// The `coresight.v1.getDuplicateReport` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetDuplicateReportRequest {}
+
+/// The `coresight.v1.getBigFileReport` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetBigFileReportRequest {}
+
+/// The `coresight.v1.getStartupReport` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetStartupReportRequest {}
+
+/// The `coresight.v1.getDnsRanking` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetDnsRankingRequest {}
+
+/// The `coresight.v1.getBlockListPlan` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetBlockListPlanRequest {}
+
+/// The `coresight.v1.getPrivacySummary` request (no arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetPrivacySummaryRequest {}
+
 /// One command of the `coresight.v1.*` surface.
 ///
 /// The serde representation is the transport frame documented on the
@@ -149,10 +190,47 @@ pub enum Command {
     /// Connected and remembered-offline drives known to this session.
     #[serde(rename = "coresight.v1.listDrives")]
     ListDrives(ListDrivesRequest),
+    /// Whole-app status: contract version, latest scan state, and whether the
+    /// payload is simulated (never true for this dispatcher).
+    #[serde(rename = "coresight.v1.getGlobalStatus")]
+    GetGlobalStatus(GetGlobalStatusRequest),
+    /// Home screen aggregate: reclaimable bytes, drives, top categories, and
+    /// the change since the previous full-scope scan.
+    #[serde(rename = "coresight.v1.getHomeSummary")]
+    GetHomeSummary(GetHomeSummaryRequest),
+    /// Storage screen: category totals plus the duplicate and big-file
+    /// reports projected from the latest completed scan.
+    #[serde(rename = "coresight.v1.getStorage")]
+    GetStorage(GetStorageRequest),
+    /// Cleanup screen: the planner's actionable items and the off-limits
+    /// categories it exposed but never proposes.
+    #[serde(rename = "coresight.v1.getCleanup")]
+    GetCleanup(GetCleanupRequest),
+    /// Duplicate report for the latest completed scan.
+    #[serde(rename = "coresight.v1.getDuplicateReport")]
+    GetDuplicateReport(GetDuplicateReportRequest),
+    /// Big-file report for the latest completed scan.
+    #[serde(rename = "coresight.v1.getBigFileReport")]
+    GetBigFileReport(GetBigFileReportRequest),
+    /// Startup inventory analysis registered into this session.
+    #[serde(rename = "coresight.v1.getStartupReport")]
+    GetStartupReport(GetStartupReportRequest),
+    /// DNS benchmark ranking registered into this session.
+    #[serde(rename = "coresight.v1.getDnsRanking")]
+    GetDnsRanking(GetDnsRankingRequest),
+    /// Planned hosts-file block list registered into this session.
+    #[serde(rename = "coresight.v1.getBlockListPlan")]
+    GetBlockListPlan(GetBlockListPlanRequest),
+    /// Privacy findings summary registered into this session.
+    #[serde(rename = "coresight.v1.getPrivacySummary")]
+    GetPrivacySummary(GetPrivacySummaryRequest),
 }
 
 impl Command {
-    /// The full namespaced wire names, in contract order.
+    /// The original ten namespaced wire names, in contract order.
+    ///
+    /// Kept as the stable prefix of the `v1` table. [`Command::ALL_NAMES_V1`]
+    /// is the complete table this build serves.
     pub const ALL_NAMES: [&'static str; 10] = [
         "coresight.v1.startScan",
         "coresight.v1.cancelScan",
@@ -164,6 +242,31 @@ impl Command {
         "coresight.v1.executePlan",
         "coresight.v1.getHistory",
         "coresight.v1.listDrives",
+    ];
+
+    /// Every namespaced wire name this build serves, in contract order: the
+    /// original ten followed by the ten aggregate view commands.
+    pub const ALL_NAMES_V1: [&'static str; 20] = [
+        "coresight.v1.startScan",
+        "coresight.v1.cancelScan",
+        "coresight.v1.getDriveSummary",
+        "coresight.v1.getCategories",
+        "coresight.v1.getOpportunities",
+        "coresight.v1.previewPlan",
+        "coresight.v1.confirmPlan",
+        "coresight.v1.executePlan",
+        "coresight.v1.getHistory",
+        "coresight.v1.listDrives",
+        "coresight.v1.getGlobalStatus",
+        "coresight.v1.getHomeSummary",
+        "coresight.v1.getStorage",
+        "coresight.v1.getCleanup",
+        "coresight.v1.getDuplicateReport",
+        "coresight.v1.getBigFileReport",
+        "coresight.v1.getStartupReport",
+        "coresight.v1.getDnsRanking",
+        "coresight.v1.getBlockListPlan",
+        "coresight.v1.getPrivacySummary",
     ];
 
     /// The namespaced wire name of this command.
@@ -179,6 +282,16 @@ impl Command {
             Command::ExecutePlan(_) => Command::ALL_NAMES[7],
             Command::GetHistory(_) => Command::ALL_NAMES[8],
             Command::ListDrives(_) => Command::ALL_NAMES[9],
+            Command::GetGlobalStatus(_) => Command::ALL_NAMES_V1[10],
+            Command::GetHomeSummary(_) => Command::ALL_NAMES_V1[11],
+            Command::GetStorage(_) => Command::ALL_NAMES_V1[12],
+            Command::GetCleanup(_) => Command::ALL_NAMES_V1[13],
+            Command::GetDuplicateReport(_) => Command::ALL_NAMES_V1[14],
+            Command::GetBigFileReport(_) => Command::ALL_NAMES_V1[15],
+            Command::GetStartupReport(_) => Command::ALL_NAMES_V1[16],
+            Command::GetDnsRanking(_) => Command::ALL_NAMES_V1[17],
+            Command::GetBlockListPlan(_) => Command::ALL_NAMES_V1[18],
+            Command::GetPrivacySummary(_) => Command::ALL_NAMES_V1[19],
         }
     }
 
@@ -245,6 +358,36 @@ impl Command {
             "coresight.v1.listDrives" => {
                 let request: ListDrivesRequest = deserialize_payload(name, payload)?;
                 Ok(Command::ListDrives(request))
+            }
+            "coresight.v1.getGlobalStatus" => {
+                deserialize_payload(name, payload).map(Command::GetGlobalStatus)
+            }
+            "coresight.v1.getHomeSummary" => {
+                deserialize_payload(name, payload).map(Command::GetHomeSummary)
+            }
+            "coresight.v1.getStorage" => {
+                deserialize_payload(name, payload).map(Command::GetStorage)
+            }
+            "coresight.v1.getCleanup" => {
+                deserialize_payload(name, payload).map(Command::GetCleanup)
+            }
+            "coresight.v1.getDuplicateReport" => {
+                deserialize_payload(name, payload).map(Command::GetDuplicateReport)
+            }
+            "coresight.v1.getBigFileReport" => {
+                deserialize_payload(name, payload).map(Command::GetBigFileReport)
+            }
+            "coresight.v1.getStartupReport" => {
+                deserialize_payload(name, payload).map(Command::GetStartupReport)
+            }
+            "coresight.v1.getDnsRanking" => {
+                deserialize_payload(name, payload).map(Command::GetDnsRanking)
+            }
+            "coresight.v1.getBlockListPlan" => {
+                deserialize_payload(name, payload).map(Command::GetBlockListPlan)
+            }
+            "coresight.v1.getPrivacySummary" => {
+                deserialize_payload(name, payload).map(Command::GetPrivacySummary)
             }
             _ => Err(ApiError::new(
                 codes::UNKNOWN_COMMAND,

@@ -66,6 +66,16 @@ pub fn dispatch(session: &mut Session, command: Command) -> Envelope<Response> {
                 .cloned()
                 .collect(),
         )),
+        Command::GetGlobalStatus(_) => crate::reports::handle_get_global_status(session),
+        Command::GetHomeSummary(_) => crate::reports::handle_get_home_summary(session),
+        Command::GetStorage(_) => crate::reports::handle_get_storage(session),
+        Command::GetCleanup(_) => crate::reports::handle_get_cleanup(session),
+        Command::GetDuplicateReport(_) => crate::reports::handle_get_duplicate_report(session),
+        Command::GetBigFileReport(_) => crate::reports::handle_get_big_file_report(session),
+        Command::GetStartupReport(_) => crate::reports::handle_get_startup_report(session),
+        Command::GetDnsRanking(_) => crate::reports::handle_get_dns_ranking(session),
+        Command::GetBlockListPlan(_) => crate::reports::handle_get_block_list_plan(session),
+        Command::GetPrivacySummary(_) => crate::reports::handle_get_privacy_summary(session),
     }
 }
 
@@ -456,7 +466,7 @@ fn decode_category_code(code: &str) -> Option<Category> {
         .find(|category| category.code() == code)
 }
 
-fn category_title(category: Category) -> &'static str {
+pub(crate) fn category_title(category: Category) -> &'static str {
     match category {
         Category::Applications => "Applications",
         Category::ApplicationData => "Application data",
@@ -479,7 +489,7 @@ fn category_title(category: Category) -> &'static str {
     }
 }
 
-fn subcategory_name(code: Option<&str>) -> &str {
+pub(crate) fn subcategory_name(code: Option<&str>) -> &str {
     match code {
         Some("INSTALLER") => "Installer",
         Some("ARCHIVE") => "Archive",
@@ -539,7 +549,7 @@ fn opportunities_for_scan(scan: &ScanState) -> Vec<Opportunity> {
         .collect()
 }
 
-fn what_it_is(item: &CleanupItem, entries: u64, entries_without_size: u64) -> String {
+pub(crate) fn what_it_is(item: &CleanupItem, entries: u64, entries_without_size: u64) -> String {
     let entry_word = if entries == 1 { "entry" } else { "entries" };
     let size_note = if entries_without_size == 0 {
         "every entry had a known size".to_string()

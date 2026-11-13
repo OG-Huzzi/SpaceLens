@@ -37,7 +37,7 @@ done until the bar is met and tested.
 | 12 | File Splitter | `coresight-filetools::plan_split` | **IMPLEMENTED** | Plan states exact part count, offsets and sizes; the executor must checksum-verify. |
 | 13 | File Merger | `coresight-filetools::plan_merge` | **IMPLEMENTED** | Rejects zero-size parts, duplicates, unordered parts, and `u64` overflow instead of saturating a wrong total. |
 | 14 | File Deleter | Locked-file inspection + Trash move (`coresight-actions`) | PARTIAL (reversible moves IMPLEMENTED, permanent delete deliberately absent) | Protected/system paths are refused; the default is Trash, not unlink. `authorize()` refuses every action kind except `MoveToTrash`. |
-| 15 | File Wiper | Secure wipe | PLANNED | Must verify the post-wipe read-back; SSD/TRIM reality documented, not glossed over. Blocked by the current execution policy. |
+| 15 | File Wiper | `coresight-cleanup::wipe` — planning only | **IMPLEMENTED (planning)** | Multi-pass overwrite is **not** presented as a guarantee. Solid-state and copy-on-write media always yield `RequiresFullDiskSanitisation` and are blocked as `MediumDefeatsOverwrite`; `Unknown` media is `BestEffortOnly` and blocked. Snapshots block even on magnetic media. The jv16 "fake files for plausible deniability" feature is **refused outright** (`plausible_deniability_supported() == false`). This build wipes nothing. |
 | 16 | Task Manager | Application task inventory (`coresight-systools`) | **IMPLEMENTED** | Apps vs processes is a modelled distinction; unattributable processes are counted, never dropped; two app ids sharing a display name are never merged. |
 | 17 | Web Blocker | Block-list planner (`coresight-webtools`) | **IMPLEMENTED** | Strict domain validation; every rejected/duplicate/whitelisted entry is counted with a reason; reversible unblock plan. |
 | 18 | Internet Optimizer | DNS candidate ranking (`coresight-webtools`) | **IMPLEMENTED** | Ranking explains its weighting (latency, reliability, DNSSEC, documented privacy) and states plainly that switching DNS changes who sees every lookup. Never auto-switches. |
@@ -46,10 +46,10 @@ done until the bar is met and tested.
 
 | jv16 feature | CoreSight equivalent | Status | Note |
 |---|---|---|---|
-| Widget | Ambient scan indicator | PLANNED | Fits the "scanning is ambient, never blocking" UX rule; no floating window sprawl. |
-| Dark Mode | System-theme dark mode via CSS custom properties | **IMPLEMENTED** | `prefers-color-scheme` driven; colours are tokens, not scattered hex literals. |
-| Multilingual UI | Contract-first strings | PLANNED | All user-facing strings live behind the `coresight.v1.*` contract, never hard-coded in components. |
-| Fully configurable | Typed settings | PLANNED | Preferences are typed; hiding a tool is a view preference, not a code change. |
+| Widget | Ambient scan status strip | **IMPLEMENTED** | A read-only `role="status"` strip in the app shell showing idle / scanning / complete / failed / partial. It has **no** controls: a start/cancel affordance on every screen would violate "actions live in Cleanup only". |
+| Dark Mode | System-theme dark mode via CSS custom properties | **IMPLEMENTED** | `prefers-color-scheme` driven with an explicit light/dark override in Settings; colours are tokens, not scattered hex literals. |
+| Multilingual UI | Typed message catalogue (`src/i18n/`) | **PARTIAL** | Compile-time-safe `t()` keys with `en` + `de` complete. App shell, Settings, all shared state components, the Cleanup safety copy and the scan strip are localised. Home/Storage/History/Drives page copy and engine-provided strings are still English-only — recorded, not hidden. |
+| Fully configurable | Settings screen (`coresight.settings.v1`) | **IMPLEMENTED** | Typed, versioned, `localStorage`-backed: theme, reduced motion, density, advanced details, visible screens, locale. Corrupt or unknown-version stored data falls back to defaults; hiding a screen is a view preference, never a capability change. |
 
 ## Phase 8 UI status
 

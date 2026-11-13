@@ -17,10 +17,12 @@
 //! ## What a session can and cannot do
 //!
 //! * Serves: drive listing, drive summaries, category totals, opportunity
-//!   cards, and plan previews — all from registered facts.
+//!   cards, plan previews, and the ten aggregate view commands — all from
+//!   registered facts.
 //! * Cannot serve: scanning (no [`ScanBackend`] is attached in this build),
-//!   history (no store is attached), and execution (the current
-//!   `ExecutionPolicy` authorizes read-only actions only).
+//!   history (no store is attached), aggregate views for data the shell has
+//!   not registered, and execution (the current `ExecutionPolicy` authorizes
+//!   read-only actions only).
 //!
 //! Those refusals are the honesty contract, not missing wiring: see the
 //! crate documentation and `docs/API_CONTRACTS.md`.
@@ -32,10 +34,12 @@ use std::time::SystemTime;
 use coresight_cleanup::{plan_cleanup, CleanupItem, CleanupPlan, PlannerOptions};
 use coresight_history::Snapshot;
 use coresight_insights::{usage_by_category, UsageReport};
+use coresight_systools::startup::StartupItem;
+use coresight_webtools::{BlockListPlan, DnsRanking, PrivacyFinding};
 
 use crate::command::{CancelScanRequest, StartScanRequest};
 use crate::error::{codes, detail_token, ApiError};
-use crate::response::{CancelScanResponse, Drive, PlanPreview, StartScanResponse};
+use crate::response::{CancelScanResponse, Drive, PlanPreview, ScanStatus, StartScanResponse};
 
 /// A scanner the shell may attach in a later phase.
 ///
@@ -123,6 +127,14 @@ pub struct Session {
     pub(crate) plans: BTreeMap<String, StoredPlan>,
     pub(crate) confirmed: BTreeSet<String>,
     pub(crate) backend: Option<Box<dyn ScanBackend>>,
+    /// Startup inventory supplied by the shell, analysed on read.
+    pub(crate) startup_items: Option<Vec<StartupItem>>,
+    /// DNS benchmark ranking supplied by the shell.
+    pub(crate) dns_ranking: Option<DnsRanking>,
+    /// Reversible block-list plan supplied by the shell.
+    pub(crate) block_list_plan: Option<BlockListPlan>,
+    /// Privacy findings supplied by the shell, summarised on read.
+    pub(crate) privacy_findings: Option<Vec<PrivacyFinding>>,
 }
 
 impl Session {
@@ -134,7 +146,42 @@ impl Session {
             plans: BTreeMap::new(),
             confirmed: BTreeSet::new(),
             backend: None,
+            startup_items: None,
+            dns_ranking: None,
+            block_list_plan: None,
+            privacy_findings: None,
         }
+    }
+
+    /// Register the startup inventory the shell collected.
+    ///
+    /// The inventory is data, not an observation performed here: this crate
+    /// never enumerates startup items. `getStartupReport` analyses exactly the
+    /// entries registered by this call.
+    pub fn register_startup_inventory(&mut self, items: Vec<StartupItem>) {
+        self.startup_items = Some(items);
+    }
+
+    /// Register a DNS benchmark ranking produced elsewhere.
+    ///
+    /// This crate never contacts a resolver; it only projects the supplied
+    /// ranking into the `getDnsRanking` payload.
+    pub fn register_dns_ranking(&mut self, ranking: DnsRanking) {
+        self.dns_ranking = Some(ranking);
+    }
+
+    /// Register a reversible block-list plan produced elsewhere.
+    ///
+    /// This crate never reads or writes a hosts file.
+    pub fn register_block_list_plan(&mut self, plan: BlockListPlan) {
+        self.block_list_plan = Some(plan);
+    }
+
+    /// Register privacy findings collected elsewhere.
+    ///
+    /// The findings are summarised on read; nothing is removed.
+    pub fn register_privacy_findings(&mut self, findings: Vec<PrivacyFinding>) {
+        self.privacy_findings = Some(findings);
     }
 
     /// Register or refresh one drive identity.
@@ -227,6 +274,61 @@ impl Session {
             Some(backend) => Some(backend.as_mut()),
             None => None,
         }
+    }
+
+    /// The startup inventory registered into this session, if any.
+    pub(crate) fn startup_items(&self) -> Option<&[StartupItem]> {
+        self.startup_items.as_deref()
+    }
+
+    /// The DNS ranking registered into this session, if any.
+    pub(crate) fn dns_ranking(&self) -> Option<&DnsRanking> {
+        self.dns_ranking.as_ref()
+    }
+
+    /// The block-list plan registered into this session, if any.
+    pub(crate) fn block_list_plan(&self) -> Option<&BlockListPlan> {
+        self.block_list_plan.as_ref()
+    }
+
+    /// The privacy findings registered into this session, if any.
+    pub(crate) fn privacy_findings(&self) -> Option<&[PrivacyFinding]> {
+        self.privacy_findings.as_deref()
+    }
+
+    /// The scan that best describes the current state, across every drive.
+    ///
+    /// A running scan outranks any finished one (a scan in progress is the
+    /// current activity); among finished scans the newest `(completed_at,
+    /// scan_id)` wins. This is deterministic and independent of registration
+    /// order.
+    pub(crate) fn latest_scan(&self) -> Option<&ScanState> {
+        let running = self
+            .scans
+            .values()
+            .filter(|scan| scan.record.status == ScanStatus::Running)
+            .max_by(|left, right| left.record.scan_id.cmp(&right.record.scan_id));
+        running.or_else(|| {
+            self.scans.values().max_by(|left, right| {
+                left.record
+                    .completed_at
+                    .cmp(&right.record.completed_at)
+                    .then_with(|| left.record.scan_id.cmp(&right.record.scan_id))
+            })
+        })
+    }
+
+    /// The most recent scan that observed its full declared scope.
+    pub(crate) fn latest_full_scope_scan(&self) -> Option<&ScanState> {
+        self.scans
+            .values()
+            .filter(|scan| scan.record.status.observes_full_scope())
+            .max_by(|left, right| {
+                left.record
+                    .completed_at
+                    .cmp(&right.record.completed_at)
+                    .then_with(|| left.record.scan_id.cmp(&right.record.scan_id))
+            })
     }
 
     /// All drives, connected first, then by id. Deterministic and independent

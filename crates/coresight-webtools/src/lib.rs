@@ -842,7 +842,29 @@ fn screening_reason(
             "failure rate is not a finite number; the measurement cannot be trusted".to_string(),
         ));
     }
+    // A failure rate is a fraction in 0..=1. A negative rate is not a great
+    // reliability score — it is a malformed measurement, and scoring it as
+    // `1 - (-0.5) = 150% reliable` would rank a broken server first.
+    if !(0.0..=1.0).contains(&failure_rate) {
+        return Some((
+            DnsExclusionReason::TooUnreliable,
+            format!(
+                "failure rate {failure_rate} is outside the 0..=1 range a fraction must occupy"
+            ),
+        ));
+    }
     let maximum = options.max_failure_rate;
+    // A non-finite or out-of-range ceiling makes the comparison meaningless:
+    // `rate > NaN` is false for every rate, so a NaN ceiling would silently
+    // accept a server that fails every query. Refuse instead of accepting.
+    if !maximum.is_finite() || !(0.0..=1.0).contains(&maximum) {
+        return Some((
+            DnsExclusionReason::TooUnreliable,
+            format!(
+                "the configured maximum failure rate {maximum} is not a fraction in 0..=1, so reliability cannot be judged"
+            ),
+        ));
+    }
     if failure_rate > maximum {
         let rate_percent = failure_rate * 100.0;
         let maximum_percent = maximum * 100.0;
