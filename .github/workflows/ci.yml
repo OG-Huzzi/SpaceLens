@@ -67,8 +67,26 @@ jobs:
 
       # The desktop shell is its own workspace root (src-tauri/Cargo.toml), so
       # `--workspace` above does not reach it. Type-check it explicitly or it
-      # rots silently. This checks only — it does not link or bundle, which
-      # needs the full Tauri packaging toolchain.
+      # rots silently.
+      #
+      # `tauri::generate_context!()` reads `tauri.conf.json` and EMBEDS
+      # `frontendDist` (`../dist`) at compile time, so the frontend must exist
+      # before the shell can be checked. Building it here is therefore not
+      # redundant with the `frontend` job: that job never reaches the shell.
+      # This checks only — it does not link or bundle, which needs the full
+      # Tauri packaging toolchain.
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Windows'
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Frontend build (prerequisite for the shell type-check)
+        if: runner.os == 'Windows'
+        run: |
+          npm ci
+          npm run build
+
       - name: Desktop shell type-check (Tauri 2, not linked)
         if: runner.os == 'Windows'
         run: cargo check --manifest-path src-tauri/Cargo.toml

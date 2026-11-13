@@ -50,9 +50,13 @@ registers ten `#[tauri::command]` handlers that each forward into
 logic, no path handling. `src-tauri` is its own workspace root via an empty
 `[workspace]` table, so it stays out of the engine workspace.
 
-A CI step now type-checks it on Windows (`cargo check --manifest-path
-src-tauri/Cargo.toml`), because `--workspace` cannot reach a separate root and
-an ungated shell would rot. It is **checked, not linked or bundled** — real
+A CI step now type-checks it on Windows. **`tauri::generate_context!()` reads
+`tauri.conf.json` and embeds `frontendDist` (`../dist`) at compile time**, so the
+frontend must be built before the shell can be checked — the first CI attempt
+failed with exactly "The `frontendDist` configuration is set to `../dist` but
+this path doesn't exist". The Windows job therefore runs `npm ci && npm run
+build` before the check. That is not redundant with the `frontend` job, which
+never reaches the shell. It is **checked, not linked or bundled** — real
 packaging still needs the Tauri bundler toolchain.
 
 ### Transport fix (defect found during integration, then closed)
