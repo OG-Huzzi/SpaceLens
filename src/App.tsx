@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject
+} from "react";
 import {
   CONTRACT_VERSION,
   isContractCompatible,
@@ -7,10 +14,33 @@ import {
 } from "./api";
 import { createApi, isTauriRuntime } from "./api/tauriApi";
 import { useApiData } from "./hooks/useApiData";
-import { t, type MessageKey } from "./i18n";
-import { SCREEN_IDS, type ScreenId } from "./settings/schema";
+import { t } from "./i18n";
+import {
+  SCREEN_IDS,
+  SUPPORTED_LOCALES,
+  THEME_PREFERENCES,
+  isLocaleCode,
+  type ScreenId,
+  type ThemePreference
+} from "./settings/schema";
 import { SettingsProvider, useSettings } from "./settings/SettingsProvider";
 import { ScanStatusStrip } from "./components/ScanStatusStrip";
+import {
+  CommandPalette,
+  PALETTE_COPY,
+  PALETTE_DIALOG_ID,
+  PANEL_HEADING_ID,
+  PANEL_HOST_SCREEN,
+  SCREEN_LABELS,
+  ShortcutHelpDialog,
+  buildCommandSources,
+  commandTarget,
+  modifierKeyLabel,
+  panelTitle,
+  type Command,
+  type PanelTarget
+} from "./components/command";
+import { KeyHint } from "./design";
 import { HomeScreen } from "./screens/HomeScreen";
 import { StorageScreen } from "./screens/StorageScreen";
 import { CleanupScreen } from "./screens/CleanupScreen";
@@ -25,16 +55,12 @@ import { SettingsScreen } from "./screens/SettingsScreen";
  */
 type RouteId = ScreenId | "settings";
 
-const SCREEN_LABELS: Record<ScreenId, MessageKey> = {
-  home: "app.nav.home",
-  storage: "app.nav.storage",
-  cleanup: "app.nav.cleanup",
-  history: "app.nav.history",
-  drives: "app.nav.drives"
-};
-
 function isScreenId(value: string): value is ScreenId {
   return (SCREEN_IDS as readonly string[]).includes(value);
+}
+
+function isThemePreference(value: string): value is ThemePreference {
+  return (THEME_PREFERENCES as readonly string[]).includes(value);
 }
 
 function readRouteFromHash(): RouteId {
@@ -57,16 +83,32 @@ function AppHeader({
   api,
   screen,
   liveEngine,
-  onNavigate
+  onNavigate,
+  onOpenPalette,
+  paletteOpen,
+  commandTriggerRef
 }: {
   api: CoreSightApi;
   screen: RouteId;
   liveEngine: boolean;
   onNavigate: (next: RouteId) => void;
+  onOpenPalette: () => void;
+  paletteOpen: boolean;
+  commandTriggerRef: RefObject<HTMLButtonElement>;
 }) {
-  const { settings } = useSettings();
+  const { settings, updateSettings } = useSettings();
   const visibleScreens = SCREEN_IDS.filter((id) => settings.visibleScreens[id]);
   const homeTarget: ScreenId = visibleScreens[0] ?? "home";
+
+  function handleThemeChange(value: string) {
+    if (!isThemePreference(value)) return;
+    updateSettings({ theme: value });
+  }
+
+  function handleLocaleChange(value: string) {
+    if (!isLocaleCode(value)) return;
+    updateSettings({ locale: value });
+  }
 
   return (
     <header className="app-header">
@@ -95,6 +137,49 @@ function AppHeader({
         >
           {liveEngine ? t("app.header.engineLive") : t("app.header.enginePreview")}
         </span>
+
+        <div className="cs-cmd-header-controls">
+          <button
+            type="button"
+            className="cs-cmd-trigger"
+            ref={commandTriggerRef}
+            onClick={onOpenPalette}
+            aria-haspopup="dialog"
+            aria-expanded={paletteOpen}
+            aria-controls={paletteOpen ? PALETTE_DIALOG_ID : undefined}
+          >
+            <span>{PALETTE_COPY.searchLabel}</span>
+            <KeyHint keys={[modifierKeyLabel(), "K"]} />
+          </button>
+
+          <label className="cs-cmd-select">
+            <span className="cs-cmd-visually-hidden">{t("settings.theme.legend")}</span>
+            <select
+              value={settings.theme}
+              onChange={(event) => handleThemeChange(event.target.value)}
+              aria-label={t("settings.theme.legend")}
+            >
+              <option value="system">{t("settings.theme.system")}</option>
+              <option value="light">{t("settings.theme.light")}</option>
+              <option value="dark">{t("settings.theme.dark")}</option>
+            </select>
+          </label>
+
+          <label className="cs-cmd-select">
+            <span className="cs-cmd-visually-hidden">{t("settings.language.label")}</span>
+            <select
+              value={settings.locale}
+              onChange={(event) => handleLocaleChange(event.target.value)}
+              aria-label={t("settings.language.label")}
+            >
+              {SUPPORTED_LOCALES.map((locale) => (
+                <option key={locale} value={locale}>
+                  {t(locale === "en" ? "settings.language.en" : "settings.language.de")}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
 
       <ScanStatusStrip api={api} showAdvancedDetails={settings.showAdvancedDetails} />
@@ -158,8 +243,20 @@ function AppShell() {
   const api = useMemo(() => createApi({ mock: { scenario } }), [scenario]);
   const [route, setRoute] = useState<RouteId>(readRouteFromHash);
   const [focusCategoryId, setFocusCategoryId] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [pendingPanel, setPendingPanel] = useState<PanelTarget | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const mounted = useRef(false);
+  const commandTriggerRef = useRef<HTMLButtonElement>(null);
+  const paletteOpenRef = useRef(paletteOpen);
+  paletteOpenRef.current = paletteOpen;
+
+  const visibleScreens = settings.visibleScreens;
+  const sources = useMemo(
+    () => buildCommandSources({ api, visibleScreens }),
+    [api, visibleScreens]
+  );
 
   useEffect(() => {
     const onHashChange = () => {
@@ -196,6 +293,105 @@ function AppShell() {
     setFocusCategoryId(categoryId);
     window.location.hash = "storage";
   }
+
+  /**
+   * Opening focuses the trigger first, so the palette can hand the focus back
+   * to it when it closes — the keyboard path and the mouse path end in the
+   * same place.
+   */
+  function handlePaletteOpenChange(next: boolean) {
+    if (next) commandTriggerRef.current?.focus();
+    setPaletteOpen(next);
+  }
+
+  /**
+   * The only two effects a command may have: navigate, or jump to a read-only
+   * report. `commandTarget()` returns null for anything else, so a command
+   * that would change state can never reach the engine from here.
+   */
+  function handleRunCommand(command: Command) {
+    if (command.disabled === true) return;
+    const target = commandTarget(command);
+    if (target === null) return;
+
+    if (target.kind === "navigate") {
+      handleNavigate(target.route);
+      return;
+    }
+
+    setPendingPanel(target.panel);
+    handleNavigate(PANEL_HOST_SCREEN[target.panel]);
+  }
+
+  // Focus the report heading after the jump. The panel may still be loading
+  // when the route changes, so the lookup is retried for a short while. The
+  // heading is found by its id first and by its title second, so a panel that
+  // moves in the markup still receives the focus.
+  useEffect(() => {
+    const panel = pendingPanel;
+    if (panel === null) return;
+
+    const headingId = PANEL_HEADING_ID[panel];
+    const title = panelTitle(panel);
+    let cancelled = false;
+    let attempts = 0;
+
+    const findHeading = (): HTMLElement | null => {
+      const byId = document.getElementById(headingId);
+      if (byId instanceof HTMLElement) return byId;
+
+      const headings = document.querySelectorAll<HTMLElement>("h2, h3");
+      for (const heading of headings) {
+        if ((heading.textContent ?? "").trim() === title) return heading;
+      }
+      return null;
+    };
+
+    const tryFocus = () => {
+      if (cancelled) return;
+      attempts += 1;
+      const heading = findHeading();
+      if (heading !== null) {
+        heading.setAttribute("tabindex", "-1");
+        heading.focus({ preventScroll: true });
+        if (typeof heading.scrollIntoView === "function") {
+          heading.scrollIntoView({ block: "start", behavior: "auto" });
+        }
+        setPendingPanel(null);
+        return;
+      }
+      if (attempts >= 20) {
+        setPendingPanel(null);
+        return;
+      }
+      window.setTimeout(tryFocus, 100);
+    };
+
+    tryFocus();
+    return () => {
+      cancelled = true;
+    };
+  }, [route, pendingPanel]);
+
+  // "?" opens the shortcut list, unless the user is typing somewhere.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "?") return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (paletteOpenRef.current) return;
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        if (target.isContentEditable) return;
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      }
+      event.preventDefault();
+      setShortcutsOpen(true);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // A screen switched off in Settings is not reachable by route either: the
   // preference hides the destination, nothing about its capability changes.
@@ -243,7 +439,15 @@ function AppShell() {
       <a className="skip-link" href="#content">
         {t("app.skipToContent")}
       </a>
-      <AppHeader api={api} screen={screen} liveEngine={liveEngine} onNavigate={handleNavigate} />
+      <AppHeader
+        api={api}
+        screen={screen}
+        liveEngine={liveEngine}
+        onNavigate={handleNavigate}
+        onOpenPalette={() => handlePaletteOpenChange(true)}
+        paletteOpen={paletteOpen}
+        commandTriggerRef={commandTriggerRef}
+      />
       <main id="content" ref={mainRef} tabIndex={-1}>
         {content}
       </main>
@@ -255,7 +459,25 @@ function AppShell() {
             mode: liveEngine ? t("app.footer.modeLive") : t("app.footer.modePreview")
           })}
         </p>
+        <p>
+          <button
+            type="button"
+            className="cs-cmd-footer-button"
+            onClick={() => setShortcutsOpen(true)}
+          >
+            {PALETTE_COPY.shortcutsTitle}
+          </button>
+        </p>
       </footer>
+
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={handlePaletteOpenChange}
+        sources={sources}
+        onRun={handleRunCommand}
+      />
+
+      <ShortcutHelpDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </>
   );
 }

@@ -8,11 +8,13 @@ import { useApiData } from "../hooks/useApiData";
 import { formatBytes } from "../lib/format";
 import { t, tCount, type MessageKey } from "../i18n";
 import {
+  Bytes,
   CoverageBanner,
   DataValue,
   EmptyState,
   InlineNotice,
-  SectionHeading
+  SectionHeading,
+  UnknownValue
 } from "../components/ui";
 import { PanelFailure, PanelFrame, PanelLoading } from "./PanelFrame";
 
@@ -40,11 +42,11 @@ function FindingRow({ finding, partial }: { finding: PrivacyFinding; partial: bo
         <p>{finding.detail}</p>
         <p className="microcopy">
           {t("privacy.finding.estimatedBytes")}{" "}
-          <DataValue partial={partial}>
-            {finding.estimatedBytes === null
-              ? t("privacy.finding.estimateUnknown")
-              : formatBytes(finding.estimatedBytes)}
-          </DataValue>
+          {finding.estimatedBytes === null ? (
+            <UnknownValue label={t("privacy.finding.estimateUnknown")} />
+          ) : (
+            <DataValue partial={partial}>{formatBytes(finding.estimatedBytes)}</DataValue>
+          )}
         </p>
       </div>
     </li>
@@ -74,11 +76,15 @@ function PrivacyContent({
   if (knownEmpty) {
     return (
       <>
-        <CoverageBanner coverage={coverage} />
+        <CoverageBanner
+          complete={!partial}
+          coverage={coverage}
+          context="scan"
+        />
         <EmptyState
           title={t("privacy.empty.title")}
-          description={t("privacy.empty.body")}
-          nextStep={t("privacy.empty.next")}
+          body={t("privacy.empty.body")}
+          next={t("privacy.empty.next")}
         />
       </>
     );
@@ -86,7 +92,7 @@ function PrivacyContent({
 
   return (
     <>
-      <CoverageBanner coverage={coverage} />
+      <CoverageBanner complete={!partial} coverage={coverage} context="scan" />
 
       {sessionFindings.length > 0 ? (
         <InlineNotice tone="attention">
@@ -112,7 +118,7 @@ function PrivacyContent({
         <div>
           <dt>{t("privacy.summary.bytes")}</dt>
           <dd>
-            <DataValue partial={partial}>{formatBytes(totalEstimatedBytes)}</DataValue>
+            <Bytes value={totalEstimatedBytes} partial={partial} />
           </dd>
         </div>
         <div>

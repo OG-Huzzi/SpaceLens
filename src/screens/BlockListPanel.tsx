@@ -86,11 +86,15 @@ function BlockListContent({
   if (knownEmpty) {
     return (
       <>
-        <CoverageBanner coverage={coverage} />
+        <CoverageBanner
+          complete={!partial}
+          coverage={coverage}
+          context="scan"
+        />
         <EmptyState
           title={t("blocklist.empty.title")}
-          description={t("blocklist.empty.body")}
-          nextStep={t("blocklist.empty.next")}
+          body={t("blocklist.empty.body")}
+          next={t("blocklist.empty.next")}
         />
       </>
     );
@@ -98,7 +102,7 @@ function BlockListContent({
 
   return (
     <>
-      <CoverageBanner coverage={coverage} />
+      <CoverageBanner complete={!partial} coverage={coverage} context="scan" />
 
       <dl className="summary-facts">
         <PlanFact

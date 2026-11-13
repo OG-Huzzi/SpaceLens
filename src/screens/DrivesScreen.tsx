@@ -1,8 +1,9 @@
 import type { CoreSightApi, Drive, DrivesData } from "../api";
 import { useApiData } from "../hooks/useApiData";
-import { formatBytes, formatDateTime, formatPercent } from "../lib/format";
+import { formatDateTime, formatPercent } from "../lib/format";
 import { t, tCount, type MessageKey } from "../i18n";
 import {
+  Bytes,
   CoverageBanner,
   DataValue,
   EmptyState,
@@ -12,6 +13,7 @@ import {
   SectionHeading,
   SizeBar,
   StatusPill,
+  UnknownValue,
   type PillTone
 } from "../components/ui";
 
@@ -48,9 +50,11 @@ function DriveRow({ drive, partial }: { drive: Drive; partial: boolean }) {
           <div className="drive-row__capacity-label">
             <span>{t("drives.row.usedSpace")}</span>
             <DataValue partial={partial}>
-              {drive.usedShare === null
-                ? t("format.shareUnknown")
-                : formatPercent(drive.usedShare)}
+              {drive.usedShare === null ? (
+                <UnknownValue />
+              ) : (
+                formatPercent(drive.usedShare)
+              )}
             </DataValue>
           </div>
           <SizeBar
@@ -64,19 +68,19 @@ function DriveRow({ drive, partial }: { drive: Drive; partial: boolean }) {
           <div>
             <dt>{t("drives.row.free")}</dt>
             <dd>
-              <DataValue partial={partial}>{formatBytes(drive.freeBytes)}</DataValue>
+              <Bytes value={drive.freeBytes} partial={partial} />
             </dd>
           </div>
           <div>
             <dt>{t("drives.row.used")}</dt>
             <dd>
-              <DataValue partial={partial}>{formatBytes(drive.usedBytes)}</DataValue>
+              <Bytes value={drive.usedBytes} partial={partial} />
             </dd>
           </div>
           <div>
             <dt>{t("drives.row.capacity")}</dt>
             <dd>
-              <DataValue partial={partial}>{formatBytes(drive.totalBytes)}</DataValue>
+              <Bytes value={drive.totalBytes} partial={partial} />
             </dd>
           </div>
           <div>
@@ -122,13 +126,17 @@ function DrivesContent({ data }: { data: DrivesData }) {
         }
       />
 
-      <CoverageBanner coverage={data.coverage} />
+      <CoverageBanner
+        complete={!partial}
+        coverage={data.coverage}
+        context="scan"
+      />
 
       {data.drives.length === 0 ? (
         <EmptyState
           title={t("drives.empty.title")}
-          description={t("drives.empty.body")}
-          nextStep={t("drives.empty.next")}
+          body={t("drives.empty.body")}
+          next={t("drives.empty.next")}
         />
       ) : (
         <>

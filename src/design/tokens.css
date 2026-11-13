@@ -1,0 +1,194 @@
+/*
+ * CoreSight design tokens.
+ *
+ * The authoritative vocabulary lives in docs/DESIGN_SYSTEM.md. This file is the
+ * single place raw colour, type, space, radius, elevation and motion values are
+ * allowed to exist. Components consume the custom properties only.
+ *
+ * Dark is the primary theme: its ramp is tuned first (surface lightness carries
+ * elevation, shadows are secondary). Light is a separate daylight palette, not
+ * an inversion.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Typography ----------------------------------------------------------- */
+  --cs-font-sans: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system,
+    BlinkMacSystemFont, sans-serif;
+  --cs-font-mono: "Cascadia Mono", "Cascadia Code", "SFMono-Regular", "SF Mono", Consolas,
+    "Liberation Mono", monospace;
+
+  --cs-text-xs: 11px;
+  --cs-text-sm: 12px;
+  --cs-text-base: 14px;
+  --cs-text-md: 16px;
+  --cs-text-lg: 20px;
+  --cs-text-xl: 26px;
+  --cs-text-2xl: 34px;
+  --cs-text-3xl: 44px;
+
+  --cs-leading-tight: 1.15;
+  --cs-leading-snug: 1.35;
+  --cs-leading-normal: 1.55;
+
+  --cs-weight-regular: 400;
+  --cs-weight-medium: 500;
+  --cs-weight-semibold: 600;
+
+  /* Space — 8-point grid ------------------------------------------------ */
+  --cs-space-1: 4px;
+  --cs-space-2: 8px;
+  --cs-space-3: 12px;
+  --cs-space-4: 16px;
+  --cs-space-5: 24px;
+  --cs-space-6: 32px;
+  --cs-space-7: 40px;
+  --cs-space-8: 48px;
+  --cs-space-9: 64px;
+  --cs-space-10: 80px;
+  --cs-space-11: 96px;
+  --cs-space-12: 128px;
+
+  /* Radius --------------------------------------------------------------- */
+  --cs-radius-sm: 6px;
+  --cs-radius-md: 10px;
+  --cs-radius-lg: 16px;
+  --cs-radius-full: 9999px;
+
+  /* Layout --------------------------------------------------------------- */
+  --cs-sidebar-width: 248px;
+  --cs-content-max: 1180px;
+  --cs-panel-pad: var(--cs-space-5);
+  --cs-measure: 68ch;
+  --cs-measure-wide: 88ch;
+  --cs-control-height: 40px;
+  --cs-row-height: 56px;
+  --cs-row-height-compact: 48px;
+  /* Height the sticky application shell occupies. Column headers and anchor
+     targets offset by it so nothing hides behind the chrome. */
+  --cs-header-offset: 148px;
+
+  /* Hatch — the single, shared "this value is not known" texture. Every
+     unknown region in every visualisation uses this one pattern, so a reader
+     learns it once. */
+  --cs-viz-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--cs-border-unknown) 22%, transparent) 0 4px,
+    transparent 4px 9px
+  );
+
+  /* Motion --------------------------------------------------------------- */
+  --cs-duration-instant: 80ms;
+  --cs-duration-fast: 140ms;
+  --cs-duration-base: 220ms;
+  --cs-duration-slow: 360ms;
+  --cs-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --cs-ease-emphasized: cubic-bezier(0.2, 0, 0, 1.2);
+
+  /* Colour — daylight ---------------------------------------------------- */
+  --cs-bg: #f1f2ed;
+  --cs-surface: #fbfcf9;
+  --cs-surface-raised: #ffffff;
+  --cs-surface-sunken: #e7e9e3;
+  --cs-border: #d6dad1;
+  --cs-border-strong: #b2b8ad;
+  --cs-border-unknown: #7d857d;
+  --cs-text: #14181a;
+  --cs-text-muted: #4a5458;
+  --cs-text-subtle: #5d6663;
+  --cs-text-inverse: #f8fbf9;
+  --cs-accent: #1d5c4f;
+  --cs-accent-hover: #14463c;
+  --cs-accent-subtle: #ddeae5;
+  --cs-safe: #1c6644;
+  --cs-safe-subtle: #dfeee4;
+  --cs-review: #764a08;
+  --cs-review-subtle: #f5e8d0;
+  --cs-offlimits: #7c2d33;
+  --cs-offlimits-subtle: #f3e0e0;
+  --cs-warning: #7a4f05;
+  --cs-warning-subtle: #f7ecd6;
+  --cs-danger: #9a2b22;
+  --cs-danger-subtle: #f6e2df;
+  --cs-focus: #0b6b5c;
+
+
+
+  /* Elevation — daylight ------------------------------------------------- */
+  --cs-shadow-1: 0 1px 2px rgb(20 24 26 / 6%);
+  --cs-shadow-2: 0 8px 24px rgb(20 24 26 / 8%);
+  --cs-shadow-3: 0 24px 64px rgb(20 24 26 / 14%);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --cs-bg: #0b0e10;
+  --cs-surface: #121619;
+  --cs-surface-raised: #171d21;
+  --cs-surface-sunken: #080b0d;
+  --cs-border: #252c31;
+  --cs-border-strong: #39434a;
+  --cs-border-unknown: #5c676e;
+  --cs-text: #e7ecef;
+  --cs-text-muted: #a6b1b8;
+  --cs-text-subtle: #7e8a91;
+  --cs-text-inverse: #0b1113;
+  --cs-accent: #93d6c0;
+  --cs-accent-hover: #b5e8d6;
+  --cs-accent-subtle: #17332c;
+  --cs-safe: #86d9ab;
+  --cs-safe-subtle: #112b20;
+  --cs-review: #e8bd70;
+  --cs-review-subtle: #332716;
+  --cs-offlimits: #f09292;
+  --cs-offlimits-subtle: #3a1d1f;
+  --cs-warning: #e8b75f;
+  --cs-warning-subtle: #33280f;
+  --cs-danger: #f08a80;
+  --cs-danger-subtle: #3a1c1a;
+  --cs-focus: #a8e4d2;
+
+
+  --cs-shadow-1: 0 1px 0 rgb(255 255 255 / 4%);
+  --cs-shadow-2: 0 12px 32px rgb(0 0 0 / 38%);
+  --cs-shadow-3: 0 32px 80px rgb(0 0 0 / 52%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --cs-bg: #0b0e10;
+    --cs-surface: #121619;
+    --cs-surface-raised: #171d21;
+    --cs-surface-sunken: #080b0d;
+    --cs-border: #252c31;
+    --cs-border-strong: #39434a;
+    --cs-border-unknown: #5c676e;
+    --cs-text: #e7ecef;
+    --cs-text-muted: #a6b1b8;
+    --cs-text-subtle: #7e8a91;
+    --cs-text-inverse: #0b1113;
+    --cs-accent: #93d6c0;
+    --cs-accent-hover: #b5e8d6;
+    --cs-accent-subtle: #17332c;
+    --cs-safe: #86d9ab;
+    --cs-safe-subtle: #112b20;
+    --cs-review: #e8bd70;
+    --cs-review-subtle: #332716;
+    --cs-offlimits: #f09292;
+    --cs-offlimits-subtle: #3a1d1f;
+    --cs-warning: #e8b75f;
+    --cs-warning-subtle: #33280f;
+    --cs-danger: #f08a80;
+    --cs-danger-subtle: #3a1c1a;
+    --cs-focus: #a8e4d2;
+
+
+    --cs-shadow-1: 0 1px 0 rgb(255 255 255 / 4%);
+    --cs-shadow-2: 0 12px 32px rgb(0 0 0 / 38%);
+    --cs-shadow-3: 0 32px 80px rgb(0 0 0 / 52%);
+  }
+}

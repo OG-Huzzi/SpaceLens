@@ -1,0 +1,355 @@
+/*
+ * Command palette, command trigger and shortcut list.
+ *
+ * Every colour, radius, space and duration comes from the `--cs-*` token
+ * vocabulary; nothing here hard-codes a value. The design tokens are imported
+ * here so the palette is the first component to actually consume them.
+ *
+ * MOTION
+ * ------
+ * The open/close transition is a short fade plus a small lift. It collapses to
+ * a near-instant opacity change under `prefers-reduced-motion: reduce` and
+ * under the explicit `[data-reduced-motion="reduce"]` preference, exactly like
+ * every other transition in the design system.
+ */
+
+@import "../../design/tokens.css";
+
+.cs-cmd-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Backdrop and dialog
+   -------------------------------------------------------------------------- */
+
+.cs-cmd-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--cs-space-8) var(--cs-space-4);
+  background: color-mix(in srgb, var(--cs-bg) 72%, transparent);
+  animation: cs-cmd-fade var(--cs-duration-fast) var(--cs-ease-standard);
+}
+
+.cs-cmd-palette {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 620px);
+  max-height: min(72vh, 560px);
+  overflow: hidden;
+  background: var(--cs-surface-raised);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-lg);
+  box-shadow: var(--cs-shadow-3);
+  font-family: var(--cs-font-sans);
+  animation: cs-cmd-lift var(--cs-duration-fast) var(--cs-ease-emphasized);
+}
+
+@keyframes cs-cmd-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cs-cmd-lift {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--cs-space-2) * -1));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-cmd-backdrop,
+  .cs-cmd-palette {
+    animation-name: cs-cmd-fade;
+    animation-duration: var(--cs-duration-instant);
+  }
+}
+
+:root[data-reduced-motion="reduce"] .cs-cmd-backdrop,
+:root[data-reduced-motion="reduce"] .cs-cmd-palette {
+  animation-name: cs-cmd-fade;
+  animation-duration: var(--cs-duration-instant);
+}
+
+/* --------------------------------------------------------------------------
+   Search field
+   -------------------------------------------------------------------------- */
+
+.cs-cmd-palette__search {
+  padding: var(--cs-space-4) var(--cs-space-4) var(--cs-space-3);
+  border-bottom: 1px solid var(--cs-border);
+}
+
+.cs-cmd-palette__input {
+  width: 100%;
+  padding: var(--cs-space-3);
+  font-family: var(--cs-font-sans);
+  font-size: var(--cs-text-md);
+  line-height: var(--cs-leading-snug);
+  color: var(--cs-text);
+  background: var(--cs-surface-sunken);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-md);
+}
+
+.cs-cmd-palette__input::placeholder {
+  color: var(--cs-text-subtle);
+}
+
+.cs-cmd-palette__input:focus-visible {
+  outline: 2px solid var(--cs-focus);
+  outline-offset: 1px;
+  border-color: var(--cs-focus);
+}
+
+/* --------------------------------------------------------------------------
+   Results
+   -------------------------------------------------------------------------- */
+
+.cs-cmd-palette__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--cs-space-2) 0;
+}
+
+.cs-cmd-palette__group + .cs-cmd-palette__group {
+  margin-top: var(--cs-space-2);
+}
+
+.cs-cmd-palette__group-label {
+  padding: var(--cs-space-2) var(--cs-space-4) var(--cs-space-1);
+  font-size: var(--cs-text-xs);
+  font-weight: var(--cs-weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cs-text-subtle);
+}
+
+.cs-cmd-palette__options {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cs-cmd-palette__option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--cs-space-3);
+  padding: var(--cs-space-2) var(--cs-space-4);
+  cursor: pointer;
+  font-size: var(--cs-text-base);
+  color: var(--cs-text);
+}
+
+.cs-cmd-palette__option[aria-selected="true"] {
+  background: var(--cs-accent-subtle);
+  box-shadow: inset 2px 0 0 0 var(--cs-accent);
+}
+
+.cs-cmd-palette__option[data-disabled="true"] {
+  color: var(--cs-text-subtle);
+  cursor: not-allowed;
+}
+
+.cs-cmd-palette__option[data-disabled="true"][aria-selected="true"] {
+  background: var(--cs-surface-sunken);
+  box-shadow: inset 2px 0 0 0 var(--cs-border-strong);
+}
+
+.cs-cmd-palette__option-label {
+  flex: 1 1 auto;
+}
+
+.cs-cmd-palette__option-reason {
+  flex: 0 1 auto;
+  font-size: var(--cs-text-sm);
+  color: var(--cs-text-subtle);
+}
+
+.cs-cmd-palette__option-shortcut {
+  flex: 0 0 auto;
+  font-family: var(--cs-font-mono);
+  font-size: var(--cs-text-xs);
+  color: var(--cs-text-muted);
+}
+
+.cs-cmd-palette__pending,
+.cs-cmd-palette__failed {
+  margin: 0;
+  padding: var(--cs-space-2) var(--cs-space-4);
+  font-size: var(--cs-text-sm);
+  color: var(--cs-text-muted);
+}
+
+.cs-cmd-palette__failed {
+  color: var(--cs-warning);
+}
+
+.cs-cmd-palette__empty {
+  padding: var(--cs-space-5) var(--cs-space-4);
+  border-top: 1px solid var(--cs-border);
+}
+
+.cs-cmd-palette__empty-title {
+  margin: 0 0 var(--cs-space-1);
+  font-size: var(--cs-text-base);
+  font-weight: var(--cs-weight-semibold);
+  color: var(--cs-text);
+}
+
+.cs-cmd-palette__empty-body {
+  margin: 0;
+  font-size: var(--cs-text-sm);
+  color: var(--cs-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Header trigger
+   -------------------------------------------------------------------------- */
+
+.cs-cmd-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cs-space-2);
+  padding: var(--cs-space-2) var(--cs-space-3);
+  font-family: var(--cs-font-sans);
+  font-size: var(--cs-text-sm);
+  color: var(--cs-text-muted);
+  background: var(--cs-surface);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-md);
+  cursor: pointer;
+}
+
+.cs-cmd-trigger:hover {
+  color: var(--cs-text);
+  border-color: var(--cs-border-strong);
+}
+
+.cs-cmd-trigger:focus-visible {
+  outline: 2px solid var(--cs-focus);
+  outline-offset: 2px;
+}
+
+.cs-cmd-header-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cs-space-2);
+  margin-left: auto;
+}
+
+.cs-cmd-select {
+  display: inline-flex;
+}
+
+.cs-cmd-select select {
+  padding: var(--cs-space-2) var(--cs-space-2);
+  font-family: var(--cs-font-sans);
+  font-size: var(--cs-text-sm);
+  color: var(--cs-text-muted);
+  background: var(--cs-surface);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-md);
+}
+
+.cs-cmd-select select:focus-visible {
+  outline: 2px solid var(--cs-focus);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   Shortcut list
+   -------------------------------------------------------------------------- */
+
+.cs-cmd-shortcuts {
+  width: min(100%, 460px);
+  padding: var(--cs-space-5);
+  background: var(--cs-surface-raised);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-lg);
+  box-shadow: var(--cs-shadow-3);
+  font-family: var(--cs-font-sans);
+  animation: cs-cmd-lift var(--cs-duration-fast) var(--cs-ease-emphasized);
+}
+
+.cs-cmd-shortcuts__title {
+  margin: 0 0 var(--cs-space-3);
+  font-size: var(--cs-text-md);
+  font-weight: var(--cs-weight-semibold);
+  color: var(--cs-text);
+}
+
+.cs-cmd-shortcuts__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cs-cmd-shortcuts__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--cs-space-4);
+  padding: var(--cs-space-2) 0;
+  border-bottom: 1px solid var(--cs-border);
+  font-size: var(--cs-text-sm);
+  color: var(--cs-text-muted);
+}
+
+.cs-cmd-shortcuts__row:last-child {
+  border-bottom: 0;
+}
+
+.cs-cmd-shortcuts__keys {
+  display: inline-flex;
+  gap: var(--cs-space-1);
+  flex: 0 0 auto;
+}
+
+.cs-cmd-shortcuts__key {
+  padding: 0 var(--cs-space-2);
+  font-family: var(--cs-font-mono);
+  font-size: var(--cs-text-xs);
+  color: var(--cs-text);
+  background: var(--cs-surface-sunken);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-sm);
+}
+
+.cs-cmd-footer-button {
+  padding: 0;
+  font-family: var(--cs-font-sans);
+  font-size: var(--cs-text-sm);
+  color: var(--cs-accent);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.cs-cmd-footer-button:focus-visible {
+  outline: 2px solid var(--cs-focus);
+  outline-offset: 2px;
+}

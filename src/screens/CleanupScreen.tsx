@@ -9,23 +9,23 @@ import {
   type CoreSightApi
 } from "../api";
 import { useApiData } from "../hooks/useApiData";
-import {
-  formatAge,
-  formatBytes,
-  formatDateTime
-} from "../lib/format";
+import { formatAge, formatBytes, formatDateTime } from "../lib/format";
 import { t, tCount } from "../i18n";
 import {
+  Button,
+  Bytes,
   CoverageBanner,
   DataValue,
   EmptyState,
   InlineError,
   InlineNotice,
   PageHeader,
+  Panel,
   ScreenError,
   ScreenLoading,
-  SectionHeading,
-  TierBadge
+  Surface,
+  Tier,
+  UnknownValue
 } from "../components/ui";
 
 type PreviewState =
@@ -67,8 +67,6 @@ function CleanupList({
 }) {
   const scanIncomplete = data.coverage.completeness !== "complete";
   const partial = scanIncomplete;
-  const actionItems = data.items;
-  const offLimits = data.offLimits;
 
   return (
     <div className="screen screen--cleanup">
@@ -87,28 +85,28 @@ function CleanupList({
         }
       />
 
-      <CoverageBanner coverage={data.coverage} />
+      <CoverageBanner complete={!partial} coverage={data.coverage} context="scan" />
 
-      <section className="cleanup-summary" aria-labelledby="cleanup-summary-title">
-        <div>
-          <p className="eyebrow">{t("cleanup.summary.safeEyebrow")}</p>
-          <h2 id="cleanup-summary-title">
-            <DataValue partial={partial}>{formatBytes(data.safeRecoverableBytes)}</DataValue>
-          </h2>
-          <p>{t("cleanup.summary.safeBody")}</p>
-        </div>
-        <div>
-          <p className="eyebrow">{t("cleanup.summary.reviewEyebrow")}</p>
-          <p className="cleanup-summary__figure">
-            <DataValue partial={partial}>{formatBytes(data.reviewRecoverableBytes)}</DataValue>
+      <Surface tone="raised" padded className="cleanup-summary">
+        <div className="cleanup-summary__cell cleanup-summary__cell--safe">
+          <p className="cs-eyebrow">{t("cleanup.summary.safeEyebrow")}</p>
+          <p className="cleanup-summary__figure cs-num">
+            <Bytes value={data.safeRecoverableBytes} partial={partial} />
           </p>
-          <p>{t("cleanup.summary.reviewBody")}</p>
+          <p className="cleanup-summary__body">{t("cleanup.summary.safeBody")}</p>
         </div>
-        <div className="cleanup-summary__rules">
+        <div className="cleanup-summary__cell">
+          <p className="cs-eyebrow">{t("cleanup.summary.reviewEyebrow")}</p>
+          <p className="cleanup-summary__figure cleanup-summary__figure--small cs-num">
+            <Bytes value={data.reviewRecoverableBytes} partial={partial} />
+          </p>
+          <p className="cleanup-summary__body">{t("cleanup.summary.reviewBody")}</p>
+        </div>
+        <div className="cleanup-summary__cell cleanup-summary__rules">
           <strong>{t("cleanup.rules.title")}</strong>
           <p>{t("cleanup.rules.body")}</p>
         </div>
-      </section>
+      </Surface>
 
       {scanIncomplete ? (
         <InlineNotice tone="attention">
@@ -117,33 +115,27 @@ function CleanupList({
         </InlineNotice>
       ) : null}
 
-      <section className="panel" aria-labelledby="opportunities-heading">
-        <SectionHeading
-          id="opportunities-heading"
-          title={t("cleanup.opportunities.title")}
-          description={t("cleanup.opportunities.description")}
-          aside={
-            <span className="eyebrow">
-              <DataValue partial={partial}>
-                {tCount(
-                  actionItems.length,
-                  "unit.opportunity.one",
-                  "unit.opportunity.other"
-                )}
-              </DataValue>
-            </span>
-          }
-        />
-
-        {actionItems.length === 0 ? (
+      <Panel
+        id="opportunities-heading"
+        title={t("cleanup.opportunities.title")}
+        description={t("cleanup.opportunities.description")}
+        actions={
+          <span className="cs-eyebrow">
+            <DataValue partial={partial}>
+              {tCount(data.items.length, "unit.opportunity.one", "unit.opportunity.other")}
+            </DataValue>
+          </span>
+        }
+      >
+        {data.items.length === 0 ? (
           <EmptyState
             title={t("cleanup.empty.noScanTitle")}
-            description={
+            body={
               data.lastScanAt === null
                 ? t("cleanup.empty.noScanDescription")
                 : t("cleanup.empty.noItemsDescription")
             }
-            nextStep={
+            next={
               data.lastScanAt === null
                 ? t("cleanup.empty.noScanNext")
                 : t("cleanup.empty.noItemsNext")
@@ -151,146 +143,158 @@ function CleanupList({
           />
         ) : (
           <ul className="cleanup-list">
-            {actionItems.map((item) => {
+            {data.items.map((item) => {
               const expanded = expandedId === item.id;
               const reason = blockingReason(item, scanIncomplete);
               const blockedId = `cleanup-blocked-${item.id}`;
               return (
-                <li className={`cleanup-card cleanup-card--${item.tier.toLowerCase()}`} key={item.id}>
-                  <div className="cleanup-card__header">
-                    <div className="cleanup-card__title">
-                      <TierBadge tier={item.tier} />
-                      <h3>{item.title}</h3>
-                      <p>{item.whatItIs}</p>
-                    </div>
-                    <div className="cleanup-card__recoverable">
-                      <span>{t("cleanup.card.expectedRecovery")}</span>
-                      <DataValue partial={partial}>
-                        {formatBytes(item.recoverableBytes)}
-                      </DataValue>
-                    </div>
-                    <button
-                      className="button button--quiet"
-                      type="button"
-                      aria-expanded={expanded}
-                      aria-controls={`cleanup-detail-${item.id}`}
-                      aria-label={
-                        expanded
-                          ? t("cleanup.card.hideDetailsFor", { title: item.title })
-                          : t("cleanup.card.readDetailsFor", { title: item.title })
-                      }
-                      onClick={() => setExpandedId(expanded ? null : item.id)}
-                    >
-                      {expanded
-                        ? t("cleanup.card.hideDetails")
-                        : t("cleanup.card.readDetails")}
-                    </button>
-                  </div>
+                <li
+                  className={`cleanup-item cleanup-item--${item.tier.toLowerCase().replace("_", "-")}`}
+                  key={item.id}
+                >
+                  <span className="cleanup-item__rail" aria-hidden="true" />
+                  <div className="cleanup-item__body">
+                    <header className="cleanup-item__head">
+                      <div className="cleanup-item__title">
+                        <Tier tier={item.tier} />
+                        <h3>{item.title}</h3>
+                        <p>{item.whatItIs}</p>
+                      </div>
+                      <div className="cleanup-item__recoverable">
+                        <span>{t("cleanup.card.expectedRecovery")}</span>
+                        <span className="cleanup-item__amount">
+                          <Bytes value={item.recoverableBytes} partial={partial} />
+                        </span>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        className="cleanup-item__toggle"
+                        aria-expanded={expanded}
+                        aria-controls={`cleanup-detail-${item.id}`}
+                        aria-label={
+                          expanded
+                            ? t("cleanup.card.hideDetailsFor", { title: item.title })
+                            : t("cleanup.card.readDetailsFor", { title: item.title })
+                        }
+                        onClick={() => setExpandedId(expanded ? null : item.id)}
+                      >
+                        {expanded
+                          ? t("cleanup.card.hideDetails")
+                          : t("cleanup.card.readDetails")}
+                      </Button>
+                    </header>
 
-                  <div className="cleanup-card__quick-facts">
-                    <DataValue partial={partial}>
-                      {item.estimatedAgeDays === null
-                        ? t("cleanup.card.ageUnknown")
-                        : t("cleanup.card.oldestEvidence", {
-                            age: formatAge(item.estimatedAgeDays)
-                          })}
-                    </DataValue>
-                    <DataValue partial={partial}>{entryCount(item.itemCount)}</DataValue>
-                    {item.recoverableBytes === null ? (
-                      <span>{t("cleanup.card.recoveryUnknown")}</span>
+                    <div className="cleanup-item__quick">
+                      <span>
+                        {item.estimatedAgeDays === null ? (
+                          <UnknownValue label={t("cleanup.card.ageUnknown")} />
+                        ) : (
+                          <DataValue partial={partial}>
+                            {t("cleanup.card.oldestEvidence", {
+                              age: formatAge(item.estimatedAgeDays)
+                            })}
+                          </DataValue>
+                        )}
+                      </span>
+                      <span>
+                        {item.itemCount === null ? (
+                          <UnknownValue />
+                        ) : (
+                          <DataValue partial={partial}>{entryCount(item.itemCount)}</DataValue>
+                        )}
+                      </span>
+                      {item.recoverableBytes === null ? (
+                        <span>{t("cleanup.card.recoveryUnknown")}</span>
+                      ) : null}
+                    </div>
+
+                    {expanded ? (
+                      <div className="cleanup-item__detail" id={`cleanup-detail-${item.id}`}>
+                        <div className="explanation-grid">
+                          <section>
+                            <h4>{t("cleanup.card.why")}</h4>
+                            <p>{item.why}</p>
+                          </section>
+                          <section>
+                            <h4>{t("cleanup.card.stays")}</h4>
+                            <p>{item.whatStaysUntouched}</p>
+                          </section>
+                          <section>
+                            <h4>{t("cleanup.card.consequence")}</h4>
+                            <p>{item.consequence}</p>
+                          </section>
+                        </div>
+
+                        {item.evidence.length > 0 ? (
+                          <ul className="evidence-list" aria-label={t("cleanup.card.evidence")}>
+                            {item.evidence.map((note) => (
+                              <li key={`${item.id}-${note.label}`}>
+                                <span className="evidence-list__kind">{note.kind}</span>
+                                <div>
+                                  <strong>{note.label}</strong>
+                                  <p>{note.detail}</p>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+
+                        <div className="cleanup-item__action">
+                          <div>
+                            <strong>{t("cleanup.card.previewMandatory")}</strong>
+                            <p>{t("cleanup.card.previewMandatoryBody")}</p>
+                            {reason ? (
+                              <p className="cleanup-item__blocked" id={blockedId}>
+                                {reason}
+                              </p>
+                            ) : null}
+                          </div>
+                          <Button
+                            variant="primary"
+                            disabled={reason !== null}
+                            aria-describedby={reason ? blockedId : undefined}
+                            onClick={() => onPreview(item)}
+                          >
+                            {t("cleanup.card.previewButton")}
+                          </Button>
+                        </div>
+                      </div>
                     ) : null}
                   </div>
-
-                  {expanded ? (
-                    <div
-                      className="cleanup-card__detail"
-                      id={`cleanup-detail-${item.id}`}
-                    >
-                      <div className="explanation-grid">
-                        <section>
-                          <h4>{t("cleanup.card.why")}</h4>
-                          <p>{item.why}</p>
-                        </section>
-                        <section>
-                          <h4>{t("cleanup.card.stays")}</h4>
-                          <p>{item.whatStaysUntouched}</p>
-                        </section>
-                        <section>
-                          <h4>{t("cleanup.card.consequence")}</h4>
-                          <p>{item.consequence}</p>
-                        </section>
-                      </div>
-
-                      {item.evidence.length > 0 ? (
-                        <ul className="evidence-list" aria-label={t("cleanup.card.evidence")}>
-                          {item.evidence.map((note) => (
-                            <li key={`${item.id}-${note.label}`}>
-                              <span className="evidence-list__kind">{note.kind}</span>
-                              <div>
-                                <strong>{note.label}</strong>
-                                <p>{note.detail}</p>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-
-                      <div className="cleanup-card__action">
-                        <div>
-                          <strong>{t("cleanup.card.previewMandatory")}</strong>
-                          <p>{t("cleanup.card.previewMandatoryBody")}</p>
-                          {reason ? (
-                            <p className="blocked-reason" id={blockedId}>
-                              {reason}
-                            </p>
-                          ) : null}
-                        </div>
-                        <button
-                          className="button button--primary"
-                          type="button"
-                          disabled={reason !== null}
-                          aria-describedby={reason ? blockedId : undefined}
-                          onClick={() => onPreview(item)}
-                        >
-                          {t("cleanup.card.previewButton")}
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
                 </li>
               );
             })}
           </ul>
         )}
-      </section>
+      </Panel>
 
-      <section className="panel panel--offlimits" aria-labelledby="offlimits-heading">
-        <SectionHeading
-          id="offlimits-heading"
-          title={t("cleanup.offlimits.title")}
-          description={t("cleanup.offlimits.description")}
-          aside={
-            <span className="eyebrow">
-              {tCount(
-                offLimits.length,
-                "unit.excludedCategory.one",
-                "unit.excludedCategory.other"
-              )}
-            </span>
-          }
-        />
-        {offLimits.length === 0 ? (
-          <p className="microcopy">
+      <Panel
+        id="offlimits-heading"
+        title={t("cleanup.offlimits.title")}
+        description={t("cleanup.offlimits.description")}
+        actions={
+          <span className="cs-eyebrow">
+            {tCount(
+              data.offLimits.length,
+              "unit.excludedCategory.one",
+              "unit.excludedCategory.other"
+            )}
+          </span>
+        }
+        className="panel--offlimits"
+      >
+        {data.offLimits.length === 0 ? (
+          <p className="cs-micro">
             {data.lastScanAt === null
               ? t("cleanup.offlimits.emptyNoScan")
               : t("cleanup.offlimits.empty")}
           </p>
         ) : (
           <ul className="offlimits-list">
-            {offLimits.map((item) => (
+            {data.offLimits.map((item) => (
               <li key={item.id}>
                 <div className="offlimits-list__title">
-                  <TierBadge tier={item.tier} />
+                  <Tier tier={item.tier} />
                   <h3>{item.title}</h3>
                 </div>
                 <p>{item.whatItIs}</p>
@@ -298,7 +302,7 @@ function CleanupList({
                   <strong>{t("cleanup.offlimits.why")}</strong>{" "}
                   {item.offLimitsReason ?? t("cleanup.offlimits.fallbackReason")}
                 </p>
-                <p className="microcopy">
+                <p className="cs-micro">
                   {item.observedBytes === null ? (
                     t("cleanup.offlimits.sizeUnknown")
                   ) : (
@@ -313,7 +317,7 @@ function CleanupList({
             ))}
           </ul>
         )}
-      </section>
+      </Panel>
     </div>
   );
 }
@@ -354,36 +358,45 @@ function PreviewView({
         title={t("cleanup.preview.title", { title: item.title })}
         description={t("cleanup.preview.description")}
       />
-      <button className="back-link" type="button" onClick={onBack}>
+      <Button variant="ghost" className="back-link" onClick={onBack}>
         <span aria-hidden="true">←</span> {t("cleanup.preview.back")}
-      </button>
+      </Button>
 
       {previewState.status === "loading" ? (
-        <section className="state-panel state-panel--loading" role="status" aria-live="polite">
-          <div className="state-panel__heading">
-            <span className="spinner" aria-hidden="true" />
-            <h2>{t("cleanup.preview.building")}</h2>
-          </div>
-          <p>{t("cleanup.preview.buildingBody")}</p>
-        </section>
+        <div role="status" aria-live="polite">
+          <Surface tone="sunken" padded className="preview-loading">
+            <span className="cs-spinner" aria-hidden="true" />
+            <div>
+              <h2>{t("cleanup.preview.building")}</h2>
+              <p>{t("cleanup.preview.buildingBody")}</p>
+            </div>
+          </Surface>
+        </div>
       ) : null}
 
       {previewState.status === "error" ? <InlineError error={previewState.error} /> : null}
 
       {preview ? (
         <>
-          <CoverageBanner coverage={preview.coverage} context="cleanupPreview" />
+          <CoverageBanner
+            complete={preview.coverage.completeness === "complete"}
+            coverage={preview.coverage}
+            context="cleanupPreview"
+          />
           <article className="preview-sheet" aria-labelledby="preview-heading">
             <header className="preview-sheet__header">
-              <p className="eyebrow">{t("cleanup.preview.eyebrow")}</p>
+              <p className="cs-eyebrow">{t("cleanup.preview.eyebrow")}</p>
               <h2 id="preview-heading">{item.title}</h2>
               <p>{preview.consequence}</p>
               <div className="preview-sheet__total">
                 <span>{t("cleanup.preview.wouldMove")}</span>
-                <DataValue partial={preview.coverage.completeness !== "complete"}>
-                  {formatBytes(preview.totalBytes)}
-                </DataValue>
-                <span>
+                <span className="preview-sheet__amount cs-num">
+                  <Bytes
+                    value={preview.totalBytes}
+                    partial={preview.coverage.completeness !== "complete"}
+                  />
+                </span>
+                <span className="cs-micro">
                   {tCount(preview.items.length, "unit.previewLine.one", "unit.previewLine.other")}
                 </span>
               </div>
@@ -400,9 +413,10 @@ function PreviewView({
                         <p>{previewItem.reason}</p>
                       </div>
                       <div className="preview-items__numbers">
-                        <DataValue partial={preview.coverage.completeness !== "complete"}>
-                          {formatBytes(previewItem.bytes)}
-                        </DataValue>
+                        <Bytes
+                          value={previewItem.bytes}
+                          partial={preview.coverage.completeness !== "complete"}
+                        />
                         <span>{entryCount(previewItem.itemCount)}</span>
                       </div>
                     </li>
@@ -457,15 +471,14 @@ function PreviewView({
                 />
                 <span>{t("cleanup.confirm.acknowledgement")}</span>
               </label>
-              <button
-                className="button button--primary"
-                type="button"
+              <Button
+                variant="primary"
                 disabled={confirmBlocked}
                 onClick={() => onConfirm(preview)}
               >
                 {executing ? t("cleanup.confirm.working") : t("cleanup.confirm.button")}
-              </button>
-              <p className="microcopy">{t("cleanup.confirm.microcopy")}</p>
+              </Button>
+              <p className="cs-micro">{t("cleanup.confirm.microcopy")}</p>
             </div>
             <div className="visually-hidden" role="status" aria-live="polite">
               {executing
@@ -497,12 +510,12 @@ function ResultView({
         title={t("cleanup.result.title")}
         description={t("cleanup.result.description", { title: itemTitle })}
       />
-      <section className="result-panel" aria-labelledby="result-heading">
+      <Surface tone="raised" padded className="result-panel">
         <span className="result-panel__mark" aria-hidden="true">
           ✓
         </span>
-        <p className="eyebrow">{t("cleanup.result.panelEyebrow")}</p>
-        <h2 id="result-heading">
+        <p className="cs-eyebrow">{t("cleanup.result.panelEyebrow")}</p>
+        <h2>
           {execution.simulated ? t("cleanup.result.simulated") : t("cleanup.result.accepted")}
         </h2>
         <p>{execution.note}</p>
@@ -510,17 +523,21 @@ function ResultView({
           <div>
             <dt>{t("cleanup.result.freedBytes")}</dt>
             <dd>
-              {execution.freedBytes === null
-                ? t("state.unknown")
-                : formatBytes(execution.freedBytes)}
+              {execution.freedBytes === null ? (
+                <UnknownValue />
+              ) : (
+                formatBytes(execution.freedBytes)
+              )}
             </dd>
           </div>
           <div>
             <dt>{t("cleanup.result.entriesConfirmed")}</dt>
             <dd>
-              {execution.movedItems === null
-                ? t("state.unknown")
-                : entryCount(execution.movedItems)}
+              {execution.movedItems === null ? (
+                <UnknownValue />
+              ) : (
+                entryCount(execution.movedItems)
+              )}
             </dd>
           </div>
           <div>
@@ -529,20 +546,20 @@ function ResultView({
           </div>
         </dl>
         {execution.leftovers.length > 0 ? (
-          <div className="inline-message inline-message--attention">
+          <InlineNotice tone="attention">
             <strong>{t("cleanup.result.leftovers")}</strong>
             <ul>
               {execution.leftovers.map((leftover) => (
                 <li key={leftover}>{leftover}</li>
               ))}
             </ul>
-          </div>
+          </InlineNotice>
         ) : null}
-        <p className="microcopy">{t("cleanup.result.microcopy")}</p>
-        <button className="button button--primary" type="button" onClick={onReturn}>
+        <p className="cs-micro">{t("cleanup.result.microcopy")}</p>
+        <Button variant="primary" onClick={onReturn}>
           {t("cleanup.result.return")}
-        </button>
-      </section>
+        </Button>
+      </Surface>
     </div>
   );
 }
@@ -658,7 +675,12 @@ export function CleanupScreen({ api }: { api: CoreSightApi }) {
 
   if (state.status === "loading") {
     return (
-      <ScreenLoading eyebrow={eyebrow} title={title} description={description} />
+      <ScreenLoading
+        eyebrow={eyebrow}
+        title={title}
+        description={description}
+        layout="cards"
+      />
     );
   }
   if (state.status === "error") {

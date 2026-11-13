@@ -132,11 +132,15 @@ function StartupContent({
   if (knownEmpty) {
     return (
       <>
-        <CoverageBanner coverage={coverage} />
+        <CoverageBanner
+          complete={!partial}
+          coverage={coverage}
+          context="scan"
+        />
         <EmptyState
           title={t("startup.empty.title")}
-          description={t("startup.empty.body")}
-          nextStep={t("startup.empty.next")}
+          body={t("startup.empty.body")}
+          next={t("startup.empty.next")}
         />
       </>
     );
@@ -144,7 +148,7 @@ function StartupContent({
 
   return (
     <>
-      <CoverageBanner coverage={coverage} />
+      <CoverageBanner complete={!partial} coverage={coverage} context="scan" />
 
       <dl className="summary-facts">
         <div>

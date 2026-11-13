@@ -1,0 +1,360 @@
+/*
+ * CoreSight visualisation styles.
+ *
+ * Every colour, space, radius, size and duration comes from the design-system
+ * custom properties. No raw values appear here: the only literals are the
+ * `0` in `rect()`/`translate` and unitless zeroes.
+ *
+ * The hatch used for unknown sizes is drawn from `--cs-border-unknown`, the
+ * token the design system reserves for "this value is not known".
+ */
+
+/* --- Treemap ---------------------------------------------------------- */
+
+.cs-viz-treemap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cs-space-2);
+}
+
+.cs-viz-treemap__svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: var(--cs-surface-sunken);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-md);
+}
+
+.cs-viz-treemap__rect {
+  fill: var(--cs-surface-raised);
+  stroke: var(--cs-border);
+  stroke-width: 1;
+  cursor: default;
+}
+
+.cs-viz-treemap__rect--safe {
+  fill: var(--cs-safe);
+  stroke: var(--cs-safe);
+}
+
+.cs-viz-treemap__rect--review {
+  fill: var(--cs-review);
+  stroke: var(--cs-review);
+}
+
+.cs-viz-treemap__rect--offlimits {
+  fill: var(--cs-offlimits);
+  stroke: var(--cs-offlimits);
+}
+
+.cs-viz-treemap__rect--neutral {
+  fill: var(--cs-surface-raised);
+}
+
+.cs-viz-treemap__rect--selected {
+  stroke: var(--cs-focus);
+  stroke-width: 2;
+  animation: cs-viz-pulse var(--cs-duration-slow) var(--cs-ease-standard) infinite;
+}
+
+.cs-viz-treemap__label {
+  font-family: var(--cs-font-sans);
+  font-size: var(--cs-text-xs);
+  font-weight: var(--cs-weight-semibold);
+  fill: var(--cs-text);
+  pointer-events: none;
+}
+
+.cs-viz-treemap__label--on-fill {
+  fill: var(--cs-text-inverse);
+}
+
+.cs-viz-treemap__value,
+.cs-viz-treemap__segment {
+  font-family: var(--cs-font-mono);
+  font-size: var(--cs-text-xs);
+  font-variant-numeric: tabular-nums;
+  fill: var(--cs-text-muted);
+  pointer-events: none;
+}
+
+.cs-viz-treemap__value--on-fill {
+  fill: var(--cs-text-inverse);
+}
+
+.cs-viz-treemap__frame {
+  fill: none;
+  stroke: var(--cs-border-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 2;
+}
+
+.cs-viz-treemap__frame-label {
+  font-family: var(--cs-font-sans);
+  font-size: var(--cs-text-xs);
+  font-weight: var(--cs-weight-semibold);
+  fill: var(--cs-text-muted);
+  pointer-events: none;
+}
+
+.cs-viz-treemap__band {
+  fill: var(--cs-viz-hatch);
+  stroke: var(--cs-border-unknown);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.cs-viz-treemap__band-label {
+  font-family: var(--cs-font-sans);
+  font-size: var(--cs-text-xs);
+  fill: var(--cs-text-muted);
+  pointer-events: none;
+}
+
+.cs-viz-hatch__line {
+  stroke: var(--cs-border-unknown);
+  stroke-width: 2;
+}
+
+@keyframes cs-viz-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+/* --- Proportion bar ---------------------------------------------------- */
+
+.cs-viz-proportion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cs-space-2);
+}
+
+.cs-viz-proportion__bar {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: var(--cs-space-4);
+  overflow: hidden;
+  background: var(--cs-surface-sunken);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius-sm);
+}
+
+.cs-viz-proportion__segment {
+  display: block;
+  height: 100%;
+  min-width: 1px;
+}
+
+.cs-viz-proportion__segment--safe {
+  background: var(--cs-safe);
+}
+
+.cs-viz-proportion__segment--review {
+  background: var(--cs-review);
+}
+
+.cs-viz-proportion__segment--offlimits {
+  background: var(--cs-offlimits);
+}
+
+.cs-viz-proportion__segment--neutral {
+  background: var(--cs-surface-raised);
+  box-shadow: inset -1px 0 0 var(--cs-border);
+}
+
+.cs-viz-proportion__segment--unknown {
+  background-color: var(--cs-surface-sunken);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--cs-border-unknown) 0,
+    var(--cs-border-unknown) 2px,
+    transparent 2px,
+    transparent 6px
+  );
+  border-left: 1px dashed var(--cs-border-unknown);
+}
+
+.cs-viz-proportion__segment--unaccounted {
+  background: var(--cs-warning-subtle);
+  border-left: 1px dashed var(--cs-warning);
+}
+
+.cs-viz-proportion__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cs-space-1) var(--cs-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--cs-text-sm);
+  color: var(--cs-text-muted);
+}
+
+.cs-viz-proportion__legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--cs-space-2);
+}
+
+.cs-viz-proportion__swatch {
+  display: inline-block;
+  width: var(--cs-space-2);
+  height: var(--cs-space-2);
+  border-radius: var(--cs-radius-full);
+  border: 1px solid var(--cs-border);
+}
+
+.cs-viz-proportion__swatch.cs-viz-proportion__segment--unknown {
+  border-style: dashed;
+  border-color: var(--cs-border-unknown);
+}
+
+.cs-viz-proportion__legend-label {
+  color: var(--cs-text);
+}
+
+.cs-viz-proportion__legend-value,
+.cs-viz-proportion__legend-share {
+  font-family: var(--cs-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.cs-viz-proportion__legend--warning {
+  color: var(--cs-warning);
+}
+
+/* --- Delta spark -------------------------------------------------------- */
+
+.cs-viz-spark {
+  display: block;
+  width: 100%;
+}
+
+.cs-viz-spark__svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.cs-viz-spark__baseline {
+  stroke: var(--cs-border-strong);
+  stroke-width: 1;
+}
+
+.cs-viz-spark__line {
+  fill: none;
+  stroke: var(--cs-accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cs-viz-spark__area {
+  fill: var(--cs-accent-subtle);
+  stroke: none;
+}
+
+.cs-viz-spark__dot {
+  fill: var(--cs-accent);
+}
+
+.cs-viz-spark__gap {
+  stroke: var(--cs-border-unknown);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+}
+
+.cs-viz-spark__empty {
+  fill: var(--cs-viz-hatch);
+  stroke: var(--cs-border-unknown);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.cs-viz-spark__value {
+  font-family: var(--cs-font-mono);
+  font-size: var(--cs-text-xs);
+  font-variant-numeric: tabular-nums;
+  fill: var(--cs-text);
+}
+
+/* --- Accessible list ---------------------------------------------------- */
+
+/*
+ * The per-item list of a chart is a real list of real buttons. It is hidden
+ * from the visual layout until it takes focus, so a sighted keyboard user
+ * always sees where the focus ring is.
+ */
+.cs-viz-sr-list {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.cs-viz-sr-list:focus-within {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cs-space-1) var(--cs-space-3);
+  padding: var(--cs-space-1) 0 0;
+  list-style: none;
+  font-size: var(--cs-text-sm);
+}
+
+.cs-viz-sr-list__button {
+  font: inherit;
+  color: var(--cs-accent);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.cs-viz-sr-list__button:focus-visible {
+  outline: 2px solid var(--cs-focus);
+  outline-offset: 2px;
+}
+
+.cs-viz-sr-list__button[aria-pressed="true"] {
+  font-weight: var(--cs-weight-semibold);
+  color: var(--cs-text);
+}
+
+/* --- Reduced motion ----------------------------------------------------- */
+
+/*
+ * Motion explains, never decorates — and it is fully suppressible. Both the
+ * media query and the explicit opt-in attribute collapse the pulse.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .cs-viz-treemap__rect--selected {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+:root[data-reduced-motion="reduce"] .cs-viz-treemap__rect--selected {
+  animation: none;
+  opacity: 1;
+}

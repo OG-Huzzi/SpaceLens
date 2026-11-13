@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CategoryTotals, CoreSightApi, StorageData } from "../api";
 import { useApiData } from "../hooks/useApiData";
 import {
@@ -10,17 +10,22 @@ import {
 } from "../lib/format";
 import { t, tCount } from "../i18n";
 import {
+  Bytes,
   CoverageBanner,
   DataValue,
   EmptyState,
+  Field,
+  KeyHint,
   PageHeader,
-  PartialTag,
+  Panel,
   ScreenError,
   ScreenLoading,
-  SectionHeading,
-  SizeBar,
-  StatusPill
+  ShareBar,
+  StatusPill,
+  Surface,
+  UnknownValue
 } from "../components/ui";
+import { Treemap } from "../components/viz";
 
 function categoryIsPartial(category: CategoryTotals, overallPartial: boolean): boolean {
   return (
@@ -33,9 +38,7 @@ function categoryIsPartial(category: CategoryTotals, overallPartial: boolean): b
 }
 
 function containsCategory(category: CategoryTotals, id: string): boolean {
-  return (
-    category.id === id || category.children.some((child) => containsCategory(child, id))
-  );
+  return category.id === id || category.children.some((child) => containsCategory(child, id));
 }
 
 function filterCategory(category: CategoryTotals, query: string): CategoryTotals | null {
@@ -71,7 +74,8 @@ function CategoryRow({
   focusCategoryId: string | null;
 }) {
   const partial = categoryIsPartial(category, overallPartial);
-  const shouldOpen = forceOpen || (focusCategoryId !== null && containsCategory(category, focusCategoryId));
+  const shouldOpen =
+    forceOpen || (focusCategoryId !== null && containsCategory(category, focusCategoryId));
   const isFocused = category.id === focusCategoryId;
   const knownChildren = category.children.length;
   const childrenLabel =
@@ -87,63 +91,111 @@ function CategoryRow({
     children: childrenLabel
   });
 
+  /**
+   * A category's children are mounted only while it is open.
+   *
+   * The engine's category tree is recursive and uncapped, so mounting every
+   * descendant eagerly puts the whole tree into the DOM the moment the screen
+   * opens — for a large volume that is tens of thousands of nodes the reader
+   * cannot see and did not ask for. A closed branch costs nothing to show, so
+   * it must cost nothing to mount.
+   *
+   * The native `<details>` element remains the control: it is keyboard
+   * operable, it is announced correctly, and it keeps its open state without
+   * a button (this screen may not carry one).
+   */
+  const [expanded, setExpanded] = useState(shouldOpen);
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  useEffect(() => {
+    const node = detailsRef.current;
+    if (node === null) return;
+    const sync = () => setExpanded(node.open);
+    sync();
+    // React 18 does not expose an `onToggle` prop for <details>, so the
+    // listener is attached directly. The `toggle` event fires after the
+    // browser has updated `open`, so the React state and the DOM never
+    // disagree about what is open.
+    node.addEventListener("toggle", sync);
+    return () => node.removeEventListener("toggle", sync);
+  }, []);
+
   return (
     <details
-      className={`category category--depth-${Math.min(depth, 2)}${isFocused ? " category--focused" : ""}`}
+      ref={detailsRef}
+      className={`storage-node storage-node--depth-${Math.min(depth, 2)}${
+        isFocused ? " storage-node--focused" : ""
+      }`}
       open={shouldOpen || undefined}
     >
-      <summary className="category-summary" aria-label={summaryLabel}>
-        <span className="category-summary__chevron" aria-hidden="true" />
-        <span className="category-summary__name">
-          <span className="category-summary__title">{category.name}</span>
-          <span className="category-summary__meta">{childrenLabel}</span>
+      <summary className="storage-row" aria-label={summaryLabel}>
+        <span className="storage-row__category">
+          <span className="storage-row__chevron" aria-hidden="true" />
+          <span className="storage-row__name">
+            <span className="storage-row__title">{category.name}</span>
+            <span className="storage-row__meta">{childrenLabel}</span>
+          </span>
         </span>
-        <SizeBar
-          share={category.shareOfParent}
-          label={t("storage.category.shareLabel", { name: category.name })}
-          partial={partial}
-        />
-        <span className="category-summary__bytes">
-          <DataValue partial={partial}>{formatBytes(category.bytes)}</DataValue>
+        <span className="storage-row__share">
+          <ShareBar
+            share={category.shareOfParent}
+            label={t("storage.category.shareLabel", { name: category.name })}
+            partial={partial}
+          />
+          <span className="cs-num">
+            {category.shareOfParent === null ? (
+              <UnknownValue />
+            ) : (
+              formatPercent(category.shareOfParent)
+            )}
+          </span>
         </span>
-        <span className="category-summary__share">
-          {formatPercent(category.shareOfParent)}
+        <span className="storage-row__bytes">
+          <Bytes value={category.bytes} partial={partial} />
         </span>
-        <span
-          className={`category-summary__delta${
-            category.deltaSinceLast !== null && category.deltaSinceLast > 0
-              ? " delta delta--up"
-              : " delta"
-          }`}
-        >
+        <span className="storage-row__delta cs-num">
           {formatDelta(category.deltaSinceLast)}
         </span>
       </summary>
 
-      <div className="category-detail">
-        <dl className="category-facts">
+      <div className="storage-detail">
+        <dl className="storage-facts">
           <div>
             <dt>{t("storage.category.entries")}</dt>
             <dd>
-              <DataValue partial={partial}>{entryCount(category.itemCount)}</DataValue>
+              {category.itemCount === null ? (
+                <UnknownValue />
+              ) : (
+                <DataValue partial={partial}>{entryCount(category.itemCount)}</DataValue>
+              )}
             </dd>
           </div>
           <div>
             <dt>{t("storage.category.entriesWithoutSize")}</dt>
             <dd>
-              <DataValue partial={partial}>{entryCount(category.entriesWithoutSize)}</DataValue>
+              {category.entriesWithoutSize === null ? (
+                <UnknownValue />
+              ) : (
+                <DataValue partial={partial}>{entryCount(category.entriesWithoutSize)}</DataValue>
+              )}
             </dd>
           </div>
           <div>
             <dt>{t("storage.category.observationErrors")}</dt>
             <dd>
-              <DataValue partial={partial}>{entryCount(category.observationErrors)}</DataValue>
+              {category.observationErrors === null ? (
+                <UnknownValue />
+              ) : (
+                <DataValue partial={partial}>{entryCount(category.observationErrors)}</DataValue>
+              )}
             </dd>
           </div>
         </dl>
 
-        {category.children.length > 0 ? (
-          <ul className="category-children">
+        {category.children.length === 0 ? (
+          <p className="cs-micro">{t("storage.category.noDeeperBody")}</p>
+        ) : expanded ? (
+          <ul className="storage-children">
             {category.children.map((child) => (
               <li key={child.id}>
                 <CategoryRow
@@ -156,28 +208,26 @@ function CategoryRow({
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="microcopy">{t("storage.category.noDeeperBody")}</p>
-        )}
+        ) : null}
 
         {category.sampleLocations.length > 0 ? (
-          <details className="location-disclosure">
+          <details className="cs-disclosure location-disclosure">
             <summary
               aria-label={t("storage.category.sampleLocationsAria", { name: category.name })}
             >
               <span>{t("storage.category.sampleLocations")}</span>
-              <span className="location-disclosure__count">
+              <span className="cs-disclosure__count">
                 {tCount(category.sampleLocations.length, "unit.label.one", "unit.label.other")}
               </span>
             </summary>
-            <p className="microcopy">{t("storage.category.sampleLocationsNote")}</p>
+            <p className="cs-micro">{t("storage.category.sampleLocationsNote")}</p>
             <dl className="location-list">
               {category.sampleLocations.map((location) => (
                 <div key={`${category.id}-${location.displayPath}`}>
                   <dt>{location.label}</dt>
                   <dd>
                     <code>{location.displayPath}</code>
-                    <DataValue partial={partial}>{formatBytes(location.bytes)}</DataValue>
+                    <Bytes value={location.bytes} partial={partial} />
                   </dd>
                 </div>
               ))}
@@ -197,8 +247,25 @@ function StorageContent({
   focusCategoryId: string | null;
 }) {
   const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const normalisedQuery = query.trim().toLocaleLowerCase();
   const partial = data.coverage.completeness !== "complete";
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target;
+      const typing =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement;
+      if (event.key === "/" && !typing) {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   if (data.categories.length === 0) {
     return (
@@ -208,11 +275,11 @@ function StorageContent({
           title={t("storage.title")}
           description={t("storage.description")}
         />
-        <CoverageBanner coverage={data.coverage} />
+        <CoverageBanner complete={!partial} coverage={data.coverage} context="storageScan" />
         <EmptyState
           title={t("storage.empty.title")}
-          description={t("storage.empty.body")}
-          nextStep={t("storage.empty.next")}
+          body={t("storage.empty.body")}
+          next={t("storage.empty.next")}
         />
       </div>
     );
@@ -221,7 +288,8 @@ function StorageContent({
   const filteredCategories = data.categories
     .map((category) => filterCategory(category, normalisedQuery))
     .filter((category): category is CategoryTotals => category !== null);
-  const matchingTopLevel = normalisedQuery.length > 0 ? filteredCategories.length : data.categories.length;
+  const matchingTopLevel =
+    normalisedQuery.length > 0 ? filteredCategories.length : data.categories.length;
 
   return (
     <div className="screen screen--storage">
@@ -231,108 +299,153 @@ function StorageContent({
         description={t("storage.descriptionMain")}
       />
 
-      <CoverageBanner coverage={data.coverage} />
+      <CoverageBanner complete={!partial} coverage={data.coverage} context="storageScan" />
 
-      <section className="storage-summary" aria-labelledby="storage-summary-title">
-        <div className="storage-summary__lead">
-          <p className="eyebrow">{t("storage.summary.observedTotal")}</p>
-          <h2 id="storage-summary-title">
-            <DataValue partial={partial}>{formatBytes(data.totalObservedBytes)}</DataValue>
-          </h2>
-          <p>
-            {t(partial ? "storage.summary.bodyPartial" : "storage.summary.bodyComplete", {
-              count: observedEntryCount(data.totalObservedItems)
-            })}
-          </p>
+      <Surface tone="raised" padded className="storage-summary">
+        <div className="storage-summary__top">
+          <div className="storage-summary__lead">
+            <p className="cs-eyebrow">{t("storage.summary.observedTotal")}</p>
+            <p className="storage-summary__figure cs-num">
+              <Bytes value={data.totalObservedBytes} partial={partial} />
+            </p>
+            <p className="storage-summary__body">
+              {t(partial ? "storage.summary.bodyPartial" : "storage.summary.bodyComplete", {
+                count: observedEntryCount(data.totalObservedItems)
+              })}
+            </p>
+            <div className="storage-summary__status">
+              <StatusPill tone={partial ? "attention" : "positive"}>
+                {t(partial ? "status.partial" : "status.complete")}
+              </StatusPill>
+              <span className="cs-micro">{t("home.stamp.localOnly")}</span>
+            </div>
+          </div>
+          <dl className="storage-summary__facts">
+            <div>
+              <dt>{t("storage.summary.categories")}</dt>
+              <dd>
+                <DataValue partial={partial}>
+                  {tCount(data.categories.length, "unit.category.one", "unit.category.other")}
+                </DataValue>
+              </dd>
+            </div>
+            <div>
+              <dt>{t("storage.summary.entriesWithoutSize")}</dt>
+              <dd>
+                {data.coverage.unknownSizeEntries === null ? (
+                  <UnknownValue />
+                ) : (
+                  <DataValue partial={partial}>
+                    {entryCount(data.coverage.unknownSizeEntries)}
+                  </DataValue>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{t("storage.summary.duplicateEvidence")}</dt>
+              <dd>
+                <DataValue
+                  partial={data.duplicateReport.coverage.completeness !== "complete"}
+                >
+                  {t(
+                    data.duplicateReport.coverage.completeness === "complete"
+                      ? "status.complete"
+                      : "status.partial"
+                  )}
+                </DataValue>
+              </dd>
+            </div>
+          </dl>
         </div>
-        <dl className="summary-facts">
-          <div>
-            <dt>{t("storage.summary.categories")}</dt>
-            <dd>
-              <DataValue partial={partial}>
-                {tCount(data.categories.length, "unit.category.one", "unit.category.other")}
-              </DataValue>
-            </dd>
-          </div>
-          <div>
-            <dt>{t("storage.summary.entriesWithoutSize")}</dt>
-            <dd>
-              {entryCount(data.coverage.unknownSizeEntries)}
-              {partial ? <PartialTag /> : null}
-            </dd>
-          </div>
-          <div>
-            <dt>{t("storage.summary.duplicateEvidence")}</dt>
-            <dd>
-              {t(
-                data.duplicateReport.coverage.completeness === "complete"
-                  ? "status.complete"
-                  : "status.partial"
-              )}
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-      <section className="panel storage-categories" aria-labelledby="storage-categories-heading">
-        <SectionHeading
-          id="storage-categories-heading"
-          title={t("storage.categories.title")}
-          description={t("storage.categories.description")}
-          aside={
-            <span className="eyebrow">
-              <DataValue partial={partial}>
-                {tCount(matchingTopLevel, "unit.topLevelGroup.one", "unit.topLevelGroup.other")}
-              </DataValue>
-            </span>
-          }
+        <Treemap
+          nodes={data.categories.map((category) => ({
+            id: category.id,
+            label: category.name,
+            bytes: category.bytes
+          }))}
+          height={220}
         />
+      </Surface>
 
+      <Panel
+        id="storage-categories-heading"
+        title={t("storage.categories.title")}
+        description={t("storage.categories.description")}
+        actions={
+          <span className="cs-eyebrow">
+            <DataValue partial={partial}>
+              {tCount(matchingTopLevel, "unit.topLevelGroup.one", "unit.topLevelGroup.other")}
+            </DataValue>
+          </span>
+        }
+        className="storage-categories"
+      >
         <div className="storage-toolbar">
-          <label className="search-field" htmlFor="storage-search">
-            <span>{t("storage.search.label")}</span>
+          <Field
+            label={t("storage.search.label")}
+            hint={
+              normalisedQuery.length === 0
+                ? t("storage.search.help")
+                : t("storage.search.status", {
+                    matches: tCount(
+                      filteredCategories.length,
+                      "unit.match.one",
+                      "unit.match.other"
+                    ),
+                    query: query.trim()
+                  })
+            }
+            hintId="storage-search-help"
+            htmlFor="storage-search"
+            className="search-field"
+          >
             <input
               id="storage-search"
+              ref={searchRef}
               type="search"
               value={query}
               aria-label={t("storage.search.aria")}
               aria-describedby="storage-search-help"
               onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setQuery("");
+              }}
               placeholder={t("storage.search.placeholder")}
               autoComplete="off"
             />
-          </label>
-          <p className="storage-toolbar__status" id="storage-search-help" aria-live="polite">
-            {normalisedQuery.length === 0
-              ? t("storage.search.help")
-              : t("storage.search.status", {
-                  matches: tCount(
-                    filteredCategories.length,
-                    "unit.match.one",
-                    "unit.match.other"
-                  ),
-                  query: query.trim()
-                })}
-          </p>
+          </Field>
+          <span className="storage-toolbar__keys">
+            <KeyHint keys={["/"]} />
+          </span>
         </div>
+        <p className="visually-hidden" aria-live="polite">
+          {normalisedQuery.length === 0
+            ? ""
+            : t("storage.search.status", {
+                matches: tCount(
+                  filteredCategories.length,
+                  "unit.match.one",
+                  "unit.match.other"
+                ),
+                query: query.trim()
+              })}
+        </p>
 
         {filteredCategories.length === 0 ? (
           <EmptyState
             title={t("storage.search.emptyTitle")}
-            description={t("storage.search.emptyBody", { query: query.trim() })}
-            nextStep={t("storage.search.emptyNext")}
+            body={t("storage.search.emptyBody", { query: query.trim() })}
+            next={t("storage.search.emptyNext")}
           />
         ) : (
           <>
-            <div className="category-columns" aria-hidden="true">
-              <span />
+            <div className="storage-table__head" aria-hidden="true">
               <span>{t("storage.column.category")}</span>
               <span>{t("storage.column.shareOfTotal")}</span>
               <span>{t("storage.column.observed")}</span>
-              <span>{t("storage.column.share")}</span>
               <span>{t("storage.column.change")}</span>
             </div>
-            <ul className="category-list">
+            <ul className="storage-list">
               {filteredCategories.map((category) => (
                 <li key={category.id}>
                   <CategoryRow
@@ -347,34 +460,38 @@ function StorageContent({
             </ul>
           </>
         )}
-      </section>
+      </Panel>
 
       <div className="evidence-grid">
-        <section className="panel evidence-panel" aria-labelledby="duplicate-heading">
-          <SectionHeading
-            id="duplicate-heading"
-            title={t("storage.duplicates.title")}
-            description={t("storage.duplicates.description")}
-          />
+        <Panel
+          id="duplicate-heading"
+          title={t("storage.duplicates.title")}
+          description={t("storage.duplicates.description")}
+          className="evidence-panel"
+        >
           <CoverageBanner
+            complete={data.duplicateReport.coverage.completeness === "complete"}
             coverage={data.duplicateReport.coverage}
             context="duplicateAnalysis"
           />
-          <div className="evidence-panel__summary">
+          <div className="evidence-summary">
             <span>{t("storage.duplicates.recoverable")}</span>
-            <DataValue partial={data.duplicateReport.coverage.completeness !== "complete"}>
-              {formatBytes(data.duplicateReport.totalRecoverableBytes)}
-            </DataValue>
+            <span className="evidence-summary__value">
+              <Bytes
+                value={data.duplicateReport.totalRecoverableBytes}
+                partial={data.duplicateReport.coverage.completeness !== "complete"}
+              />
+            </span>
           </div>
           {data.duplicateReport.groups.length === 0 ? (
-            <p className="microcopy">{t("storage.duplicates.empty")}</p>
+            <p className="cs-micro">{t("storage.duplicates.empty")}</p>
           ) : (
             <div className="duplicate-list">
               {data.duplicateReport.groups.map((group, index) => (
                 <article className="duplicate-group" key={group.id}>
                   <header>
                     <div>
-                      <p className="eyebrow">
+                      <p className="cs-eyebrow">
                         {t("storage.duplicates.group", {
                           index: String(index + 1).padStart(2, "0")
                         })}
@@ -405,14 +522,14 @@ function StorageContent({
                     {t("storage.duplicates.hashLabel")}{" "}
                     <code>{group.contentSha256.slice(0, 12)}…</code>
                   </p>
-                  <details className="member-disclosure">
+                  <details className="cs-disclosure member-disclosure">
                     <summary
                       aria-label={t("storage.duplicates.showMembersAria", {
                         index: index + 1
                       })}
                     >
                       <span>{t("storage.duplicates.showMembers")}</span>
-                      <span>
+                      <span className="cs-disclosure__count">
                         {tCount(group.members.length, "unit.member.one", "unit.member.other")}
                       </span>
                     </summary>
@@ -421,7 +538,11 @@ function StorageContent({
                         <li key={`${group.id}-${member.displayPath}`}>
                           <code>{member.displayPath}</code>
                           <span>
-                            {formatBytes(member.sizeBytes)}
+                            {member.sizeBytes === null ? (
+                              <UnknownValue />
+                            ) : (
+                              formatBytes(member.sizeBytes)
+                            )}
                             {member.isHardlinkAlias
                               ? t("storage.duplicates.hardlinkAlias")
                               : ""}
@@ -431,7 +552,7 @@ function StorageContent({
                     </ul>
                   </details>
                   {group.members.some((member) => member.isHardlinkAlias) ? (
-                    <p className="microcopy">{t("storage.duplicates.hardlinkNote")}</p>
+                    <p className="cs-micro">{t("storage.duplicates.hardlinkNote")}</p>
                   ) : null}
                 </article>
               ))}
@@ -439,7 +560,7 @@ function StorageContent({
           )}
           {data.duplicateReport.unverifiedEntries !== null &&
           data.duplicateReport.unverifiedEntries > 0 ? (
-            <p className="microcopy">
+            <p className="cs-micro">
               <DataValue
                 partial={data.duplicateReport.coverage.completeness !== "complete"}
               >
@@ -453,7 +574,7 @@ function StorageContent({
           ) : null}
           {data.duplicateReport.unknownSizeEntries !== null &&
           data.duplicateReport.unknownSizeEntries > 0 ? (
-            <p className="microcopy">
+            <p className="cs-micro">
               <DataValue
                 partial={data.duplicateReport.coverage.completeness !== "complete"}
               >
@@ -465,48 +586,57 @@ function StorageContent({
               </DataValue>
             </p>
           ) : null}
-        </section>
+        </Panel>
 
-        <section className="panel evidence-panel" aria-labelledby="big-files-heading">
-          <SectionHeading
-            id="big-files-heading"
-            title={t("storage.bigFiles.title")}
-            description={t("storage.bigFiles.description", {
-              bytes: formatBytes(data.bigFileReport.thresholdBytes)
-            })}
+        <Panel
+          id="big-files-heading"
+          title={t("storage.bigFiles.title")}
+          description={t("storage.bigFiles.description", {
+            bytes: formatBytes(data.bigFileReport.thresholdBytes)
+          })}
+          className="evidence-panel"
+        >
+          <CoverageBanner
+            complete={data.bigFileReport.coverage.completeness === "complete"}
+            coverage={data.bigFileReport.coverage}
+            context="largeFileResult"
           />
-          <CoverageBanner coverage={data.bigFileReport.coverage} context="largeFileResult" />
           {data.bigFileReport.files.length === 0 ? (
-            <p className="microcopy">{t("storage.bigFiles.empty")}</p>
+            <p className="cs-micro">{t("storage.bigFiles.empty")}</p>
           ) : (
-            <ul className="big-file-list">
+            <ul className="bigfile-list">
               {data.bigFileReport.files.map((file) => (
                 <li key={file.id}>
-                  <div className="big-file-list__headline">
-                    <strong>
-                      <DataValue
+                  <div className="bigfile__headline">
+                    <span className="bigfile__size">
+                      <Bytes
+                        value={file.sizeBytes}
                         partial={data.bigFileReport.coverage.completeness !== "complete"}
-                      >
-                        {formatBytes(file.sizeBytes)}
-                      </DataValue>
-                    </strong>
-                    <span>{file.categoryName ?? t("storage.bigFiles.categoryUnknown")}</span>
-                  </div>
-                  <div className="big-file-list__meta">
-                    <span>
-                      {file.ageDays === null
-                        ? t("format.ageUnknown")
-                        : t("storage.bigFiles.age", { age: formatAge(file.ageDays) })}
+                      />
                     </span>
-                    <span>
-                      {file.modifiedAt === null
-                        ? t("storage.bigFiles.modifiedUnknown")
-                        : t("storage.bigFiles.modified", {
-                            time: formatDateTime(file.modifiedAt)
-                          })}
+                    <span className="bigfile__category">
+                      {file.categoryName ?? t("storage.bigFiles.categoryUnknown")}
                     </span>
                   </div>
-                  <details className="file-location">
+                  <div className="bigfile__meta">
+                    <span>
+                      {file.ageDays === null ? (
+                        <UnknownValue label={t("format.ageUnknown")} />
+                      ) : (
+                        t("storage.bigFiles.age", { age: formatAge(file.ageDays) })
+                      )}
+                    </span>
+                    <span>
+                      {file.modifiedAt === null ? (
+                        <UnknownValue label={t("storage.bigFiles.modifiedUnknown")} />
+                      ) : (
+                        t("storage.bigFiles.modified", {
+                          time: formatDateTime(file.modifiedAt)
+                        })
+                      )}
+                    </span>
+                  </div>
+                  <details className="cs-disclosure file-location">
                     <summary
                       aria-label={t("storage.bigFiles.showLocationAria", {
                         bytes: formatBytes(file.sizeBytes)
@@ -522,7 +652,7 @@ function StorageContent({
           )}
           {data.bigFileReport.unknownAgeEntries !== null &&
           data.bigFileReport.unknownAgeEntries > 0 ? (
-            <p className="microcopy">
+            <p className="cs-micro">
               <DataValue
                 partial={data.bigFileReport.coverage.completeness !== "complete"}
               >
@@ -534,7 +664,7 @@ function StorageContent({
               </DataValue>
             </p>
           ) : null}
-        </section>
+        </Panel>
       </div>
     </div>
   );
@@ -555,6 +685,7 @@ export function StorageScreen({
         eyebrow={t("storage.eyebrow")}
         title={t("storage.title")}
         description={t("storage.description")}
+        layout="table"
       />
     );
   }

@@ -13,7 +13,8 @@ import {
   DataValue,
   EmptyState,
   InlineNotice,
-  SectionHeading
+  SectionHeading,
+  UnknownValue
 } from "../components/ui";
 import { PanelFailure, PanelFrame, PanelLoading } from "./PanelFrame";
 
@@ -144,7 +145,13 @@ function RankedCandidate({
         </div>
         <div>
           <dt>{t("dns.fact.failureRate")}</dt>
-          <dd>{formatPercent(candidate.failureRate)}</dd>
+          <dd>
+            {candidate.failureRate === null ? (
+              <UnknownValue />
+            ) : (
+              formatPercent(candidate.failureRate)
+            )}
+          </dd>
         </div>
         <div>
           <dt>{t("dns.fact.samples")}</dt>
@@ -187,11 +194,15 @@ function DnsContent({
   if (ranked.length === 0 && excluded.length === 0) {
     return (
       <>
-        <CoverageBanner coverage={coverage} />
+        <CoverageBanner
+          complete={!partial}
+          coverage={coverage}
+          context="scan"
+        />
         <EmptyState
           title={t("dns.empty.title")}
-          description={t("dns.empty.body")}
-          nextStep={t("dns.empty.next")}
+          body={t("dns.empty.body")}
+          next={t("dns.empty.next")}
         />
       </>
     );
@@ -199,7 +210,7 @@ function DnsContent({
 
   return (
     <>
-      <CoverageBanner coverage={coverage} />
+      <CoverageBanner complete={!partial} coverage={coverage} context="scan" />
 
       <InlineNotice tone="quiet">
         <strong>{t("dns.basis.title")}</strong>
