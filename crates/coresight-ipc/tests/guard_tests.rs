@@ -1,13 +1,17 @@
-//! Architecture guard: the IPC crate must stay a pure, platform-neutral
-//! dispatcher.
+//! Architecture guard: the IPC crate stays a thin dispatcher.
 //!
-//! Mirrors `crates/coresight-cleanup/tests/cleanup_tests.rs`: production
-//! source may not reach the filesystem, spawn processes, open sockets, touch
-//! a database, or link a desktop shell. It also may not contain panic paths
-//! (`unwrap`, `expect`, `panic!`, `unreachable!`) — malformed requests must
-//! become typed errors instead of unwinding in the host process.
+//! All filesystem and clock access is confined to the single audited scan
+//! boundary (`src/scan.rs`, which wraps `coresight-engine`); every other
+//! production source may not reach the filesystem, spawn processes, open
+//! sockets, touch a database, or link a desktop shell. It also may not
+//! contain panic paths (`unwrap`, `expect`, `panic!`, `unreachable!`) —
+//! malformed requests must become typed errors instead of unwinding in the
+//! host process.
 
 use std::path::Path;
+
+/// The one production module allowed to touch the filesystem and the clock.
+const SCAN_BOUNDARY: &str = "scan.rs";
 
 fn source_files() -> Vec<std::path::PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -22,6 +26,10 @@ fn source_files() -> Vec<std::path::PathBuf> {
         "the guard must inspect real source files"
     );
     files
+}
+
+fn is_scan_boundary(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some(SCAN_BOUNDARY)
 }
 
 #[test]
@@ -42,6 +50,13 @@ fn production_sources_contain_no_io_process_network_or_tauri() {
             "tauri::",
             "SystemTime::now",
         ] {
+            // The scan boundary is the crate's one audited filesystem/clock
+            // adapter; every other module must stay pure.
+            if is_scan_boundary(&path)
+                && matches!(forbidden, "std::fs::" | "std::io::" | "SystemTime::now")
+            {
+                continue;
+            }
             assert!(
                 !text.contains(forbidden),
                 "{} contains forbidden API {forbidden}",

@@ -25,15 +25,27 @@ use serde_json::Value;
 use crate::error::{codes, ApiError};
 
 /// The `coresight.v1.startScan` request.
+///
+/// `root` is the real directory (or single file) to walk. When it is absent
+/// the backend scans the platform home directory reported by the engine's
+/// `SysDirs` boundary. `driveId` is retained from the original v1 frame for
+/// compatibility; it names the drive the scan is registered against and may
+/// be omitted, in which case the session derives one from the real root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartScanRequest {
-    /// The drive to scan.
+    /// The drive to scan. Optional: a scan started from a bare `root` gets a
+    /// drive record derived from that root.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub drive_id: String,
     /// Force a full rescan instead of an incremental one. `None` means the
-    /// shell did not specify a preference; the backend decides.
+    /// shell did not specify a preference; the backend decides. This build
+    /// keeps no incremental index, so every scan is a full walk either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_rescan: Option<bool>,
+    /// Absolute path to walk. `None` means the platform home directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<std::path::PathBuf>,
 }
 
 /// The `coresight.v1.cancelScan` request.
@@ -160,10 +172,12 @@ pub struct GetPrivacySummaryRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", content = "payload")]
 pub enum Command {
-    /// Start a new scan (requires a scan backend; none is attached here).
+    /// Start a new scan (requires a scan backend; the shell attaches the real
+    /// engine backend).
     #[serde(rename = "coresight.v1.startScan")]
     StartScan(StartScanRequest),
-    /// Cancel a running scan (requires a scan backend; none is attached here).
+    /// Cancel a running scan (requires a scan backend; the shell attaches the
+    /// real engine backend).
     #[serde(rename = "coresight.v1.cancelScan")]
     CancelScan(CancelScanRequest),
     /// Totals, exclusions note, last scan, and retained snapshot count.

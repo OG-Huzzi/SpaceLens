@@ -18,6 +18,7 @@ fn every_command() -> Vec<Command> {
         Command::StartScan(StartScanRequest {
             drive_id: DRIVE_ID.to_string(),
             full_rescan: Some(true),
+            root: None,
         }),
         Command::CancelScan(CancelScanRequest {
             scan_id: SCAN_ID.to_string(),

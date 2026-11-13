@@ -4,11 +4,11 @@ import { useApiData } from "../hooks/useApiData";
 import {
   formatAge,
   formatBytes,
-  formatCount,
   formatDateTime,
   formatDelta,
   formatPercent
 } from "../lib/format";
+import { t, tCount } from "../i18n";
 import {
   CoverageBanner,
   DataValue,
@@ -47,6 +47,16 @@ function filterCategory(category: CategoryTotals, query: string): CategoryTotals
   return { ...category, children };
 }
 
+function entryCount(value: number | null): string {
+  if (value === null) return t("state.unknown");
+  return tCount(value, "unit.entry.one", "unit.entry.other");
+}
+
+function observedEntryCount(value: number | null): string {
+  if (value === null) return t("state.unknown");
+  return tCount(value, "unit.observedEntry.one", "unit.observedEntry.other");
+}
+
 function CategoryRow({
   category,
   depth,
@@ -64,15 +74,18 @@ function CategoryRow({
   const shouldOpen = forceOpen || (focusCategoryId !== null && containsCategory(category, focusCategoryId));
   const isFocused = category.id === focusCategoryId;
   const knownChildren = category.children.length;
-  const summaryLabel = `${category.name}: ${formatBytes(category.bytes)} observed, ${formatPercent(
-    category.shareOfParent
-  )} of parent, ${formatDelta(category.deltaSinceLast)} since the last scan${
-    partial ? ", from a partial source" : ""
-  }. ${
+  const childrenLabel =
     knownChildren > 0
-      ? formatCount(knownChildren, "subcategory", "subcategories")
-      : "No deeper breakdown"
-  }.`;
+      ? tCount(knownChildren, "unit.subcategory.one", "unit.subcategory.other")
+      : t("storage.category.noDeeperBreakdown");
+  const summaryLabel = t("storage.category.summary", {
+    name: category.name,
+    bytes: formatBytes(category.bytes),
+    percent: formatPercent(category.shareOfParent),
+    delta: formatDelta(category.deltaSinceLast),
+    partial: partial ? t("state.sizeBar.partialSuffix") : "",
+    children: childrenLabel
+  });
 
   return (
     <details
@@ -83,15 +96,11 @@ function CategoryRow({
         <span className="category-summary__chevron" aria-hidden="true" />
         <span className="category-summary__name">
           <span className="category-summary__title">{category.name}</span>
-          <span className="category-summary__meta">
-            {knownChildren > 0
-              ? formatCount(knownChildren, "subcategory", "subcategories")
-              : "No deeper breakdown"}
-          </span>
+          <span className="category-summary__meta">{childrenLabel}</span>
         </span>
         <SizeBar
           share={category.shareOfParent}
-          label={`${category.name} share`}
+          label={t("storage.category.shareLabel", { name: category.name })}
           partial={partial}
         />
         <span className="category-summary__bytes">
@@ -114,31 +123,21 @@ function CategoryRow({
       <div className="category-detail">
         <dl className="category-facts">
           <div>
-            <dt>Entries</dt>
+            <dt>{t("storage.category.entries")}</dt>
             <dd>
-              <DataValue partial={partial}>
-                {formatCount(category.itemCount, "entry", "entries")}
-              </DataValue>
+              <DataValue partial={partial}>{entryCount(category.itemCount)}</DataValue>
             </dd>
           </div>
           <div>
-            <dt>Entries without a known size</dt>
+            <dt>{t("storage.category.entriesWithoutSize")}</dt>
             <dd>
-              <DataValue partial={partial}>
-                {category.entriesWithoutSize === null
-                  ? "Unknown"
-                  : formatCount(category.entriesWithoutSize, "entry", "entries")}
-              </DataValue>
+              <DataValue partial={partial}>{entryCount(category.entriesWithoutSize)}</DataValue>
             </dd>
           </div>
           <div>
-            <dt>Observation errors</dt>
+            <dt>{t("storage.category.observationErrors")}</dt>
             <dd>
-              <DataValue partial={partial}>
-                {category.observationErrors === null
-                  ? "Unknown"
-                  : formatCount(category.observationErrors, "entry", "entries")}
-              </DataValue>
+              <DataValue partial={partial}>{entryCount(category.observationErrors)}</DataValue>
             </dd>
           </div>
         </dl>
@@ -158,21 +157,20 @@ function CategoryRow({
             ))}
           </ul>
         ) : (
-          <p className="microcopy">No deeper category breakdown was recorded.</p>
+          <p className="microcopy">{t("storage.category.noDeeperBody")}</p>
         )}
 
         {category.sampleLocations.length > 0 ? (
           <details className="location-disclosure">
-            <summary aria-label={`Sample locations for ${category.name}`}>
-              <span>Sample locations</span>
+            <summary
+              aria-label={t("storage.category.sampleLocationsAria", { name: category.name })}
+            >
+              <span>{t("storage.category.sampleLocations")}</span>
               <span className="location-disclosure__count">
-                {formatCount(category.sampleLocations.length, "label", "labels")}
+                {tCount(category.sampleLocations.length, "unit.label.one", "unit.label.other")}
               </span>
             </summary>
-            <p className="microcopy">
-              Labels are supplied by the engine and displayed verbatim. CoreSight does not build
-              or resolve paths in the interface.
-            </p>
+            <p className="microcopy">{t("storage.category.sampleLocationsNote")}</p>
             <dl className="location-list">
               {category.sampleLocations.map((location) => (
                 <div key={`${category.id}-${location.displayPath}`}>
@@ -206,15 +204,15 @@ function StorageContent({
     return (
       <div className="screen">
         <PageHeader
-          eyebrow="Storage"
-          title="What's using my space?"
-          description="Human categories first, technical labels one deliberate step down."
+          eyebrow={t("storage.eyebrow")}
+          title={t("storage.title")}
+          description={t("storage.description")}
         />
         <CoverageBanner coverage={data.coverage} />
         <EmptyState
-          title="No storage categories yet"
-          description="There is no completed category breakdown for this device. Zero categories is a real empty result, not an unknown total."
-          nextStep="After a scan completes, categories, verified duplicates, and large files will appear here."
+          title={t("storage.empty.title")}
+          description={t("storage.empty.body")}
+          nextStep={t("storage.empty.next")}
         />
       </div>
     );
@@ -228,52 +226,49 @@ function StorageContent({
   return (
     <div className="screen screen--storage">
       <PageHeader
-        eyebrow="Storage"
-        title="What's using my space?"
-        description="Start with human categories. Expand only when you want the evidence underneath."
+        eyebrow={t("storage.eyebrow")}
+        title={t("storage.title")}
+        description={t("storage.descriptionMain")}
       />
 
       <CoverageBanner coverage={data.coverage} />
 
       <section className="storage-summary" aria-labelledby="storage-summary-title">
         <div className="storage-summary__lead">
-          <p className="eyebrow">Observed total</p>
+          <p className="eyebrow">{t("storage.summary.observedTotal")}</p>
           <h2 id="storage-summary-title">
             <DataValue partial={partial}>{formatBytes(data.totalObservedBytes)}</DataValue>
           </h2>
           <p>
-            Across{" "}
-            <DataValue partial={partial}>
-              {formatCount(data.totalObservedItems, "observed entry", "observed entries")}
-            </DataValue>
-            . This is not free space; it is what the {partial ? "partial " : ""}scan could
-            observe.
+            {t(partial ? "storage.summary.bodyPartial" : "storage.summary.bodyComplete", {
+              count: observedEntryCount(data.totalObservedItems)
+            })}
           </p>
         </div>
         <dl className="summary-facts">
           <div>
-            <dt>Categories</dt>
+            <dt>{t("storage.summary.categories")}</dt>
             <dd>
               <DataValue partial={partial}>
-                {formatCount(data.categories.length, "category", "categories")}
+                {tCount(data.categories.length, "unit.category.one", "unit.category.other")}
               </DataValue>
             </dd>
           </div>
           <div>
-            <dt>Entries without a size</dt>
+            <dt>{t("storage.summary.entriesWithoutSize")}</dt>
             <dd>
-              {data.coverage.unknownSizeEntries === null
-                ? "Unknown"
-                : formatCount(data.coverage.unknownSizeEntries, "entry", "entries")}
+              {entryCount(data.coverage.unknownSizeEntries)}
               {partial ? <PartialTag /> : null}
             </dd>
           </div>
           <div>
-            <dt>Duplicate evidence</dt>
+            <dt>{t("storage.summary.duplicateEvidence")}</dt>
             <dd>
-              {data.duplicateReport.coverage.completeness === "complete"
-                ? "Complete"
-                : "Partial"}
+              {t(
+                data.duplicateReport.coverage.completeness === "complete"
+                  ? "status.complete"
+                  : "status.partial"
+              )}
             </dd>
           </div>
         </dl>
@@ -282,12 +277,12 @@ function StorageContent({
       <section className="panel storage-categories" aria-labelledby="storage-categories-heading">
         <SectionHeading
           id="storage-categories-heading"
-          title="Categories"
-          description="Sorted by observed size. Raw locations live only inside the deepest disclosure."
+          title={t("storage.categories.title")}
+          description={t("storage.categories.description")}
           aside={
             <span className="eyebrow">
               <DataValue partial={partial}>
-                {formatCount(matchingTopLevel, "top-level group", "top-level groups")}
+                {tCount(matchingTopLevel, "unit.topLevelGroup.one", "unit.topLevelGroup.other")}
               </DataValue>
             </span>
           }
@@ -295,40 +290,47 @@ function StorageContent({
 
         <div className="storage-toolbar">
           <label className="search-field" htmlFor="storage-search">
-            <span>Search categories</span>
+            <span>{t("storage.search.label")}</span>
             <input
               id="storage-search"
               type="search"
               value={query}
-              aria-label="Search storage categories"
+              aria-label={t("storage.search.aria")}
               aria-describedby="storage-search-help"
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Games, Documents, Development…"
+              placeholder={t("storage.search.placeholder")}
               autoComplete="off"
             />
           </label>
           <p className="storage-toolbar__status" id="storage-search-help" aria-live="polite">
             {normalisedQuery.length === 0
-              ? "Search by human category name, not by path."
-              : `${formatCount(filteredCategories.length, "group", "groups")} match “${query.trim()}”.`}
+              ? t("storage.search.help")
+              : t("storage.search.status", {
+                  matches: tCount(
+                    filteredCategories.length,
+                    "unit.match.one",
+                    "unit.match.other"
+                  ),
+                  query: query.trim()
+                })}
           </p>
         </div>
 
         {filteredCategories.length === 0 ? (
           <EmptyState
-            title="No matching categories"
-            description={`No human category contains “${query.trim()}”. This search does not guess at path fragments.`}
-            nextStep="Try a broader category name, or clear the search to see every category."
+            title={t("storage.search.emptyTitle")}
+            description={t("storage.search.emptyBody", { query: query.trim() })}
+            nextStep={t("storage.search.emptyNext")}
           />
         ) : (
           <>
             <div className="category-columns" aria-hidden="true">
               <span />
-              <span>Category</span>
-              <span>Share of total</span>
-              <span>Observed</span>
-              <span>Share</span>
-              <span>Change</span>
+              <span>{t("storage.column.category")}</span>
+              <span>{t("storage.column.shareOfTotal")}</span>
+              <span>{t("storage.column.observed")}</span>
+              <span>{t("storage.column.share")}</span>
+              <span>{t("storage.column.change")}</span>
             </div>
             <ul className="category-list">
               {filteredCategories.map((category) => (
@@ -351,51 +353,67 @@ function StorageContent({
         <section className="panel evidence-panel" aria-labelledby="duplicate-heading">
           <SectionHeading
             id="duplicate-heading"
-            title="Verified duplicate groups"
-            description="Only SHA-256 matches with equal sizes are called duplicates. Hard-link aliases are shown, never counted as savings."
+            title={t("storage.duplicates.title")}
+            description={t("storage.duplicates.description")}
           />
           <CoverageBanner
             coverage={data.duplicateReport.coverage}
             context="duplicateAnalysis"
           />
           <div className="evidence-panel__summary">
-            <span>Recoverable, verified</span>
+            <span>{t("storage.duplicates.recoverable")}</span>
             <DataValue partial={data.duplicateReport.coverage.completeness !== "complete"}>
               {formatBytes(data.duplicateReport.totalRecoverableBytes)}
             </DataValue>
           </div>
           {data.duplicateReport.groups.length === 0 ? (
-            <p className="microcopy">No hash-verified duplicate groups were found.</p>
+            <p className="microcopy">{t("storage.duplicates.empty")}</p>
           ) : (
             <div className="duplicate-list">
               {data.duplicateReport.groups.map((group, index) => (
                 <article className="duplicate-group" key={group.id}>
                   <header>
                     <div>
-                      <p className="eyebrow">Group {String(index + 1).padStart(2, "0")}</p>
+                      <p className="eyebrow">
+                        {t("storage.duplicates.group", {
+                          index: String(index + 1).padStart(2, "0")
+                        })}
+                      </p>
                       <h3>
-                        {formatCount(group.members.length, "verified copy", "verified copies")} at{" "}
-                        {formatBytes(group.sizeBytes)} each
+                        {t("storage.duplicates.groupHeading", {
+                          count: tCount(
+                            group.members.length,
+                            "unit.verifiedCopy.one",
+                            "unit.verifiedCopy.other"
+                          ),
+                          bytes: formatBytes(group.sizeBytes)
+                        })}
                       </h3>
                       <p className="duplicate-group__recoverable">
-                        Recoverable{" "}
                         <DataValue
                           partial={data.duplicateReport.coverage.completeness !== "complete"}
                         >
-                          {formatBytes(group.recoverableBytes)}
+                          {t("storage.duplicates.recoverableValue", {
+                            bytes: formatBytes(group.recoverableBytes)
+                          })}
                         </DataValue>
                       </p>
                     </div>
-                    <StatusPill tone="positive">SHA-256 verified</StatusPill>
+                    <StatusPill tone="positive">{t("storage.duplicates.verified")}</StatusPill>
                   </header>
                   <p className="hash-line">
-                    Hash <code>{group.contentSha256.slice(0, 12)}…</code>
+                    {t("storage.duplicates.hashLabel")}{" "}
+                    <code>{group.contentSha256.slice(0, 12)}…</code>
                   </p>
                   <details className="member-disclosure">
-                    <summary aria-label={`Show member labels for duplicate group ${index + 1}`}>
-                      <span>Show member labels</span>
+                    <summary
+                      aria-label={t("storage.duplicates.showMembersAria", {
+                        index: index + 1
+                      })}
+                    >
+                      <span>{t("storage.duplicates.showMembers")}</span>
                       <span>
-                        {formatCount(group.members.length, "member", "members")}
+                        {tCount(group.members.length, "unit.member.one", "unit.member.other")}
                       </span>
                     </summary>
                     <ul className="duplicate-members">
@@ -404,17 +422,16 @@ function StorageContent({
                           <code>{member.displayPath}</code>
                           <span>
                             {formatBytes(member.sizeBytes)}
-                            {member.isHardlinkAlias ? " · hard-link alias" : ""}
+                            {member.isHardlinkAlias
+                              ? t("storage.duplicates.hardlinkAlias")
+                              : ""}
                           </span>
                         </li>
                       ))}
                     </ul>
                   </details>
                   {group.members.some((member) => member.isHardlinkAlias) ? (
-                    <p className="microcopy">
-                      A hard-link alias is another name for the same filesystem object. Removing
-                      it frees no space, so it contributes nothing to recoverable bytes.
-                    </p>
+                    <p className="microcopy">{t("storage.duplicates.hardlinkNote")}</p>
                   ) : null}
                 </article>
               ))}
@@ -426,13 +443,12 @@ function StorageContent({
               <DataValue
                 partial={data.duplicateReport.coverage.completeness !== "complete"}
               >
-                {formatCount(
+                {tCount(
                   data.duplicateReport.unverifiedEntries,
-                  "file lacks",
-                  "files lack"
+                  "storage.duplicates.unverified.one",
+                  "storage.duplicates.unverified.other"
                 )}
-              </DataValue>{" "}
-              a verified content hash and is excluded from every duplicate claim.
+              </DataValue>
             </p>
           ) : null}
           {data.duplicateReport.unknownSizeEntries !== null &&
@@ -441,14 +457,12 @@ function StorageContent({
               <DataValue
                 partial={data.duplicateReport.coverage.completeness !== "complete"}
               >
-                {formatCount(
+                {tCount(
                   data.duplicateReport.unknownSizeEntries,
-                  "entry has",
-                  "entries have"
+                  "storage.duplicates.unknownSize.one",
+                  "storage.duplicates.unknownSize.other"
                 )}
-              </DataValue>{" "}
-              a verified hash but no observed size; size equality cannot be proven, so they are
-              never grouped.
+              </DataValue>
             </p>
           ) : null}
         </section>
@@ -456,12 +470,14 @@ function StorageContent({
         <section className="panel evidence-panel" aria-labelledby="big-files-heading">
           <SectionHeading
             id="big-files-heading"
-            title="Large files"
-            description={`Files above ${formatBytes(data.bigFileReport.thresholdBytes)}. Unknown age is never treated as old.`}
+            title={t("storage.bigFiles.title")}
+            description={t("storage.bigFiles.description", {
+              bytes: formatBytes(data.bigFileReport.thresholdBytes)
+            })}
           />
           <CoverageBanner coverage={data.bigFileReport.coverage} context="largeFileResult" />
           {data.bigFileReport.files.length === 0 ? (
-            <p className="microcopy">No files crossed the current size threshold.</p>
+            <p className="microcopy">{t("storage.bigFiles.empty")}</p>
           ) : (
             <ul className="big-file-list">
               {data.bigFileReport.files.map((file) => (
@@ -474,23 +490,29 @@ function StorageContent({
                         {formatBytes(file.sizeBytes)}
                       </DataValue>
                     </strong>
-                    <span>{file.categoryName ?? "Category unknown"}</span>
+                    <span>{file.categoryName ?? t("storage.bigFiles.categoryUnknown")}</span>
                   </div>
                   <div className="big-file-list__meta">
                     <span>
                       {file.ageDays === null
-                        ? "Age unknown"
-                        : `${formatAge(file.ageDays)} old`}
+                        ? t("format.ageUnknown")
+                        : t("storage.bigFiles.age", { age: formatAge(file.ageDays) })}
                     </span>
                     <span>
                       {file.modifiedAt === null
-                        ? "Modified time unknown"
-                        : `Modified ${formatDateTime(file.modifiedAt)}`}
+                        ? t("storage.bigFiles.modifiedUnknown")
+                        : t("storage.bigFiles.modified", {
+                            time: formatDateTime(file.modifiedAt)
+                          })}
                     </span>
                   </div>
                   <details className="file-location">
-                    <summary aria-label={`Show location label for the ${formatBytes(file.sizeBytes)} file`}>
-                      Show location label
+                    <summary
+                      aria-label={t("storage.bigFiles.showLocationAria", {
+                        bytes: formatBytes(file.sizeBytes)
+                      })}
+                    >
+                      {t("storage.bigFiles.showLocation")}
                     </summary>
                     <code>{file.displayPath}</code>
                   </details>
@@ -504,13 +526,12 @@ function StorageContent({
               <DataValue
                 partial={data.bigFileReport.coverage.completeness !== "complete"}
               >
-                {formatCount(
+                {tCount(
                   data.bigFileReport.unknownAgeEntries,
-                  "entry had",
-                  "entries had"
+                  "storage.bigFiles.unknownAge.one",
+                  "storage.bigFiles.unknownAge.other"
                 )}
-              </DataValue>{" "}
-              an unknown modification time and was excluded from age-based conclusions.
+              </DataValue>
             </p>
           ) : null}
         </section>
@@ -531,18 +552,18 @@ export function StorageScreen({
   if (state.status === "loading") {
     return (
       <ScreenLoading
-        eyebrow="Storage"
-        title="What's using my space?"
-        description="Human categories first, technical labels one deliberate step down."
+        eyebrow={t("storage.eyebrow")}
+        title={t("storage.title")}
+        description={t("storage.description")}
       />
     );
   }
   if (state.status === "error") {
     return (
       <ScreenError
-        eyebrow="Storage"
-        title="What's using my space?"
-        description="Human categories first, technical labels one deliberate step down."
+        eyebrow={t("storage.eyebrow")}
+        title={t("storage.title")}
+        description={t("storage.description")}
         error={state.error}
       />
     );

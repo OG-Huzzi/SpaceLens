@@ -40,6 +40,11 @@ pub mod codes {
     pub const UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
     /// The scan id is not known in this session.
     pub const SCAN_NOT_FOUND: &str = "SCAN_NOT_FOUND";
+    /// The scan is known but is no longer running (already completed,
+    /// cancelled, or failed), so it cannot be cancelled again.
+    pub const SCAN_NOT_RUNNING: &str = "SCAN_NOT_RUNNING";
+    /// The supplied scan root does not exist or cannot be observed.
+    pub const SCAN_ROOT_UNAVAILABLE: &str = "SCAN_ROOT_UNAVAILABLE";
     /// The scan exists but its results cannot be served (cancelled, failed,
     /// or no scan backend is attached).
     pub const SCAN_UNAVAILABLE: &str = "SCAN_UNAVAILABLE";
@@ -68,7 +73,7 @@ pub mod codes {
     ///
     /// The list is asserted unique by the contract tests so a typo cannot
     /// silently create a second spelling of the same outcome.
-    pub const ALL: [&str; 18] = [
+    pub const ALL: [&str; 20] = [
         SCAN_IN_PROGRESS,
         DRIVE_OFFLINE,
         PLAN_REJECTED_UNSAFE,
@@ -77,6 +82,8 @@ pub mod codes {
         DB_CORRUPT_RESCANNED,
         UNKNOWN_COMMAND,
         SCAN_NOT_FOUND,
+        SCAN_NOT_RUNNING,
+        SCAN_ROOT_UNAVAILABLE,
         SCAN_UNAVAILABLE,
         HISTORY_UNAVAILABLE,
         NOT_IMPLEMENTED_IN_THIS_BUILD,

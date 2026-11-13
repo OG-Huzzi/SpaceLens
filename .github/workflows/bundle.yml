@@ -1,0 +1,162 @@
+# CoreSight — UNSIGNED bundle builds.
+#
+# Deliberately a SEPARATE workflow from `ci.yml`, for two reasons:
+#
+#   1. Bundling needs OS-level toolchains that unit tests do not: MSVC C++
+#      build tools + the Windows SDK on Windows, Xcode command line tools on
+#      macOS, and the Tauri CLI downloads NSIS/WiX at build time. Those are
+#      more fragile than `cargo test`, and a packaging failure must never be
+#      able to turn the required `ci.yml` gate red, nor hide a test failure
+#      behind a bundling failure.
+#   2. A cold release build plus installer generation is slow, so it must not
+#      run on every pull request. Triggers are `push` to `main` and manual
+#      `workflow_dispatch` only.
+#
+# This job is NOT `continue-on-error`. It fails loudly when a bundle cannot be
+# produced — a gate that cannot fail is not a gate. It is simply not a
+# required check for merging; `ci.yml` remains the merge gate.
+#
+# NOTHING HERE IS SIGNED. There is no Apple Developer ID certificate and no
+# Windows code-signing certificate in this repository (see
+# docs/PACKAGING.md). Artifacts are therefore explicitly named `-unsigned` and
+# carry an `UNSIGNED-BUILD.txt` note inside the artifact.
+
+name: Bundle (unsigned)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: bundle (${{ matrix.os }}) unsigned
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `--bundles` is validated per platform by the Tauri CLI: on Windows
+          # only msi/nsis are accepted, on macOS only app/dmg. Listing foreign
+          # formats here would fail, which is why the matrix carries the exact
+          # per-platform list instead of one shared value.
+          - os: windows-latest
+            bundles: nsis,msi
+            artifact: coresight-windows-x64-unsigned
+          - os: macos-latest
+            bundles: app,dmg
+            artifact: coresight-macos-arm64-unsigned
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # The desktop shell is its own Cargo workspace root (src-tauri/Cargo.toml),
+      # so the default cache scope (the root workspace) would miss its target/
+      # directory entirely.
+      - name: Cache the shell workspace target directory
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      # `tauri build` runs `build.beforeBuildCommand` (`npm run build`) itself,
+      # then compiles release and generates the platform installers.
+      - name: Build unsigned bundle
+        run: npm run tauri:build -- --bundles ${{ matrix.bundles }} --ci
+        env:
+          CI: "true"
+
+      - name: Collect installers and write the unsigned notice
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+
+          if [ ! -d src-tauri/target/release/bundle ]; then
+            echo "::error title=Tauri produced no bundle directory::src-tauri/target/release/bundle does not exist. The build step reported success but wrote no bundle output. Check that bundle.active is true and that bundle.targets is not empty. See docs/PACKAGING.md."
+            exit 1
+          fi
+
+          # Copy every non-empty installer the bundler produced. `find` is used
+          # instead of bash glob arrays because macOS runners still ship bash 3.2.
+          find src-tauri/target/release/bundle -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \) -size +0c \
+            -exec cp {} artifacts/ \;
+
+          # A .app is a directory; upload-artifact does not preserve executable
+          # bits, so zip it (ditto keeps the bundle structure and modes).
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            for app in src-tauri/target/release/bundle/macos/*.app; do
+              [ -d "$app" ] || continue
+              ditto -c -k --keepParent "$app" "artifacts/$(basename "$app" .app)-unsigned.zip"
+            done
+          fi
+
+          {
+            echo "CoreSight — UNSIGNED build"
+            echo "=========================="
+            echo ""
+            echo "Commit:   $(git rev-parse HEAD)"
+            echo "Runner:   ${{ matrix.os }} ($(uname -srm))"
+            echo "Built at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Run:      ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "This artifact is NOT code-signed and NOT notarised."
+            echo "  macOS:   Gatekeeper blocks it until the user bypasses it."
+            echo "  Windows: SmartScreen warns until the user chooses More info -> Run anyway."
+            echo "No Apple Developer ID and no Windows code-signing certificate exist in this repository."
+            echo "See docs/PACKAGING.md for exactly what is missing before this is distributable."
+          } > artifacts/UNSIGNED-BUILD.txt
+
+          echo "--- artifacts ---"
+          ls -lh artifacts
+
+          installers=$(find artifacts -maxdepth 1 -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \) -size +0c \
+            | wc -l | tr -d ' ')
+
+          if [ "$installers" -eq 0 ]; then
+            echo "::error title=No installer produced::The Tauri bundler exited successfully but wrote no installer for ${{ matrix.os }}. Expected src-tauri/target/release/bundle/nsis/*.exe or msi/*.msi on Windows, dmg/*.dmg on macOS. Check the 'Build unsigned bundle' log for the first error, then see docs/PACKAGING.md."
+            exit 1
+          fi
+
+          echo "Collected $installers installer file(s)."
+          echo "### Unsigned bundle: \`${{ matrix.artifact }}\` — $installers installer file(s)" >> "$GITHUB_STEP_SUMMARY"
+          echo "This build is **unsigned** and **not notarised**." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      # Runs only when an earlier step failed; it does not change the job's
+      # outcome, it just makes the failure diagnosable from the log alone.
+      - name: Diagnose the failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "::error title=Unsigned bundle failed::A step above failed. Bundling is CI-only: it needs MSVC C++ build tools + Windows SDK (Windows) or Xcode command line tools (macOS), and the Tauri CLI downloads NSIS/WiX on first use. Reproduce locally with: npm ci && npm run tauri:build. See docs/PACKAGING.md. A failure here does not affect the required CI gate in ci.yml."

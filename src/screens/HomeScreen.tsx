@@ -2,11 +2,11 @@ import type { CoreSightApi, Drive, HomeSummary } from "../api";
 import { useApiData } from "../hooks/useApiData";
 import {
   formatBytes,
-  formatCount,
   formatDateTime,
   formatDelta,
   formatPercent
 } from "../lib/format";
+import { t, tCount, type MessageKey } from "../i18n";
 import {
   CoverageBanner,
   DataValue,
@@ -20,11 +20,22 @@ import {
   type PillTone
 } from "../components/ui";
 
-function driveStatus(drive: Drive): { label: string; tone: PillTone } {
-  if (drive.connection === "remembered") return { label: "Remembered", tone: "quiet" };
-  if (drive.health === "attention") return { label: "Needs attention", tone: "attention" };
-  if (drive.health === "healthy") return { label: "Healthy", tone: "positive" };
-  return { label: "Health unknown", tone: "quiet" };
+function driveStatus(drive: Drive): { label: MessageKey; tone: PillTone } {
+  if (drive.connection === "remembered") {
+    return { label: "drive.connection.remembered", tone: "quiet" };
+  }
+  if (drive.health === "attention") {
+    return { label: "drive.health.attention", tone: "attention" };
+  }
+  if (drive.health === "healthy") {
+    return { label: "drive.health.healthy", tone: "positive" };
+  }
+  return { label: "drive.health.unknown", tone: "quiet" };
+}
+
+function opportunityCount(value: number | null): string {
+  if (value === null) return t("home.hero.countUnknown");
+  return tCount(value, "unit.opportunityToReview.one", "unit.opportunityToReview.other");
 }
 
 function HomeContent({ home }: { home: HomeSummary }) {
@@ -33,22 +44,22 @@ function HomeContent({ home }: { home: HomeSummary }) {
   const safeActionable = home.safeReclaimableBytes;
   const primaryLabel =
     partial || safeActionable === null || home.actionableOpportunityCount === 0
-      ? "Open cleanup review"
-      : `Review ${formatBytes(safeActionable)} you can safely remove`;
+      ? t("home.cta.openCleanup")
+      : t("home.cta.reviewSafe", { bytes: formatBytes(safeActionable) });
 
   if (home.drives.length === 0) {
     return (
       <div className="screen">
         <PageHeader
-          eyebrow="Home"
-          title="How is your storage doing?"
-          description="One calm summary of the drives CoreSight can see, with every number tied to its context."
+          eyebrow={t("home.eyebrow")}
+          title={t("home.title")}
+          description={t("home.empty.description")}
         />
         <CoverageBanner coverage={coverage} context="storageScan" />
         <EmptyState
-          title="No drive summary yet"
-          description="CoreSight has not completed a storage scan on this device. Nothing is being measured in the background."
-          nextStep="Once a scan completes, this page will show free space, the largest categories, and what changed."
+          title={t("home.empty.title")}
+          description={t("home.empty.body")}
+          nextStep={t("home.empty.next")}
         />
       </div>
     );
@@ -62,15 +73,15 @@ function HomeContent({ home }: { home: HomeSummary }) {
   return (
     <div className="screen screen--home">
       <PageHeader
-        eyebrow="Home"
-        title="How is your storage doing?"
-        description="A calm reading of the last local snapshot. Context first, technical detail later."
+        eyebrow={t("home.eyebrow")}
+        title={t("home.title")}
+        description={t("home.description")}
         aside={
           <div className="snapshot-stamp">
-            <span>Last completed scan</span>
+            <span>{t("home.stamp.lastScan")}</span>
             <strong>{formatDateTime(home.lastScanAt)}</strong>
             <span className="snapshot-stamp__note">
-              {partial ? "Partial scan · totals incomplete" : "Local only · never uploaded"}
+              {partial ? t("home.stamp.partial") : t("home.stamp.localOnly")}
             </span>
           </div>
         }
@@ -80,44 +91,36 @@ function HomeContent({ home }: { home: HomeSummary }) {
 
       <section className="home-hero" aria-labelledby="reclaim-heading">
         <div className="home-hero__lead">
-          <p className="eyebrow">Safe to reclaim</p>
+          <p className="eyebrow">{t("home.safeToReclaim")}</p>
           <h2 id="reclaim-heading" className="home-hero__figure">
             <DataValue partial={partial}>{formatBytes(home.safeReclaimableBytes)}</DataValue>
           </h2>
           <p className="home-hero__context">
             <DataValue partial={partial}>
-              {formatCount(
-                home.actionableOpportunityCount,
-                "opportunity to review",
-                "opportunities to review"
-              )}
+              {opportunityCount(home.actionableOpportunityCount)}
             </DataValue>
             {" · "}
             <DataValue partial={partial}>
               {home.reviewReclaimableBytes === null
-                ? "review amount unknown"
-                : `${formatBytes(home.reviewReclaimableBytes)} in review-only opportunities`}
+                ? t("home.reviewAmountUnknown")
+                : t("home.reviewInOpportunities", {
+                    bytes: formatBytes(home.reviewReclaimableBytes)
+                  })}
             </DataValue>
             {" · "}
-            based on the {partial ? "partial " : ""}scan completed{" "}
-            {formatDateTime(home.lastScanAt)}.
+            {t(partial ? "home.basisPartial" : "home.basisComplete", {
+              time: formatDateTime(home.lastScanAt)
+            })}
           </p>
-          <p className="home-hero__rule">
-            Nothing moves automatically. Every cleanup is previewed and confirmed one opportunity
-            at a time.
-          </p>
+          <p className="home-hero__rule">{t("home.rule")}</p>
           <a className="button button--primary" href="#cleanup">
             {primaryLabel}
           </a>
-          {partial ? (
-            <p className="home-hero__blocked">
-              This scan is incomplete, so cleanup is blocked until a complete scan succeeds.
-            </p>
-          ) : null}
+          {partial ? <p className="home-hero__blocked">{t("home.cleanupBlocked")}</p> : null}
         </div>
 
         <div className="home-hero__drives">
-          <span className="home-hero__vertical-label">Drive health</span>
+          <span className="home-hero__vertical-label">{t("home.driveHealth")}</span>
           {home.drives.map((drive) => {
             const status = driveStatus(drive);
             return (
@@ -126,30 +129,40 @@ function HomeContent({ home }: { home: HomeSummary }) {
                   <div>
                     <h3>{drive.name}</h3>
                     <p>
-                      {drive.kind === "external" ? "External drive" : "Startup volume"}
-                      {drive.connection === "remembered" ? " · last known" : ""}
+                      {t(
+                        drive.kind === "external"
+                          ? "drive.kind.external"
+                          : "drive.kind.startupVolume"
+                      )}
+                      {drive.connection === "remembered"
+                        ? t("home.drive.lastKnownSuffix")
+                        : ""}
                     </p>
                   </div>
-                  <StatusPill tone={status.tone}>{status.label}</StatusPill>
+                  <StatusPill tone={status.tone}>{t(status.label)}</StatusPill>
                 </div>
                 <SizeBar
                   share={drive.usedShare}
-                  label={`${drive.name} used space`}
+                  label={t("home.drive.usedSpaceLabel", { name: drive.name })}
                   partial={partial}
                 />
                 <div className="drive-compact__numbers">
                   <DataValue partial={partial}>
-                    <strong>{formatBytes(drive.freeBytes)}</strong> free
+                    <strong>
+                      {drive.freeBytes === null
+                        ? t("home.drive.freeUnknownValue")
+                        : t("home.drive.free", { bytes: formatBytes(drive.freeBytes) })}
+                    </strong>
                   </DataValue>
                   <span>
-                    <DataValue partial={partial}>{formatBytes(drive.usedBytes)}</DataValue> used
-                    of <DataValue partial={partial}>{formatBytes(drive.totalBytes)}</DataValue>
+                    {t("home.drive.usedOfTotal", {
+                      used: formatBytes(drive.usedBytes),
+                      total: formatBytes(drive.totalBytes)
+                    })}
                   </span>
                 </div>
                 {drive.freeBytes === null ? (
-                  <p className="microcopy">
-                    Free space is unknown while this drive is disconnected, not zero.
-                  </p>
+                  <p className="microcopy">{t("home.drive.freeUnknown")}</p>
                 ) : null}
               </article>
             );
@@ -161,9 +174,13 @@ function HomeContent({ home }: { home: HomeSummary }) {
         <section className="panel" aria-labelledby="largest-categories">
           <SectionHeading
             id="largest-categories"
-            title="Largest categories"
-            description="Human categories first. Open Storage for subcategories and sample locations."
-            aside={<a className="text-link" href="#storage">Explore storage</a>}
+            title={t("home.categories.title")}
+            description={t("home.categories.description")}
+            aside={
+              <a className="text-link" href="#storage">
+                {t("home.categories.explore")}
+              </a>
+            }
           />
           <ol className="rank-list" aria-labelledby="largest-categories">
             {home.topCategories.map((category, index) => {
@@ -183,13 +200,15 @@ function HomeContent({ home }: { home: HomeSummary }) {
                       <strong>{category.name}</strong>
                       <span>
                         <DataValue partial={categoryPartial}>
-                          {formatPercent(category.shareOfParent)} of used space
+                          {t("home.category.ofUsedSpace", {
+                            percent: formatPercent(category.shareOfParent)
+                          })}
                         </DataValue>
                       </span>
                     </div>
                     <SizeBar
                       share={category.shareOfParent}
-                      label={`${category.name} share of used space`}
+                      label={t("home.category.shareLabel", { name: category.name })}
                       partial={categoryPartial}
                     />
                   </div>
@@ -215,30 +234,25 @@ function HomeContent({ home }: { home: HomeSummary }) {
         <section className="panel panel--soft" aria-labelledby="since-last-scan">
           <SectionHeading
             id="since-last-scan"
-            title="Since last scan"
-            description={
-              recentChange?.note ??
-              "The previous snapshot could not be compared, so no change is claimed."
-            }
+            title={t("home.since.title")}
+            description={recentChange?.note ?? t("home.since.description")}
           />
           {recentChange === null || recentChange.totalBytesDelta === null ? (
             <div className="unknown-block">
-              <strong>Change unknown</strong>
-              <p>
-                Scan twice to establish a comparison. An absent comparison is not the same as
-                “nothing changed”.
-              </p>
-              <a className="text-link" href="#history">View scan history</a>
+              <strong>{t("home.change.unknown")}</strong>
+              <p>{t("home.change.unknownBody")}</p>
+              <a className="text-link" href="#history">
+                {t("home.change.viewHistory")}
+              </a>
             </div>
           ) : (
             <>
               <p className="change-total">
-                <DataValue
-                  partial={recentChange.coverage.completeness !== "complete"}
-                >
-                  {formatDelta(recentChange.totalBytesDelta)}
+                <DataValue partial={recentChange.coverage.completeness !== "complete"}>
+                  {t("home.change.across", {
+                    delta: formatDelta(recentChange.totalBytesDelta)
+                  })}
                 </DataValue>
-                <span> across the categories you can see</span>
               </p>
               <ul className="growth-list">
                 {(growth ?? []).map((delta) => (
@@ -252,17 +266,17 @@ function HomeContent({ home }: { home: HomeSummary }) {
                   </li>
                 ))}
               </ul>
-              <a className="text-link" href="#history">See what changed</a>
+              <a className="text-link" href="#history">
+                {t("home.change.seeWhatChanged")}
+              </a>
             </>
           )}
         </section>
       </div>
 
-      <section className="home-footer-note" aria-label="Snapshot caveat">
+      <section className="home-footer-note" aria-label={t("home.caveat.aria")}>
         <p>
-          <strong>How to read these numbers.</strong> Sizes are observed logical bytes, not
-          promises of recoverable space. A category delta is labelled partial whenever either
-          snapshot was incomplete. Unknown values stay unknown.
+          <strong>{t("home.caveat.title")}</strong> {t("home.caveat.body")}
         </p>
       </section>
     </div>
@@ -275,18 +289,18 @@ export function HomeScreen({ api }: { api: CoreSightApi }) {
   if (state.status === "loading") {
     return (
       <ScreenLoading
-        eyebrow="Home"
-        title="How is your storage doing?"
-        description="A calm reading of the last local snapshot. Context first, technical detail later."
+        eyebrow={t("home.eyebrow")}
+        title={t("home.title")}
+        description={t("home.description")}
       />
     );
   }
   if (state.status === "error") {
     return (
       <ScreenError
-        eyebrow="Home"
-        title="How is your storage doing?"
-        description="A calm reading of the last local snapshot. Context first, technical detail later."
+        eyebrow={t("home.eyebrow")}
+        title={t("home.title")}
+        description={t("home.description")}
         error={state.error}
       />
     );

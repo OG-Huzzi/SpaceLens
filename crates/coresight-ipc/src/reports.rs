@@ -449,11 +449,15 @@ fn scan_status_view(scan: &ScanState) -> ScanStatusView {
             }
         }
     };
-    let coverage =
-        if scan.record.status.observes_full_scope() {
-            coverage_for_report(&scan.report)
-        } else {
-            DataCoverage {
+    // A running scan's live counters are real progress, not a total.
+    let entries_seen = scan
+        .progress
+        .map(|progress| progress.entries_seen)
+        .unwrap_or(scan.report.scanned_entries);
+    let coverage = if scan.record.status.observes_full_scope() {
+        coverage_for_report(&scan.report)
+    } else {
+        DataCoverage {
             completeness: match scan.record.status {
                 crate::response::ScanStatus::Running | crate::response::ScanStatus::Failed => {
                     DataCompleteness::Unknown
@@ -465,31 +469,47 @@ fn scan_status_view(scan: &ScanState) -> ScanStatusView {
             excluded_areas: Vec::new(),
             note: Some(match scan.record.status {
                 crate::response::ScanStatus::Running => {
-                    "The scan is still running; counts describe progress, not totals."
+                    "The scan is still running; counts describe progress, not totals.".to_string()
                 }
-                crate::response::ScanStatus::Failed => {
-                    "The scan failed; its observations are not a complete report."
+                crate::response::ScanStatus::Failed => match &scan.failure {
+                    Some(failure) => format!(
+                        "The scan failed ({}); its observations are not a complete report.",
+                        failure.reason
+                    ),
+                    None => {
+                        "The scan failed; its observations are not a complete report.".to_string()
+                    }
+                },
+                crate::response::ScanStatus::Cancelled => {
+                    "The scan was cancelled before it finished its full declared scope; the \
+                     observed subset is incomplete and is not a total."
+                        .to_string()
                 }
                 _ => "The scan did not finish its full declared scope; the observed subset is \
-                      incomplete.",
-            }
-            .to_string()),
+                      incomplete."
+                    .to_string(),
+            }),
         }
-        };
+    };
     ScanStatusView {
         scan_id: Some(scan.record.scan_id.clone()),
         state,
-        // This build records only completion instants; a start instant and
-        // progress estimate are not invented.
-        started_at: None,
+        started_at: scan.started_at.and_then(rfc3339_utc),
         completed_at: scan.record.completed_at.and_then(rfc3339_utc),
-        files_seen: Some(scan.report.scanned_entries),
+        files_seen: Some(entries_seen),
         bytes_seen: if scan.record.status.observes_full_scope() && complete {
             Some(scan.report.total_logical_size())
         } else {
             None
         },
-        current_area: None,
+        current_area: if scan.record.status == crate::response::ScanStatus::Running {
+            scan.root
+                .as_ref()
+                .map(|root| root.to_string_lossy().into_owned())
+        } else {
+            None
+        },
+        // No arrival-rate evidence exists, so an estimate would be invented.
         eta_seconds: None,
         coverage,
     }

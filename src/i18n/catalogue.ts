@@ -245,7 +245,7 @@ export const en = {
     "How CoreSight looks and behaves on this device. These preferences are stored locally and never change what CoreSight is allowed to do.",
   "settings.language.title": "Language",
   "settings.language.description":
-    "Interface strings only. The rest of this build is still being translated.",
+    "Interface strings only. Every built-in interface text in this build is translated; labels supplied by the engine are shown verbatim.",
   "settings.language.label": "Interface language",
   "settings.language.en": "English",
   "settings.language.de": "Deutsch",
@@ -285,7 +285,313 @@ export const en = {
     "Resets these preferences only. No files, scan data, snapshots, or history are touched.",
   "settings.about.storageUnavailable":
     "This browser refused to store preferences. Changes apply for this session only.",
-  "settings.about.saved": "Preferences saved on this device."
+  "settings.about.saved": "Preferences saved on this device.",
+
+  // ---------------------------------------------------------------------
+  // Formatting sentinels and relative time
+  //
+  // These are the words `src/lib/format.ts` renders. They stay out of the
+  // screens on purpose: a formatter that returns "Unknown" is an English
+  // literal leaking into every locale.
+  // ---------------------------------------------------------------------
+  "format.unknownChange": "Unknown change",
+  "format.noChange": "No change",
+  "format.ageUnknown": "Age unknown",
+  "format.lessThanADay": "Less than a day",
+  "format.etaUnknown": "Time remaining unknown",
+  "format.etaSeconds": "{count} sec remaining",
+  "format.etaMinutes": "{count} min remaining",
+  "format.shareUnknown": "Share unknown",
+  "format.shareOfParent": "{percent} of parent",
+
+  // ---------------------------------------------------------------------
+  // Shared status words and counted units for the four informational screens
+  // ---------------------------------------------------------------------
+  "status.complete": "Complete",
+  "status.partial": "Partial",
+  "status.partialComparison": "Partial comparison",
+  "status.comparableCoverage": "Comparable coverage",
+  "status.baselineOnly": "Baseline only",
+
+  "drive.health.healthy": "Healthy",
+  "drive.health.attention": "Needs attention",
+  "drive.health.unknown": "Health unknown",
+  "drive.connection.connected": "Connected",
+  "drive.connection.remembered": "Remembered",
+  "drive.connection.rememberedDisconnected": "Remembered · disconnected",
+  "drive.kind.internal": "Internal drive",
+  "drive.kind.external": "External drive",
+  "drive.kind.startupVolume": "Startup volume",
+
+  "unit.day.one": "{count} day",
+  "unit.day.other": "{count} days",
+  "unit.subcategory.one": "{count} subcategory",
+  "unit.subcategory.other": "{count} subcategories",
+  "unit.label.one": "{count} label",
+  "unit.label.other": "{count} labels",
+  "unit.observedEntry.one": "{count} observed entry",
+  "unit.observedEntry.other": "{count} observed entries",
+  "unit.category.one": "{count} category",
+  "unit.category.other": "{count} categories",
+  "unit.topLevelGroup.one": "{count} top-level group",
+  "unit.topLevelGroup.other": "{count} top-level groups",
+  "unit.group.one": "{count} group",
+  "unit.group.other": "{count} groups",
+  "unit.verifiedCopy.one": "{count} verified copy",
+  "unit.verifiedCopy.other": "{count} verified copies",
+  "unit.member.one": "{count} member",
+  "unit.member.other": "{count} members",
+  "unit.snapshot.one": "{count} snapshot",
+  "unit.snapshot.other": "{count} snapshots",
+  "unit.drive.one": "{count} drive",
+  "unit.drive.other": "{count} drives",
+  "unit.connectedDrive.one": "{count} connected drive",
+  "unit.connectedDrive.other": "{count} connected drives",
+  "unit.match.one": "{count} match",
+  "unit.match.other": "{count} matches",
+  "unit.opportunityToReview.one": "{count} opportunity to review",
+  "unit.opportunityToReview.other": "{count} opportunities to review",
+
+  // ---------------------------------------------------------------------
+  // Home
+  // ---------------------------------------------------------------------
+  "home.eyebrow": "Home",
+  "home.title": "How is your storage doing?",
+  "home.description":
+    "A calm reading of the last local snapshot. Context first, technical detail later.",
+  "home.empty.description":
+    "One calm summary of the drives CoreSight can see, with every number tied to its context.",
+  "home.empty.title": "No drive summary yet",
+  "home.empty.body":
+    "CoreSight has not completed a storage scan on this device. Nothing is being measured in the background.",
+  "home.empty.next":
+    "Once a scan completes, this page will show free space, the largest categories, and what changed.",
+  "home.stamp.lastScan": "Last completed scan",
+  "home.stamp.partial": "Partial scan · totals incomplete",
+  "home.stamp.localOnly": "Local only · never uploaded",
+  "home.safeToReclaim": "Safe to reclaim",
+  "home.reviewAmountUnknown": "review amount unknown",
+  "home.reviewInOpportunities": "{bytes} in review-only opportunities",
+  "home.hero.countUnknown": "Opportunity count unknown",
+  "home.basisComplete": "based on the scan completed {time}.",
+  "home.basisPartial": "based on the partial scan completed {time}.",
+  "home.rule":
+    "Nothing moves automatically. Every cleanup is previewed and confirmed one opportunity at a time.",
+  "home.cleanupBlocked":
+    "This scan is incomplete, so cleanup is blocked until a complete scan succeeds.",
+  "home.cta.openCleanup": "Open cleanup review",
+  "home.cta.reviewSafe": "Review {bytes} you can safely remove",
+  "home.driveHealth": "Drive health",
+  "home.drive.lastKnownSuffix": " · last known",
+  "home.drive.usedSpaceLabel": "{name} used space",
+  "home.drive.free": "{bytes} free",
+  "home.drive.freeUnknownValue": "Free space unknown",
+  "home.drive.usedOfTotal": "{used} used of {total}",
+  "home.drive.freeUnknown":
+    "Free space is unknown while this drive is disconnected, not zero.",
+  "home.categories.title": "Largest categories",
+  "home.categories.description":
+    "Human categories first. Open Storage for subcategories and sample locations.",
+  "home.categories.explore": "Explore storage",
+  "home.category.ofUsedSpace": "{percent} of used space",
+  "home.category.shareLabel": "{name} share of used space",
+  "home.since.title": "Since last scan",
+  "home.since.description":
+    "The previous snapshot could not be compared, so no change is claimed.",
+  "home.change.across": "{delta} across the categories you can see",
+  "home.change.unknown": "Change unknown",
+  "home.change.unknownBody":
+    "Scan twice to establish a comparison. An absent comparison is not the same as “nothing changed”.",
+  "home.change.viewHistory": "View scan history",
+  "home.change.seeWhatChanged": "See what changed",
+  "home.caveat.aria": "Snapshot caveat",
+  "home.caveat.title": "How to read these numbers.",
+  "home.caveat.body":
+    "Sizes are observed logical bytes, not promises of recoverable space. A category delta is labelled partial whenever either snapshot was incomplete. Unknown values stay unknown.",
+
+  // ---------------------------------------------------------------------
+  // Storage
+  // ---------------------------------------------------------------------
+  "storage.eyebrow": "Storage",
+  "storage.title": "What's using my space?",
+  "storage.description":
+    "Human categories first, technical labels one deliberate step down.",
+  "storage.descriptionMain":
+    "Start with human categories. Expand only when you want the evidence underneath.",
+  "storage.empty.title": "No storage categories yet",
+  "storage.empty.body":
+    "There is no completed category breakdown for this device. Zero categories is a real empty result, not an unknown total.",
+  "storage.empty.next":
+    "After a scan completes, categories, verified duplicates, and large files will appear here.",
+  "storage.summary.observedTotal": "Observed total",
+  "storage.summary.bodyComplete":
+    "Across {count}. This is not free space; it is what the scan could observe.",
+  "storage.summary.bodyPartial":
+    "Across {count}. This is not free space; it is what the partial scan could observe.",
+  "storage.summary.categories": "Categories",
+  "storage.summary.entriesWithoutSize": "Entries without a size",
+  "storage.summary.duplicateEvidence": "Duplicate evidence",
+  "storage.categories.title": "Categories",
+  "storage.categories.description":
+    "Sorted by observed size. Raw locations live only inside the deepest disclosure.",
+  "storage.search.label": "Search categories",
+  "storage.search.aria": "Search storage categories",
+  "storage.search.placeholder": "Games, Documents, Development…",
+  "storage.search.help": "Search by human category name, not by path.",
+  "storage.search.status": "{matches} for “{query}”.",
+  "storage.search.emptyTitle": "No matching categories",
+  "storage.search.emptyBody":
+    "No human category contains “{query}”. This search does not guess at path fragments.",
+  "storage.search.emptyNext":
+    "Try a broader category name, or clear the search to see every category.",
+  "storage.column.category": "Category",
+  "storage.column.shareOfTotal": "Share of total",
+  "storage.column.observed": "Observed",
+  "storage.column.share": "Share",
+  "storage.column.change": "Change",
+  "storage.category.summary":
+    "{name}: {bytes} observed, {percent} of parent, {delta} since the last scan{partial}. {children}.",
+  "storage.category.shareLabel": "{name} share",
+  "storage.category.noDeeperBreakdown": "No deeper breakdown",
+  "storage.category.noDeeperBody": "No deeper category breakdown was recorded.",
+  "storage.category.entries": "Entries",
+  "storage.category.entriesWithoutSize": "Entries without a known size",
+  "storage.category.observationErrors": "Observation errors",
+  "storage.category.sampleLocations": "Sample locations",
+  "storage.category.sampleLocationsAria": "Sample locations for {name}",
+  "storage.category.sampleLocationsNote":
+    "Labels are supplied by the engine and displayed verbatim. CoreSight does not build or resolve paths in the interface.",
+  "storage.duplicates.title": "Verified duplicate groups",
+  "storage.duplicates.description":
+    "Only SHA-256 matches with equal sizes are called duplicates. Hard-link aliases are shown, never counted as savings.",
+  "storage.duplicates.recoverable": "Recoverable, verified",
+  "storage.duplicates.empty": "No hash-verified duplicate groups were found.",
+  "storage.duplicates.group": "Group {index}",
+  "storage.duplicates.groupHeading": "{count} at {bytes} each",
+  "storage.duplicates.recoverableValue": "Recoverable {bytes}",
+  "storage.duplicates.verified": "SHA-256 verified",
+  "storage.duplicates.hashLabel": "Hash",
+  "storage.duplicates.showMembersAria":
+    "Show member labels for duplicate group {index}",
+  "storage.duplicates.showMembers": "Show member labels",
+  "storage.duplicates.hardlinkAlias": " · hard-link alias",
+  "storage.duplicates.hardlinkNote":
+    "A hard-link alias is another name for the same filesystem object. Removing it frees no space, so it contributes nothing to recoverable bytes.",
+  "storage.duplicates.unverified.one":
+    "{count} file lacks a verified content hash and is excluded from every duplicate claim.",
+  "storage.duplicates.unverified.other":
+    "{count} files lack a verified content hash and are excluded from every duplicate claim.",
+  "storage.duplicates.unknownSize.one":
+    "{count} entry has a verified hash but no observed size; size equality cannot be proven, so they are never grouped.",
+  "storage.duplicates.unknownSize.other":
+    "{count} entries have a verified hash but no observed size; size equality cannot be proven, so they are never grouped.",
+  "storage.bigFiles.title": "Large files",
+  "storage.bigFiles.description":
+    "Files above {bytes}. Unknown age is never treated as old.",
+  "storage.bigFiles.empty": "No files crossed the current size threshold.",
+  "storage.bigFiles.categoryUnknown": "Category unknown",
+  "storage.bigFiles.age": "{age} old",
+  "storage.bigFiles.modifiedUnknown": "Modified time unknown",
+  "storage.bigFiles.modified": "Modified {time}",
+  "storage.bigFiles.showLocationAria":
+    "Show location label for the {bytes} file",
+  "storage.bigFiles.showLocation": "Show location label",
+  "storage.bigFiles.unknownAge.one":
+    "{count} entry had an unknown modification time and was excluded from age-based conclusions.",
+  "storage.bigFiles.unknownAge.other":
+    "{count} entries had an unknown modification time and were excluded from age-based conclusions.",
+
+  // ---------------------------------------------------------------------
+  // History
+  // ---------------------------------------------------------------------
+  "history.eyebrow": "History",
+  "history.title": "What changed?",
+  "history.description":
+    "Snapshots answer the +80 GB question with dated, comparable evidence — never with a guessed trend.",
+  "history.stamp.title": "Snapshots stored locally",
+  "history.stamp.note": "Local database · nothing uploaded",
+  "history.empty.title": "No snapshots yet",
+  "history.empty.body":
+    "There is no history to compare. CoreSight does not invent a baseline or show a zero change for missing data.",
+  "history.empty.next":
+    "Scan twice to see change. The first completed scan becomes the baseline; the next one produces the first comparison.",
+  "history.change.title": "Since the previous snapshot",
+  "history.change.descriptionFallback":
+    "A comparison is not available yet. One valid baseline cannot answer what changed.",
+  "history.change.total": "Total observed change",
+  "history.change.range": "From {from} to {to}. {coverage}",
+  "history.change.completeCoverage":
+    "Both snapshots had comparable, complete coverage.",
+  "history.change.partialCoverage":
+    "At least one snapshot was partial; treat this as a lower-bound change.",
+  "history.change.unknown": "Change unknown",
+  "history.change.unknownBody":
+    "A second completed snapshot is required. The baseline below is a fact, not a claim that nothing has changed since.",
+  "history.delta.entryUnknown": "Entry change unknown",
+  "history.delta.noEntryChange": "No entry change",
+  "history.delta.entryChange.one": "{count} entry",
+  "history.delta.entryChange.other": "{count} entries",
+  "history.delta.aria":
+    "{name}: {delta} since the previous snapshot. Open this category in Storage.",
+  "history.delta.open": "Open in Storage ↗",
+  "history.trigger.firstRun": "First baseline",
+  "history.trigger.scheduled": "Scheduled snapshot",
+  "history.trigger.manual": "Manual snapshot",
+  "history.snapshot.observedTotal": "Observed total",
+  "history.snapshot.changeVsPrevious": "Change vs previous",
+  "history.snapshot.noEarlier": "No earlier snapshot",
+  "history.snapshot.entries": "Entries",
+  "history.timeline.title": "Snapshot timeline",
+  "history.timeline.description":
+    "Newest first. Each total carries its coverage so a partial scan cannot read as complete.",
+
+  // ---------------------------------------------------------------------
+  // Drives
+  // ---------------------------------------------------------------------
+  "drives.eyebrow": "Drives",
+  "drives.title": "What drives do I have?",
+  "drives.description":
+    "Local and previously seen external drives, each with its connection state and last-known health.",
+  "drives.stamp.title": "Drive memory",
+  "drives.stamp.body": "Stored on this device",
+  "drives.stamp.note": "Offline records stay read-only",
+  "drives.empty.title": "No drives recorded yet",
+  "drives.empty.body":
+    "CoreSight has no connected or remembered drive records. This is an empty inventory, not a zero-byte drive.",
+  "drives.empty.next":
+    "After the first completed scan, the drive and its capacity context will appear here.",
+  "drives.overview.title": "Drive inventory",
+  "drives.overview.body":
+    "Connected and remembered records share one list; their state is always labelled.",
+  "drives.overview.connected": "Connected",
+  "drives.overview.remembered": "Remembered",
+  "drives.overview.writable": "Writable targets",
+  "drives.overview.unavailablePartial": "Unavailable on partial data",
+  "drives.list.title": "Drives",
+  "drives.list.description":
+    "Capacity is logical observed storage. Free space can be unknown; it is never filled in with a guess.",
+  "drives.row.usedSpace": "Used space",
+  "drives.row.usedSpaceLabel": "{name} used space",
+  "drives.row.free": "Free",
+  "drives.row.used": "Used",
+  "drives.row.capacity": "Capacity",
+  "drives.row.lastScan": "Last scan",
+  "drives.row.snapshots": "Snapshots",
+  "drives.row.snapshotsUnknown": "Snapshot count unknown",
+  "drives.row.rememberedNote":
+    "Last-known figures come from this drive's previous scan. A disconnected drive is read-only and cannot be a cleanup target.",
+  "drives.memory.title": "How drive memory works",
+  "drives.memory.description":
+    "Remembered drives are records, not live mounts.",
+  "drives.memory.connectedTerm": "Connected",
+  "drives.memory.connectedBody":
+    "means CoreSight can currently read the drive. Sizes and health are from the latest scan.",
+  "drives.memory.rememberedTerm": "Remembered",
+  "drives.memory.rememberedBody":
+    "means the drive was seen before and is detached now. Its figures are explicitly last-known and cannot be acted on.",
+  "drives.memory.unknownTerm": "Unknown remains unknown.",
+  "drives.memory.unknownBody":
+    "A disconnected drive's free space is not shown as zero, and stale health is never labelled healthy."
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -514,7 +820,7 @@ export const de: Record<MessageKey, string> = {
     "Wie CoreSight auf diesem Gerät aussieht und sich verhält. Diese Einstellungen werden lokal gespeichert und ändern nie, was CoreSight tun darf.",
   "settings.language.title": "Sprache",
   "settings.language.description":
-    "Nur die Texte der Oberfläche. Der Rest dieser Version wird noch übersetzt.",
+    "Nur die Texte der Oberfläche. Alle fest eingebauten Oberflächentexte dieser Version sind übersetzt; von der Engine gelieferte Bezeichnungen werden unverändert angezeigt.",
   "settings.language.label": "Sprache der Oberfläche",
   "settings.language.en": "English",
   "settings.language.de": "Deutsch",
@@ -554,7 +860,298 @@ export const de: Record<MessageKey, string> = {
     "Setzt nur diese Einstellungen zurück. Dateien, Scan-Daten, Momentaufnahmen und Verlauf bleiben unberührt.",
   "settings.about.storageUnavailable":
     "Dieser Browser hat das Speichern der Einstellungen abgelehnt. Änderungen gelten nur für diese Sitzung.",
-  "settings.about.saved": "Einstellungen wurden auf diesem Gerät gespeichert."
+  "settings.about.saved": "Einstellungen wurden auf diesem Gerät gespeichert.",
+
+  // Formatting sentinels and relative time
+  "format.unknownChange": "Unbekannte Änderung",
+  "format.noChange": "Keine Änderung",
+  "format.ageUnknown": "Alter unbekannt",
+  "format.lessThanADay": "Weniger als ein Tag",
+  "format.etaUnknown": "Verbleibende Zeit unbekannt",
+  "format.etaSeconds": "{count} Sek. verbleibend",
+  "format.etaMinutes": "{count} Min. verbleibend",
+  "format.shareUnknown": "Anteil unbekannt",
+  "format.shareOfParent": "{percent} des übergeordneten Bereichs",
+
+  // Shared status words and counted units
+  "status.complete": "Vollständig",
+  "status.partial": "Teilweise",
+  "status.partialComparison": "Teilweiser Vergleich",
+  "status.comparableCoverage": "Vergleichbare Abdeckung",
+  "status.baselineOnly": "Nur Ausgangswert",
+
+  "drive.health.healthy": "In Ordnung",
+  "drive.health.attention": "Handlungsbedarf",
+  "drive.health.unknown": "Zustand unbekannt",
+  "drive.connection.connected": "Verbunden",
+  "drive.connection.remembered": "Bekannt",
+  "drive.connection.rememberedDisconnected": "Bekannt · getrennt",
+  "drive.kind.internal": "Internes Laufwerk",
+  "drive.kind.external": "Externes Laufwerk",
+  "drive.kind.startupVolume": "Startvolume",
+
+  "unit.day.one": "{count} Tag",
+  "unit.day.other": "{count} Tage",
+  "unit.subcategory.one": "{count} Unterkategorie",
+  "unit.subcategory.other": "{count} Unterkategorien",
+  "unit.label.one": "{count} Bezeichnung",
+  "unit.label.other": "{count} Bezeichnungen",
+  "unit.observedEntry.one": "{count} beobachteter Eintrag",
+  "unit.observedEntry.other": "{count} beobachtete Einträge",
+  "unit.category.one": "{count} Kategorie",
+  "unit.category.other": "{count} Kategorien",
+  "unit.topLevelGroup.one": "{count} Hauptgruppe",
+  "unit.topLevelGroup.other": "{count} Hauptgruppen",
+  "unit.group.one": "{count} Gruppe",
+  "unit.group.other": "{count} Gruppen",
+  "unit.verifiedCopy.one": "{count} verifizierte Kopie",
+  "unit.verifiedCopy.other": "{count} verifizierte Kopien",
+  "unit.member.one": "{count} Mitglied",
+  "unit.member.other": "{count} Mitglieder",
+  "unit.snapshot.one": "{count} Momentaufnahme",
+  "unit.snapshot.other": "{count} Momentaufnahmen",
+  "unit.drive.one": "{count} Laufwerk",
+  "unit.drive.other": "{count} Laufwerke",
+  "unit.connectedDrive.one": "{count} verbundenes Laufwerk",
+  "unit.connectedDrive.other": "{count} verbundene Laufwerke",
+  "unit.match.one": "{count} Treffer",
+  "unit.match.other": "{count} Treffer",
+  "unit.opportunityToReview.one": "{count} Möglichkeit zur Prüfung",
+  "unit.opportunityToReview.other": "{count} Möglichkeiten zur Prüfung",
+
+  // Home
+  "home.eyebrow": "Start",
+  "home.title": "Wie steht es um deinen Speicher?",
+  "home.description":
+    "Eine ruhige Einordnung der letzten lokalen Momentaufnahme. Kontext zuerst, technische Details später.",
+  "home.empty.description":
+    "Eine ruhige Zusammenfassung der Laufwerke, die CoreSight sieht, mit jeder Zahl in ihrem Kontext.",
+  "home.empty.title": "Noch keine Laufwerksübersicht",
+  "home.empty.body":
+    "CoreSight hat auf diesem Gerät noch keinen Speicher-Scan abgeschlossen. Im Hintergrund wird nichts gemessen.",
+  "home.empty.next":
+    "Sobald ein Scan abgeschlossen ist, zeigt diese Seite freien Speicher, die größten Kategorien und die Änderungen.",
+  "home.stamp.lastScan": "Letzter abgeschlossener Scan",
+  "home.stamp.partial": "Teilweiser Scan · Summen unvollständig",
+  "home.stamp.localOnly": "Nur lokal · nie hochgeladen",
+  "home.safeToReclaim": "Sicher rückgewinnbar",
+  "home.reviewAmountUnknown": "Prüfmenge unbekannt",
+  "home.reviewInOpportunities": "{bytes} in Möglichkeiten, die nur zur Prüfung dienen",
+  "home.hero.countUnknown": "Anzahl der Möglichkeiten unbekannt",
+  "home.basisComplete": "basierend auf dem Scan, abgeschlossen am {time}.",
+  "home.basisPartial": "basierend auf dem teilweisen Scan, abgeschlossen am {time}.",
+  "home.rule":
+    "Nichts wird automatisch verschoben. Jede Bereinigung wird einzeln in einer Vorschau geprüft und bestätigt.",
+  "home.cleanupBlocked":
+    "Dieser Scan ist unvollständig; die Bereinigung ist blockiert, bis ein vollständiger Scan erfolgreich ist.",
+  "home.cta.openCleanup": "Bereinigungsprüfung öffnen",
+  "home.cta.reviewSafe": "{bytes} zur sicheren Entfernung prüfen",
+  "home.driveHealth": "Laufwerkszustand",
+  "home.drive.lastKnownSuffix": " · zuletzt bekannt",
+  "home.drive.usedSpaceLabel": "{name}: belegter Speicher",
+  "home.drive.free": "{bytes} frei",
+  "home.drive.freeUnknownValue": "Freier Speicher unbekannt",
+  "home.drive.usedOfTotal": "{used} belegt von {total}",
+  "home.drive.freeUnknown":
+    "Der freie Speicher ist unbekannt, solange dieses Laufwerk getrennt ist – nicht null.",
+  "home.categories.title": "Größte Kategorien",
+  "home.categories.description":
+    "Menschliche Kategorien zuerst. Öffne „Speicher“ für Unterkategorien und Beispielspeicherorte.",
+  "home.categories.explore": "Speicher ansehen",
+  "home.category.ofUsedSpace": "{percent} des belegten Speichers",
+  "home.category.shareLabel": "{name}: Anteil am belegten Speicher",
+  "home.since.title": "Seit dem letzten Scan",
+  "home.since.description":
+    "Die vorherige Momentaufnahme konnte nicht verglichen werden; es wird keine Änderung behauptet.",
+  "home.change.across": "{delta} über die sichtbaren Kategorien",
+  "home.change.unknown": "Änderung unbekannt",
+  "home.change.unknownBody":
+    "Scanne zweimal, um einen Vergleich zu erhalten. Ein fehlender Vergleich ist nicht dasselbe wie „nichts hat sich geändert“.",
+  "home.change.viewHistory": "Scan-Verlauf ansehen",
+  "home.change.seeWhatChanged": "Änderungen ansehen",
+  "home.caveat.aria": "Hinweis zur Momentaufnahme",
+  "home.caveat.title": "So liest du diese Zahlen.",
+  "home.caveat.body":
+    "Größen sind beobachtete logische Bytes, kein Versprechen rückgewinnbaren Speichers. Ein Kategorien-Delta wird als teilweise gekennzeichnet, wenn eine der Momentaufnahmen unvollständig war. Unbekannte Werte bleiben unbekannt.",
+
+  // Storage
+  "storage.eyebrow": "Speicher",
+  "storage.title": "Was belegt meinen Speicher?",
+  "storage.description":
+    "Menschliche Kategorien zuerst, technische Bezeichnungen eine bewusste Stufe tiefer.",
+  "storage.descriptionMain":
+    "Beginne mit menschlichen Kategorien. Klappe nur auf, wenn du die Belege darunter sehen willst.",
+  "storage.empty.title": "Noch keine Speicherkategorien",
+  "storage.empty.body":
+    "Für dieses Gerät gibt es keine abgeschlossene Kategorieaufteilung. Null Kategorien ist ein echtes leeres Ergebnis, keine unbekannte Summe.",
+  "storage.empty.next":
+    "Nach einem abgeschlossenen Scan erscheinen hier Kategorien, verifizierte Duplikate und große Dateien.",
+  "storage.summary.observedTotal": "Beobachtete Gesamtsumme",
+  "storage.summary.bodyComplete":
+    "Über {count}. Das ist kein freier Speicher, sondern das, was der Scan beobachten konnte.",
+  "storage.summary.bodyPartial":
+    "Über {count}. Das ist kein freier Speicher, sondern das, was der teilweise Scan beobachten konnte.",
+  "storage.summary.categories": "Kategorien",
+  "storage.summary.entriesWithoutSize": "Einträge ohne Größe",
+  "storage.summary.duplicateEvidence": "Duplikatbelege",
+  "storage.categories.title": "Kategorien",
+  "storage.categories.description":
+    "Nach beobachteter Größe sortiert. Rohe Speicherorte erscheinen nur in der tiefsten Aufklappstufe.",
+  "storage.search.label": "Kategorien suchen",
+  "storage.search.aria": "Speicherkategorien suchen",
+  "storage.search.placeholder": "Spiele, Dokumente, Entwicklung…",
+  "storage.search.help": "Suche nach dem Namen der menschlichen Kategorie, nicht nach einem Pfad.",
+  "storage.search.status": "{matches} für „{query}“.",
+  "storage.search.emptyTitle": "Keine passenden Kategorien",
+  "storage.search.emptyBody":
+    "Keine menschliche Kategorie enthält „{query}“. Diese Suche rät nicht bei Pfadfragmenten.",
+  "storage.search.emptyNext":
+    "Versuche einen breiteren Kategorienamen oder leere die Suche, um alle Kategorien zu sehen.",
+  "storage.column.category": "Kategorie",
+  "storage.column.shareOfTotal": "Anteil an der Summe",
+  "storage.column.observed": "Beobachtet",
+  "storage.column.share": "Anteil",
+  "storage.column.change": "Änderung",
+  "storage.category.summary":
+    "{name}: {bytes} beobachtet, {percent} des übergeordneten Bereichs, {delta} seit dem letzten Scan{partial}. {children}.",
+  "storage.category.shareLabel": "{name}: Anteil",
+  "storage.category.noDeeperBreakdown": "Keine tiefere Aufteilung",
+  "storage.category.noDeeperBody": "Es wurde keine tiefere Kategorieaufteilung erfasst.",
+  "storage.category.entries": "Einträge",
+  "storage.category.entriesWithoutSize": "Einträge ohne bekannte Größe",
+  "storage.category.observationErrors": "Beobachtungsfehler",
+  "storage.category.sampleLocations": "Beispielspeicherorte",
+  "storage.category.sampleLocationsAria": "Beispielspeicherorte für {name}",
+  "storage.category.sampleLocationsNote":
+    "Bezeichnungen stammen von der Engine und werden unverändert angezeigt. CoreSight baut oder löst in der Oberfläche keine Pfade auf.",
+  // EN: "SHA-256" is an algorithm name, and "Hash" / "Hardlink-Alias" are the
+  // established German technical terms; translating them would obscure meaning.
+  "storage.duplicates.title": "Verifizierte Duplikatgruppen",
+  "storage.duplicates.description":
+    "Nur SHA-256-Übereinstimmungen mit gleicher Größe gelten als Duplikate. Hardlink-Aliase werden angezeigt, nie als Einsparung gezählt.",
+  "storage.duplicates.recoverable": "Rückgewinnbar, verifiziert",
+  "storage.duplicates.empty": "Es wurden keine hash-verifizierten Duplikatgruppen gefunden.",
+  "storage.duplicates.group": "Gruppe {index}",
+  "storage.duplicates.groupHeading": "{count} mit je {bytes}",
+  "storage.duplicates.recoverableValue": "Rückgewinnbar: {bytes}",
+  "storage.duplicates.verified": "SHA-256 verifiziert",
+  "storage.duplicates.hashLabel": "Hash",
+  "storage.duplicates.showMembersAria":
+    "Mitgliedsbezeichnungen für Duplikatgruppe {index} anzeigen",
+  "storage.duplicates.showMembers": "Mitgliedsbezeichnungen anzeigen",
+  "storage.duplicates.hardlinkAlias": " · Hardlink-Alias",
+  "storage.duplicates.hardlinkNote":
+    "Ein Hardlink-Alias ist ein weiterer Name für dasselbe Dateisystemobjekt. Sein Entfernen gibt keinen Speicher frei und trägt daher nichts zu den rückgewinnbaren Bytes bei.",
+  "storage.duplicates.unverified.one":
+    "{count} Datei hat keinen verifizierten Inhalts-Hash und wird bei keiner Duplikatfeststellung berücksichtigt.",
+  "storage.duplicates.unverified.other":
+    "{count} Dateien haben keinen verifizierten Inhalts-Hash und werden bei keiner Duplikatfeststellung berücksichtigt.",
+  "storage.duplicates.unknownSize.one":
+    "{count} Eintrag hat einen verifizierten Hash, aber keine beobachtete Größe; Größengleichheit ist nicht beweisbar, daher erfolgt keine Gruppierung.",
+  "storage.duplicates.unknownSize.other":
+    "{count} Einträge haben einen verifizierten Hash, aber keine beobachtete Größe; Größengleichheit ist nicht beweisbar, daher erfolgt keine Gruppierung.",
+  "storage.bigFiles.title": "Große Dateien",
+  "storage.bigFiles.description":
+    "Dateien über {bytes}. Ein unbekanntes Alter wird nie als alt behandelt.",
+  "storage.bigFiles.empty": "Keine Datei hat die aktuelle Größenschwelle überschritten.",
+  "storage.bigFiles.categoryUnknown": "Kategorie unbekannt",
+  "storage.bigFiles.age": "{age} alt",
+  "storage.bigFiles.modifiedUnknown": "Änderungszeit unbekannt",
+  "storage.bigFiles.modified": "Geändert: {time}",
+  "storage.bigFiles.showLocationAria":
+    "Speicherort-Bezeichnung für die Datei mit {bytes} anzeigen",
+  "storage.bigFiles.showLocation": "Speicherort-Bezeichnung anzeigen",
+  "storage.bigFiles.unknownAge.one":
+    "{count} Eintrag hatte eine unbekannte Änderungszeit und wurde von altersbasierten Schlüssen ausgeschlossen.",
+  "storage.bigFiles.unknownAge.other":
+    "{count} Einträge hatten eine unbekannte Änderungszeit und wurden von altersbasierten Schlüssen ausgeschlossen.",
+
+  // History
+  "history.eyebrow": "Verlauf",
+  "history.title": "Was hat sich geändert?",
+  "history.description":
+    "Momentaufnahmen beantworten die +80-GB-Frage mit datierten, vergleichbaren Belegen — nie mit einem geratenen Trend.",
+  "history.stamp.title": "Lokal gespeicherte Momentaufnahmen",
+  "history.stamp.note": "Lokale Datenbank · nichts hochgeladen",
+  "history.empty.title": "Noch keine Momentaufnahmen",
+  "history.empty.body":
+    "Es gibt keinen Verlauf zum Vergleichen. CoreSight erfindet keinen Ausgangswert und zeigt bei fehlenden Daten keine Nulländerung.",
+  "history.empty.next":
+    "Scanne zweimal, um Änderungen zu sehen. Der erste abgeschlossene Scan wird zum Ausgangswert; der nächste erzeugt den ersten Vergleich.",
+  "history.change.title": "Seit der vorherigen Momentaufnahme",
+  "history.change.descriptionFallback":
+    "Ein Vergleich ist noch nicht verfügbar. Ein gültiger Ausgangswert kann nicht beantworten, was sich geändert hat.",
+  "history.change.total": "Beobachtete Gesamtänderung",
+  "history.change.range": "Von {from} bis {to}. {coverage}",
+  "history.change.completeCoverage":
+    "Beide Momentaufnahmen hatten vergleichbare, vollständige Abdeckung.",
+  "history.change.partialCoverage":
+    "Mindestens eine Momentaufnahme war teilweise; behandle dies als Untergrenze der Änderung.",
+  "history.change.unknown": "Änderung unbekannt",
+  "history.change.unknownBody":
+    "Ein zweiter abgeschlossener Scan ist erforderlich. Der Ausgangswert unten ist eine Tatsache, keine Aussage, dass sich seitdem nichts geändert hat.",
+  "history.delta.entryUnknown": "Eintragsänderung unbekannt",
+  "history.delta.noEntryChange": "Keine Eintragsänderung",
+  "history.delta.entryChange.one": "{count} Eintrag",
+  "history.delta.entryChange.other": "{count} Einträge",
+  "history.delta.aria":
+    "{name}: {delta} seit der vorherigen Momentaufnahme. Öffne diese Kategorie im Speicher.",
+  "history.delta.open": "Im Speicher öffnen ↗",
+  "history.trigger.firstRun": "Erster Ausgangswert",
+  "history.trigger.scheduled": "Geplante Momentaufnahme",
+  "history.trigger.manual": "Manuelle Momentaufnahme",
+  "history.snapshot.observedTotal": "Beobachtete Gesamtsumme",
+  "history.snapshot.changeVsPrevious": "Änderung gegenüber vorher",
+  "history.snapshot.noEarlier": "Keine frühere Momentaufnahme",
+  "history.snapshot.entries": "Einträge",
+  "history.timeline.title": "Zeitleiste der Momentaufnahmen",
+  "history.timeline.description":
+    "Neueste zuerst. Jede Summe trägt ihre Abdeckung, damit ein teilweiser Scan nicht als vollständig gelesen wird.",
+
+  // Drives
+  "drives.eyebrow": "Laufwerke",
+  "drives.title": "Welche Laufwerke habe ich?",
+  "drives.description":
+    "Lokale und zuvor gesehene externe Laufwerke, jeweils mit Verbindungsstatus und zuletzt bekanntem Zustand.",
+  "drives.stamp.title": "Laufwerksgedächtnis",
+  "drives.stamp.body": "Auf diesem Gerät gespeichert",
+  "drives.stamp.note": "Offline-Einträge bleiben schreibgeschützt",
+  "drives.empty.title": "Noch keine Laufwerke erfasst",
+  "drives.empty.body":
+    "CoreSight hat keine verbundenen oder bekannten Laufwerkeinträge. Das ist ein leeres Inventar, kein Laufwerk mit null Bytes.",
+  "drives.empty.next":
+    "Nach dem ersten abgeschlossenen Scan erscheinen hier das Laufwerk und sein Kapazitätskontext.",
+  "drives.overview.title": "Laufwerksinventar",
+  "drives.overview.body":
+    "Verbundene und bekannte Einträge teilen sich eine Liste; ihr Zustand ist immer gekennzeichnet.",
+  "drives.overview.connected": "Verbunden",
+  "drives.overview.remembered": "Bekannt",
+  "drives.overview.writable": "Beschreibbare Ziele",
+  "drives.overview.unavailablePartial": "Bei teilweisen Daten nicht verfügbar",
+  "drives.list.title": "Laufwerke",
+  "drives.list.description":
+    "Die Kapazität ist logisch beobachteter Speicher. Freier Speicher kann unbekannt sein; er wird nie durch eine Schätzung ersetzt.",
+  "drives.row.usedSpace": "Belegter Speicher",
+  "drives.row.usedSpaceLabel": "{name}: belegter Speicher",
+  "drives.row.free": "Frei",
+  "drives.row.used": "Belegt",
+  "drives.row.capacity": "Kapazität",
+  "drives.row.lastScan": "Letzter Scan",
+  "drives.row.snapshots": "Momentaufnahmen",
+  "drives.row.snapshotsUnknown": "Anzahl der Momentaufnahmen unbekannt",
+  "drives.row.rememberedNote":
+    "Die zuletzt bekannten Zahlen stammen aus dem vorherigen Scan dieses Laufwerks. Ein getrenntes Laufwerk ist schreibgeschützt und kann kein Bereinigungsziel sein.",
+  "drives.memory.title": "Wie das Laufwerksgedächtnis funktioniert",
+  "drives.memory.description": "Bekannte Laufwerke sind Einträge, keine aktiven Einbindungen.",
+  "drives.memory.connectedTerm": "Verbunden",
+  "drives.memory.connectedBody":
+    "bedeutet, dass CoreSight das Laufwerk derzeit lesen kann. Größen und Zustand stammen vom letzten Scan.",
+  "drives.memory.rememberedTerm": "Bekannt",
+  "drives.memory.rememberedBody":
+    "bedeutet, dass das Laufwerk zuvor gesehen wurde und jetzt getrennt ist. Seine Zahlen sind ausdrücklich zuletzt bekannt; auf diesem Laufwerk kann keine Aktion ausgeführt werden.",
+  "drives.memory.unknownTerm": "Unbekannt bleibt unbekannt.",
+  "drives.memory.unknownBody":
+    "Der freie Speicher eines getrennten Laufwerks wird nicht als null angezeigt, und ein veralteter Zustand wird nie als „In Ordnung“ bezeichnet."
 };
 
 export const MESSAGES: Record<"en" | "de", Record<MessageKey, string>> = { en, de };

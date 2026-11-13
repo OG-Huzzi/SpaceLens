@@ -86,7 +86,7 @@ pub struct ScanStatusView {
     pub files_seen: Option<u64>,
     /// Bytes seen with a known size, when the scan is complete.
     pub bytes_seen: Option<u64>,
-    /// Area currently being scanned; this build records none.
+    /// Area currently being scanned; `None` when no scan is running.
     pub current_area: Option<String>,
     /// Estimated seconds remaining; this build records none.
     pub eta_seconds: Option<u64>,

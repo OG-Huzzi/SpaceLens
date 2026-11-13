@@ -1,12 +1,96 @@
 # CoreSight — Current State
 
-PHASE 9.1 + 10.0 — Live IPC Endpoints, File Wiper Planning, Platform Features, and an Adversarial Suite That Found Seven Real Defects
+PHASE 9.2 + 11.0 — Real Scanning, Screenshot Policy, Complete i18n, and the Packaging Path
 
 **Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,
 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 0,
-`cargo test --workspace` **1499 passed / 0 failed / 11 ignored**,
-`npm test` **72 passed**, `npm run build` 0, `npm audit` **0 vulnerabilities**.
+`cargo test --workspace` **1549 passed / 0 failed / 11 ignored**,
+`npm test` **81 passed**, `npm run build` 0, `npm audit` **0 vulnerabilities**.
 Schema version stays 6.
+
+### Scanning is real
+
+`startScan` no longer returns `SCAN_UNAVAILABLE`. `coresight-ipc::scan` provides
+`ScanBackend` / `EngineScanBackend`: one `std::thread` wrapping
+`coresight_engine::scan_with`, classifying every `FsEntry` into a
+`SnapshotBuilder`, running the identity pipeline to attach `content_sha256`
+**only for verified group members**, then computing the `UsageReport` via
+`usage_by_category`. Progress flows over `mpsc`; the shell drains it and emits
+`coresight.v1.scanProgress` / `coresight.v1.scanComplete`.
+
+Now serving real data: `startScan`, `cancelScan`, `listDrives`,
+`getDriveSummary`, `getCategories`, `getOpportunities`, `previewPlan`,
+`getGlobalStatus`, `getHomeSummary`, `getStorage`, `getCleanup`,
+`getDuplicateReport`, `getBigFileReport`.
+
+**One silent default was removed during integration.** `startScan {}` — no
+drive id, no root — was falling through to "scan the entire home directory"
+and returning `SCAN_UNAVAILABLE` for the wrong reason. An unnamed scan now
+returns `INVALID_REQUEST` naming the command, because walking a large tree the
+caller never named is exactly the kind of silent default this product forbids.
+Found by the adversarial suite's `missing_required_payload_fields_are_invalid_not_defaulted`,
+which had gone red as the scan work landed.
+
+Still typed-unavailable by design: `getHistory` (`HISTORY_UNAVAILABLE`, no
+store), and `getStartupReport` / `getDnsRanking` / `getBlockListPlan` /
+`getPrivacySummary` (`SESSION_UNAVAILABLE`, no inventory registered).
+`confirmPlan` / `executePlan` remain `PLAN_REJECTED_UNSAFE` under the
+read-only policy.
+
+**Honest limits of the scan path:** only files sharing a size are hashed by the
+Phase 3 pipeline, so unique-size files stay `content_sha256: None` and are
+counted `unverified` — the duplicate report is honestly partial, never falsely
+empty or falsely duplicated. `fullRescan` is accepted but every scan is a full
+walk (no incremental index). `etaSeconds` / `currentCategory` stay `null`. The
+unreadable-directory assertion is Unix-only: creating the fixture on Windows
+needs Developer Mode, and the engine error accounting it would exercise is
+covered by a unit test instead.
+
+### Screenshots (jv16 #7) — the last tool, policy-only
+
+`coresight-capture` makes the unsafe path unreachable rather than merely
+disabled: `upload_supported()` returns `false` and the crate has no network
+surface at all, asserted by a source-scan guard. Destination containment is
+component-wise and fail-closed; a fallback is always explained; collisions never
+overwrite; `keep_last: 0` keeps **everything**; `delete_candidates` is a
+proposal and nothing is deleted. 34 tests.
+
+### i18n is complete for UI copy
+
+`en` + `de` with compile-time key parity. All five screens plus Settings are
+localised, `format.ts` is locale-aware (`12,4 GB` vs `12.4 GB`), and the
+mixed-language bug (`Ältester Beleg: 21 days`) is fixed — relative-time units
+now come from the catalogue. Unknown sentinels are catalogue words in both
+locales, and `formatBytes(null)` still never renders a digit.
+
+**Still English by design:** engine-supplied data (category names, opportunity
+text, coverage notes, paths, hashes). Translating it in the frontend would be
+inventing content; the engine must supply localised values.
+
+### Packaging path (Phase 11, partial)
+
+- `bundle.yml` — a separate workflow (`push` to main + `workflow_dispatch`) that
+  builds unsigned NSIS/MSI on Windows and `.app`/`.dmg` on macOS and uploads
+  named artifacts, failing closed with an `::error::` if no installer is found.
+  It is **deliberately not `continue-on-error`**: a gate that cannot fail is not
+  a gate. It is a separate file so a bundling failure cannot mask the required
+  `ci.yml` gate.
+- `docs/PACKAGING.md` records what an unsigned build means on each platform,
+  the exact maintainer commands, and a ten-item list of what is still missing
+  before this is distributable.
+
+**No installer has been produced yet.** Bundling is unverified everywhere: this
+machine lacks the MSVC toolchain and the Windows SDK, so the first green
+`bundle.yml` run will be the first proof. Signing and notarisation credentials
+(Apple Developer ID, Windows code-signing certificate) do not exist in this
+repository and no amount of code will supply them.
+
+CI PLATFORM MATRIX — Linux job removed (operator decision)
+
+PHASE 9.1 + 10.0 — Live IPC Endpoints, File Wiper Planning, Platform Features, and an Adversarial Suite That Found Seven Real Defects
+
+**Status (at the time): IMPLEMENTED — 1499 tests passed.** Superseded by the
+phase above; kept for the record.
 
 ### The live app is now connected
 

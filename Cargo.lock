@@ -97,6 +97,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coresight-capture"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "coresight-classifier"
 version = "0.0.0"
 dependencies = [
@@ -200,11 +208,13 @@ dependencies = [
  "coresight-engine",
  "coresight-filetools",
  "coresight-history",
+ "coresight-identity",
  "coresight-insights",
  "coresight-systools",
  "coresight-webtools",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

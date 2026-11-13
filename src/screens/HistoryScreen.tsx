@@ -8,11 +8,11 @@ import type {
 import { useApiData } from "../hooks/useApiData";
 import {
   formatBytes,
-  formatCount,
   formatDateTime,
   formatDelta,
   formatSignedCount
 } from "../lib/format";
+import { t, tCount, type MessageKey } from "../i18n";
 import {
   CoverageBanner,
   DataValue,
@@ -23,6 +23,12 @@ import {
   SectionHeading,
   StatusPill
 } from "../components/ui";
+
+const TRIGGER_LABELS: Record<HistorySnapshot["trigger"], MessageKey> = {
+  "first-run": "history.trigger.firstRun",
+  scheduled: "history.trigger.scheduled",
+  manual: "history.trigger.manual"
+};
 
 function isPartialDelta(delta: CategoryDelta, change: ChangeSinceLastScan): boolean {
   return delta.partial || change.coverage.completeness !== "complete";
@@ -45,16 +51,18 @@ function DeltaRow({
         <strong>{delta.name}</strong>
         <span>
           {delta.entriesDelta === null ? (
-            "Entry change unknown"
+            t("history.delta.entryUnknown")
           ) : delta.entriesDelta === 0 ? (
-            "No entry change"
+            t("history.delta.noEntryChange")
           ) : (
-            <>
-              <DataValue partial={partial}>
-                {formatSignedCount(delta.entriesDelta)}
-              </DataValue>{" "}
-              entries
-            </>
+            <DataValue partial={partial}>
+              {t(
+                Math.abs(delta.entriesDelta) === 1
+                  ? "history.delta.entryChange.one"
+                  : "history.delta.entryChange.other",
+                { count: formatSignedCount(delta.entriesDelta) }
+              )}
+            </DataValue>
           )}
         </span>
       </span>
@@ -82,11 +90,14 @@ function DeltaRow({
         className="delta-row"
         href="#storage"
         onClick={() => onOpenCategory(delta.categoryId)}
-        aria-label={`${delta.name}: ${formatDelta(delta.bytesDelta)} since the previous snapshot. Open this category in Storage.`}
+        aria-label={t("history.delta.aria", {
+          name: delta.name,
+          delta: formatDelta(delta.bytesDelta)
+        })}
       >
         {content}
         <span className="delta-row__jump" aria-hidden="true">
-          Open in Storage ↗
+          {t("history.delta.open")}
         </span>
       </a>
     </li>
@@ -103,41 +114,37 @@ function SnapshotRow({ snapshot, index }: { snapshot: HistorySnapshot; index: nu
       <article className="timeline-item__body">
         <header>
           <div>
-            <p className="eyebrow">
-              {snapshot.trigger === "first-run"
-                ? "First baseline"
-                : snapshot.trigger === "scheduled"
-                  ? "Scheduled snapshot"
-                  : "Manual snapshot"}
-            </p>
+            <p className="eyebrow">{t(TRIGGER_LABELS[snapshot.trigger])}</p>
             <h3>{formatDateTime(snapshot.takenAt)}</h3>
           </div>
           <StatusPill tone={partial ? "attention" : "positive"}>
-            {snapshot.coverage.completeness === "complete" ? "Complete" : "Partial"}
+            {t(partial ? "status.partial" : "status.complete")}
           </StatusPill>
         </header>
         <dl className="timeline-item__facts">
           <div>
-            <dt>Observed total</dt>
+            <dt>{t("history.snapshot.observedTotal")}</dt>
             <dd>
               <DataValue partial={partial}>{formatBytes(snapshot.totalBytes)}</DataValue>
             </dd>
           </div>
           <div>
-            <dt>Change vs previous</dt>
+            <dt>{t("history.snapshot.changeVsPrevious")}</dt>
             <dd>
               {snapshot.deltaBytes === null ? (
-                "No earlier snapshot"
+                t("history.snapshot.noEarlier")
               ) : (
                 <DataValue partial={partial}>{formatDelta(snapshot.deltaBytes)}</DataValue>
               )}
             </dd>
           </div>
           <div>
-            <dt>Entries</dt>
+            <dt>{t("history.snapshot.entries")}</dt>
             <dd>
               <DataValue partial={partial}>
-                {formatCount(snapshot.entries, "entry", "entries")}
+                {snapshot.entries === null
+                  ? t("state.unknown")
+                  : tCount(snapshot.entries, "unit.entry.one", "unit.entry.other")}
               </DataValue>
             </dd>
           </div>
@@ -161,18 +168,18 @@ function HistoryContent({
   return (
     <div className="screen screen--history">
       <PageHeader
-        eyebrow="History"
-        title="What changed?"
-        description="Snapshots answer the +80 GB question with dated, comparable evidence — never with a guessed trend."
+        eyebrow={t("history.eyebrow")}
+        title={t("history.title")}
+        description={t("history.description")}
         aside={
           <div className="snapshot-stamp">
-            <span>Snapshots stored locally</span>
+            <span>{t("history.stamp.title")}</span>
             <strong>
               <DataValue partial={partial}>
-                {formatCount(data.snapshots.length, "snapshot", "snapshots")}
+                {tCount(data.snapshots.length, "unit.snapshot.one", "unit.snapshot.other")}
               </DataValue>
             </strong>
-            <span className="snapshot-stamp__note">Local database · nothing uploaded</span>
+            <span className="snapshot-stamp__note">{t("history.stamp.note")}</span>
           </div>
         }
       />
@@ -181,42 +188,44 @@ function HistoryContent({
 
       {data.snapshots.length === 0 ? (
         <EmptyState
-          title="No snapshots yet"
-          description="There is no history to compare. CoreSight does not invent a baseline or show a zero change for missing data."
-          nextStep="Scan twice to see change. The first completed scan becomes the baseline; the next one produces the first comparison."
+          title={t("history.empty.title")}
+          description={t("history.empty.body")}
+          nextStep={t("history.empty.next")}
         />
       ) : (
         <>
           <section className="panel history-change" aria-labelledby="change-heading">
             <SectionHeading
               id="change-heading"
-              title="Since the previous snapshot"
-              description={
-                change?.note ??
-                "A comparison is not available yet. One valid baseline cannot answer what changed."
-              }
+              title={t("history.change.title")}
+              description={change?.note ?? t("history.change.descriptionFallback")}
               aside={
                 canCompare ? (
                   <StatusPill tone={partial ? "attention" : "positive"}>
-                    {partial ? "Partial comparison" : "Comparable coverage"}
+                    {t(partial ? "status.partialComparison" : "status.comparableCoverage")}
                   </StatusPill>
                 ) : (
-                  <StatusPill tone="quiet">Baseline only</StatusPill>
+                  <StatusPill tone="quiet">{t("status.baselineOnly")}</StatusPill>
                 )
               }
             />
             {canCompare && change ? (
               <>
                 <div className="change-hero">
-                  <span>Total observed change</span>
+                  <span>{t("history.change.total")}</span>
                   <strong>
                     <DataValue partial={partial}>{formatDelta(change.totalBytesDelta)}</DataValue>
                   </strong>
                   <p>
-                    From {formatDateTime(change.fromAt)} to {formatDateTime(change.toAt)}.{" "}
-                    {change.coverage.completeness === "complete"
-                      ? "Both snapshots had comparable, complete coverage."
-                      : "At least one snapshot was partial; treat this as a lower-bound change."}
+                    {t("history.change.range", {
+                      from: formatDateTime(change.fromAt),
+                      to: formatDateTime(change.toAt),
+                      coverage: t(
+                        change.coverage.completeness === "complete"
+                          ? "history.change.completeCoverage"
+                          : "history.change.partialCoverage"
+                      )
+                    })}
                   </p>
                 </div>
                 <ul className="delta-list">
@@ -232,11 +241,8 @@ function HistoryContent({
               </>
             ) : (
               <div className="unknown-block">
-                <strong>Change unknown</strong>
-                <p>
-                  A second completed snapshot is required. The baseline below is a fact, not a
-                  claim that nothing has changed since.
-                </p>
+                <strong>{t("history.change.unknown")}</strong>
+                <p>{t("history.change.unknownBody")}</p>
               </div>
             )}
           </section>
@@ -244,8 +250,8 @@ function HistoryContent({
           <section className="panel history-timeline" aria-labelledby="timeline-heading">
             <SectionHeading
               id="timeline-heading"
-              title="Snapshot timeline"
-              description="Newest first. Each total carries its coverage so a partial scan cannot read as complete."
+              title={t("history.timeline.title")}
+              description={t("history.timeline.description")}
             />
             <ol className="timeline-list">
               {data.snapshots.map((snapshot, index) => (
@@ -271,18 +277,18 @@ export function HistoryScreen({
   if (state.status === "loading") {
     return (
       <ScreenLoading
-        eyebrow="History"
-        title="What changed?"
-        description="Snapshots answer the +80 GB question with dated, comparable evidence — never with a guessed trend."
+        eyebrow={t("history.eyebrow")}
+        title={t("history.title")}
+        description={t("history.description")}
       />
     );
   }
   if (state.status === "error") {
     return (
       <ScreenError
-        eyebrow="History"
-        title="What changed?"
-        description="Snapshots answer the +80 GB question with dated, comparable evidence — never with a guessed trend."
+        eyebrow={t("history.eyebrow")}
+        title={t("history.title")}
+        description={t("history.description")}
         error={state.error}
       />
     );

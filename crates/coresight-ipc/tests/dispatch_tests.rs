@@ -62,6 +62,7 @@ fn start_scan_and_cancel_scan_report_no_backend() {
         Command::StartScan(coresight_ipc::StartScanRequest {
             drive_id: DRIVE_ID.to_string(),
             full_rescan: None,
+            root: None,
         }),
     ));
     assert_eq!(start.code, codes::SCAN_UNAVAILABLE);
@@ -726,6 +727,7 @@ fn every_command_variant_dispatches_without_panicking() {
         Command::StartScan(coresight_ipc::StartScanRequest {
             drive_id: DRIVE_ID.to_string(),
             full_rescan: None,
+            root: None,
         }),
         Command::CancelScan(coresight_ipc::CancelScanRequest {
             scan_id: SCAN_ID.to_string(),

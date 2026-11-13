@@ -1,0 +1,16 @@
+[package]
+name = "coresight-capture"
+version = "0.0.0"
+edition = "2021"
+description = "CoreSight screenshot capture planning — naming, destination and retention rules with a local-only guarantee. Produces plans and metadata only; the platform capture call lives in the desktop shell."
+license = "UNLICENSED"
+
+[lib]
+name = "coresight_capture"
+crate-type = ["lib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

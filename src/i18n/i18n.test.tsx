@@ -19,6 +19,17 @@ describe("message catalogue", () => {
     }
   });
 
+  it("uses the same interpolation placeholders in every locale", () => {
+    const placeholders = (message: string): string[] =>
+      [...message.matchAll(/\{(\w+)\}/g)].map((match) => match[1]).sort();
+
+    for (const key of Object.keys(en) as MessageKey[]) {
+      expect(placeholders(de[key]), `placeholders for ${key}`).toEqual(
+        placeholders(en[key])
+      );
+    }
+  });
+
   it("returns the expected string for a known key", () => {
     expect(getActiveLocale()).toBe("en");
     expect(t("app.nav.home")).toBe("Home");

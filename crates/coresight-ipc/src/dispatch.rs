@@ -4,8 +4,9 @@
 //! typed error. There is no sample data, no placeholder response, and no
 //! silent zero:
 //!
-//! * `startScan` / `cancelScan` need a [`ScanBackend`](crate::ScanBackend).
-//!   None is attached in this build, so both return `SCAN_UNAVAILABLE`.
+//! * `startScan` / `cancelScan` run through the [`ScanBackend`](crate::ScanBackend)
+//!   the shell attached. A session with no backend refuses both with
+//!   `SCAN_UNAVAILABLE`.
 //! * `getHistory` needs a history store. None is attached, so it returns
 //!   `HISTORY_UNAVAILABLE`.
 //! * `confirmPlan` runs the *real* `coresight_cleanup` validator under
@@ -109,38 +110,45 @@ pub fn dispatch_value(session: &mut Session, request: &serde_json::Value) -> Env
 }
 
 // ---------------------------------------------------------------------------
-// Scanning: honestly unavailable in this build
+// Scanning: served by the attached backend, honestly refused without one
 // ---------------------------------------------------------------------------
 
 fn handle_start_scan(session: &mut Session, request: &StartScanRequest) -> Envelope<Response> {
-    if let Some(backend) = session.backend_mut() {
-        return match backend.start_scan(request) {
-            Ok(response) => Envelope::ok(Response::StartScan(response)),
-            Err(error) => Envelope::err(error),
-        };
+    // Neither a drive nor a root was named. Defaulting this to "scan the whole
+    // home directory" would launch an expensive walk the caller never asked
+    // for, on the strength of a missing field — so an unnamed request is
+    // refused instead of silently defaulted. A caller that genuinely wants the
+    // home directory passes it explicitly.
+    if request.drive_id.is_empty() && request.root.is_none() {
+        return Envelope::err(
+            ApiError::new(
+                codes::INVALID_REQUEST,
+                "coresight.v1.startScan needs a driveId or a root; neither was supplied.",
+            )
+            .with_detail(
+                "coresight.v1.startScan: no scan was started. An unnamed scan is not \
+                 defaulted to the home directory, because that would walk a large tree \
+                 the caller never asked for.",
+            ),
+        );
     }
-    Envelope::err(no_scan_backend("starting a scan"))
+    if !session.has_scan_backend() {
+        return Envelope::err(crate::session::no_scan_backend("starting a scan"));
+    }
+    match session.start_scan(request) {
+        Ok(response) => Envelope::ok(Response::StartScan(response)),
+        Err(error) => Envelope::err(error),
+    }
 }
 
 fn handle_cancel_scan(session: &mut Session, request: &CancelScanRequest) -> Envelope<Response> {
-    if let Some(backend) = session.backend_mut() {
-        return match backend.cancel_scan(request) {
-            Ok(response) => Envelope::ok(Response::CancelScan(response)),
-            Err(error) => Envelope::err(error),
-        };
+    if !session.has_scan_backend() {
+        return Envelope::err(crate::session::no_scan_backend("cancelling a scan"));
     }
-    Envelope::err(no_scan_backend("cancelling a scan"))
-}
-
-fn no_scan_backend(action: &str) -> ApiError {
-    ApiError::new(
-        codes::SCAN_UNAVAILABLE,
-        "No scan backend is attached to this build of the CoreSight IPC layer, \
-         so scanning is unavailable. Nothing was started or cancelled.",
-    )
-    .with_detail(format!(
-        "refused {action}: this crate contains no scanner and performs no filesystem access"
-    ))
+    match session.cancel_scan(&request.scan_id) {
+        Ok(response) => Envelope::ok(Response::CancelScan(response)),
+        Err(error) => Envelope::err(error),
+    }
 }
 
 fn handle_get_history(_session: &mut Session, _request: &GetHistoryRequest) -> Envelope<Response> {
