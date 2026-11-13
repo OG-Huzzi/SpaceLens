@@ -1,5 +1,81 @@
 # CoreSight — Current State
 
+PHASE 9.3 + 11.1 — The App Runs, 0.1.0, Inventory Parsers, and Four New Panels
+
+**Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` 0,
+`cargo test --workspace` **1601 passed / 0 failed / 11 ignored**,
+`npm test` **94 passed**, `npm run build` 0, `npm audit` **0 vulnerabilities**.
+Schema version stays 6.
+
+### The application has been launched for the first time
+
+The Windows installer from run `43387812474` was downloaded, digest-verified,
+extracted (never installed), and run from a scratch folder:
+
+| Observation | Result |
+|---|---|
+| Process | PID 12604, still running after 10 s |
+| Window title | **`CoreSight`** |
+| Responding | true |
+| WebView2 child | `msedgewebview2.exe` spawned |
+| Frontend | booted — WebView2 local storage held `coresight.settings.v1` |
+| Authenticode | **`NotSigned`** |
+| Binary | valid PE32+/x86-64, COFF machine `0x8664` |
+
+A second launch exited cleanly on `WM_CLOSE`. The app is a real desktop
+application, not a package that merely builds. Full evidence in
+`docs/INSTALLER_VERIFICATION.md`.
+
+**The macOS artifact was inspected but not executed** (a Mach-O cannot run on
+Windows). It is structurally correct: arm64 `MH_EXECUTE`, ad-hoc
+`LC_CODE_SIGNATURE`, no Team ID.
+
+### Version 0.1.0 and a release runbook
+
+`0.1.0` in `package.json`, `src-tauri/tauri.conf.json` and
+`src-tauri/Cargo.toml`. The version is **not** centralised: the root workspace
+has 19 members and `src-tauri` is a separate workspace root, so a
+`[workspace.package]` version could not reach the two consumers that matter.
+`docs/RELEASE.md` lists the three files and the bump procedure instead of
+pretending one exists.
+
+`bundle.yml` now builds `--target universal-apple-darwin` with both Rust
+targets and a `lipo -archs` guard that fails the job unless both `arm64` and
+`x86_64` are present. **That job has not run yet** — the universal build is
+configured and unverified.
+
+The auto-updater was **deliberately not configured**: there is no update signing
+key and no endpoint, and a fake one would fail silently. `docs/RELEASE.md` §7
+records exactly what it needs.
+
+### `coresight-collect` — the inventory parsing layer
+
+Four commands returned `SESSION_UNAVAILABLE` because nothing produced their
+data. `coresight-collect` is the parser half: the shell gathers raw facts (a
+launchd plist, a registry export, a hosts listing, a browser profile listing)
+and this crate turns them into typed inventories with **no I/O of its own**.
+
+`parse_startup`, `parse_dns_candidates`, `parse_block_rules`,
+`parse_privacy_listing` — 52 tests. Every parser is total (empty input, NUL
+bytes, 1 MB of junk, 50k-deep nesting), and anything unparseable is **rejected
+and counted with a reason** rather than defaulted into a permissive value. A
+shell-profile line maps to `StartupSource::Unknown` → `OffLimits`, because shell
+syntax cannot be interpreted and guessing "safe to disable" would be a lie.
+
+**IPC wiring for these is not done** — the four commands still return
+`SESSION_UNAVAILABLE` until the shell gathers the raw text and registers the
+parsed inventories. That is the next step, not a gap in the parser.
+
+### Four new read-only panels
+
+Startup, DNS ranking, block-list plan and privacy summary now have UI, with
+tested behaviour for the three honesty rules that matter most here: excluded DNS
+candidates are listed with reasons, block-list rejections and duplicate counts
+are surfaced rather than swallowed, and a `null` privacy byte total renders the
+unknown word rather than `0 B`. All four are read-only and render
+`SESSION_UNAVAILABLE` as a calm "not available in this build" state.
+
 PHASE 9.2 + 11.0 — Real Scanning, Screenshot Policy, Complete i18n, and the Packaging Path
 
 **Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,

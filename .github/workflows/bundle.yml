@@ -20,6 +20,9 @@
 # Windows code-signing certificate in this repository (see
 # docs/PACKAGING.md). Artifacts are therefore explicitly named `-unsigned` and
 # carry an `UNSIGNED-BUILD.txt` note inside the artifact.
+#
+# macOS is built for `universal-apple-darwin` (arm64 + x86_64 in one artifact)
+# and the job proves the executable has both slices with `lipo` before upload.
 
 name: Bundle (unsigned)
 
@@ -46,14 +49,25 @@ jobs:
         include:
           # `--bundles` is validated per platform by the Tauri CLI: on Windows
           # only msi/nsis are accepted, on macOS only app/dmg. Listing foreign
-          # formats here would fail, which is why the matrix carries the exact
-          # per-platform list instead of one shared value.
+          # formats here would fail, which is why each entry carries the exact
+          # per-platform argument list instead of one shared value.
+          #
+          # macOS builds `universal-apple-darwin`: one `.app`/`.dmg` containing
+          # both an arm64 and an x86_64 slice, so Apple-silicon and Intel Macs
+          # are covered by the same artifact. `tauri build --help` (CLI 2.12.4)
+          # documents the target: "It must be one of the values outputted by
+          # `$rustc --print target-list` or `universal-apple-darwin` for an
+          # universal macOS application", and both `aarch64-apple-darwin` and
+          # `x86_64-apple-darwin` must be installed. The bundler writes to a
+          # per-target directory: `target/<target>/release/bundle`.
           - os: windows-latest
-            bundles: nsis,msi
+            build_args: "--bundles nsis,msi"
+            bundle_dir: src-tauri/target/release/bundle
             artifact: coresight-windows-x64-unsigned
           - os: macos-latest
-            bundles: app,dmg
-            artifact: coresight-macos-arm64-unsigned
+            build_args: "--bundles app,dmg --target universal-apple-darwin"
+            bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
+            artifact: coresight-macos-universal-unsigned
 
     steps:
       - name: Checkout
@@ -67,6 +81,15 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # `--target universal-apple-darwin` needs BOTH macOS standard libraries in
+      # the same toolchain. `macos-latest` is Apple silicon, so arm64 is the
+      # host target and x86_64 is the cross-compiled slice. Installing both
+      # explicitly keeps the job correct even if the runner image architecture
+      # changes. On Windows this step is skipped.
+      - name: Add both macOS Rust targets (universal build only)
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       # The desktop shell is its own Cargo workspace root (src-tauri/Cargo.toml),
       # so the default cache scope (the root workspace) would miss its target/
@@ -82,9 +105,42 @@ jobs:
       # `tauri build` runs `build.beforeBuildCommand` (`npm run build`) itself,
       # then compiles release and generates the platform installers.
       - name: Build unsigned bundle
-        run: npm run tauri:build -- --bundles ${{ matrix.bundles }} --ci
+        run: npm run tauri:build -- ${{ matrix.build_args }} --ci
         env:
           CI: "true"
+
+      # Do not trust the flag: prove the artifact really is universal before it
+      # is collected. `lipo` ships with the Xcode command line tools that the
+      # macOS runner already has. A thin (arm64-only or x86_64-only) binary
+      # fails the job here instead of being published as "universal".
+      - name: Verify the macOS app has both architectures
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app="${{ matrix.bundle_dir }}/macos/CoreSight.app"
+          binary="$app/Contents/MacOS/CoreSight"
+
+          if [ ! -x "$binary" ]; then
+            echo "::error title=Universal build produced no executable::$binary is missing or not executable, so the bundle cannot be verified as universal."
+            exit 1
+          fi
+
+          archs="$(lipo -archs "$binary")"
+          echo "lipo -archs $binary -> $archs"
+
+          for want in arm64 x86_64; do
+            case " $archs " in
+              *" $want "*)
+                echo "OK: $want slice present"
+                ;;
+              *)
+                echo "::error title=macOS bundle is not universal::Expected both arm64 and x86_64 in the CoreSight executable, got '$archs'. Check that rustup target add ran and that --target universal-apple-darwin reached cargo."
+                exit 1
+                ;;
+            esac
+          done
 
       - name: Collect installers and write the unsigned notice
         shell: bash
@@ -93,21 +149,26 @@ jobs:
 
           mkdir -p artifacts
 
-          if [ ! -d src-tauri/target/release/bundle ]; then
-            echo "::error title=Tauri produced no bundle directory::src-tauri/target/release/bundle does not exist. The build step reported success but wrote no bundle output. Check that bundle.active is true and that bundle.targets is not empty. See docs/PACKAGING.md."
+          # `tauri build --target <triple>` writes to target/<triple>/release/
+          # bundle, while a host build writes to target/release/bundle. The
+          # matrix carries the exact directory for this runner.
+          bundle_dir="${{ matrix.bundle_dir }}"
+
+          if [ ! -d "$bundle_dir" ]; then
+            echo "::error title=Tauri produced no bundle directory::$bundle_dir does not exist. The build step reported success but wrote no bundle output. Check that bundle.active is true, that bundle.targets is not empty, and that the --target value matches the directory. See docs/PACKAGING.md."
             exit 1
           fi
 
           # Copy every non-empty installer the bundler produced. `find` is used
           # instead of bash glob arrays because macOS runners still ship bash 3.2.
-          find src-tauri/target/release/bundle -type f \
+          find "$bundle_dir" -type f \
             \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \) -size +0c \
             -exec cp {} artifacts/ \;
 
           # A .app is a directory; upload-artifact does not preserve executable
           # bits, so zip it (ditto keeps the bundle structure and modes).
           if [ "${{ runner.os }}" = "macOS" ]; then
-            for app in src-tauri/target/release/bundle/macos/*.app; do
+            for app in "$bundle_dir"/macos/*.app; do
               [ -d "$app" ] || continue
               ditto -c -k --keepParent "$app" "artifacts/$(basename "$app" .app)-unsigned.zip"
             done
@@ -137,7 +198,7 @@ jobs:
             | wc -l | tr -d ' ')
 
           if [ "$installers" -eq 0 ]; then
-            echo "::error title=No installer produced::The Tauri bundler exited successfully but wrote no installer for ${{ matrix.os }}. Expected src-tauri/target/release/bundle/nsis/*.exe or msi/*.msi on Windows, dmg/*.dmg on macOS. Check the 'Build unsigned bundle' log for the first error, then see docs/PACKAGING.md."
+            echo "::error title=No installer produced::The Tauri bundler exited successfully but wrote no installer for ${{ matrix.os }}. Expected $bundle_dir/nsis/*.exe or $bundle_dir/msi/*.msi on Windows, $bundle_dir/dmg/*.dmg on macOS. Check the 'Build unsigned bundle' log for the first error, then see docs/PACKAGING.md."
             exit 1
           fi
 

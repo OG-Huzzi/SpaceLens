@@ -1,7 +1,7 @@
 {
   "name": "coresight",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "CoreSight frontend — Phase 0 scaffold (no product UI)",
   "scripts": {

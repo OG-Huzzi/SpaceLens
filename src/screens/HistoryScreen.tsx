@@ -23,6 +23,13 @@ import {
   SectionHeading,
   StatusPill
 } from "../components/ui";
+import { BlockListPanel } from "./BlockListPanel";
+import { DnsRankingPanel } from "./DnsRankingPanel";
+import {
+  PanelUnavailable,
+  isUnavailableError
+} from "./PanelFrame";
+import { StartupPanel } from "./StartupPanel";
 
 const TRIGGER_LABELS: Record<HistorySnapshot["trigger"], MessageKey> = {
   "first-run": "history.trigger.firstRun",
@@ -154,10 +161,29 @@ function SnapshotRow({ snapshot, index }: { snapshot: HistorySnapshot; index: nu
   );
 }
 
+function SystemRecords({ api }: { api: CoreSightApi }) {
+  return (
+    <section aria-labelledby="history-records-heading" style={{ marginTop: "32px" }}>
+      <SectionHeading
+        id="history-records-heading"
+        title={t("history.records.title")}
+        description={t("history.records.description")}
+      />
+      <div style={{ display: "grid", gap: "20px" }}>
+        <StartupPanel api={api} />
+        <DnsRankingPanel api={api} />
+        <BlockListPanel api={api} />
+      </div>
+    </section>
+  );
+}
+
 function HistoryContent({
+  api,
   data,
   onOpenCategory
 }: {
+  api: CoreSightApi;
   data: HistoryData;
   onOpenCategory: (categoryId: string) => void;
 }) {
@@ -261,6 +287,15 @@ function HistoryContent({
           </section>
         </>
       )}
+
+      {/*
+        These records are deliberately read-only. History is the screen that
+        remembers what the system held; it must not become a place where a
+        startup item can be disabled, DNS can be switched, or a block list can
+        be applied. Each panel owns its own loading/error/unavailable state so a
+        missing engine inventory never degrades into a zero or empty success.
+      */}
+      <SystemRecords api={api} />
     </div>
   );
 }
@@ -284,6 +319,19 @@ export function HistoryScreen({
     );
   }
   if (state.status === "error") {
+    if (isUnavailableError(state.error)) {
+      return (
+        <div className="screen">
+          <PageHeader
+            eyebrow={t("history.eyebrow")}
+            title={t("history.title")}
+            description={t("history.description")}
+          />
+          <PanelUnavailable error={state.error} />
+          <SystemRecords api={api} />
+        </div>
+      );
+    }
     return (
       <ScreenError
         eyebrow={t("history.eyebrow")}
@@ -294,5 +342,7 @@ export function HistoryScreen({
     );
   }
 
-  return <HistoryContent data={state.data} onOpenCategory={onOpenCategory} />;
+  return (
+    <HistoryContent api={api} data={state.data} onOpenCategory={onOpenCategory} />
+  );
 }

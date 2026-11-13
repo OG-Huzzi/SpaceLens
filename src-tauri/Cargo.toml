@@ -1,6 +1,6 @@
 [package]
 name = "coresight"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "CoreSight Tauri 2 desktop shell — window setup and the typed `coresight.v1.*` command table. Contains no business logic: every command forwards to `coresight-ipc::dispatch`."
 

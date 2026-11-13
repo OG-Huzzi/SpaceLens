@@ -544,6 +544,9 @@ export const en = {
   "history.timeline.title": "Snapshot timeline",
   "history.timeline.description":
     "Newest first. Each total carries its coverage so a partial scan cannot read as complete.",
+  "history.records.title": "System records",
+  "history.records.description":
+    "Read-only records the engine kept alongside the snapshots. They explain; they never act.",
 
   // ---------------------------------------------------------------------
   // Drives
@@ -591,7 +594,216 @@ export const en = {
     "means the drive was seen before and is detached now. Its figures are explicitly last-known and cannot be acted on.",
   "drives.memory.unknownTerm": "Unknown remains unknown.",
   "drives.memory.unknownBody":
-    "A disconnected drive's free space is not shown as zero, and stale health is never labelled healthy."
+    "A disconnected drive's free space is not shown as zero, and stale health is never labelled healthy.",
+
+  // ---------------------------------------------------------------------
+  // Read-only report panels — startup, DNS, block-list plan, privacy
+  //
+  // These panels explain engine records. They are deliberately not action
+  // surfaces: no startup switch, no DNS change, no hosts-file write, and no
+  // cookie deletion exists in this build.
+  // ---------------------------------------------------------------------
+  "panel.readOnly": "Read-only",
+  "panel.loading.body":
+    "Reading the local record. Nothing is changed while this panel loads.",
+  "panel.unavailable.eyebrow": "Unavailable",
+  "panel.unavailable.title": "Not available in this build",
+  "panel.unavailable.reason": "Reason:",
+  "panel.unavailable.body":
+    "This build cannot read this record yet. It is shown as unavailable rather than as an empty or zero result. Nothing was changed.",
+
+  "unit.startupItem.one": "{count} startup item",
+  "unit.startupItem.other": "{count} startup items",
+  "startup.title": "Startup inventory",
+  "startup.description":
+    "Read-only inventory of the items that start with the system. Every item carries the reason the engine recorded.",
+  "startup.loading": "Reading startup items…",
+  "startup.notice.title": "This build cannot disable anything.",
+  "startup.notice.body":
+    "Startup items are explained only. There is no disable, remove, or edit action on this screen, and none is implied by the tiers.",
+  "startup.summary.totalEnabled": "Enabled items reported",
+  "startup.summary.items": "Items shown",
+  "startup.summary.truncated": "Truncated",
+  "startup.truncated.title": "This list is incomplete.",
+  "startup.truncated.one":
+    "{count} startup item was omitted by the engine. This list is not complete.",
+  "startup.truncated.other":
+    "{count} startup items were omitted by the engine. This list is not complete.",
+  "startup.item.source": "Source: {source}",
+  "startup.item.owner": "Owner",
+  "startup.item.ownerUnknown": "Not reported",
+  "startup.item.command": "Command label",
+  "startup.item.enabled": "Enabled",
+  "startup.item.disabled": "Not enabled",
+  "startup.item.sourceFamily": "Source family",
+  "startup.item.why": "Why this item runs",
+  "startup.item.explanationOnly":
+    "Explanation only — no change is available in this build.",
+  "startup.item.offLimitsWhy": "Why it is off-limits:",
+  "startup.item.noAction": "No action is available for this item in this build.",
+  "startup.tier.safeToDisable": "Safe to disable",
+  "startup.tier.reviewFirst": "Review first",
+  "startup.tier.offLimits": "Off-limits",
+  "startup.actionable.title": "Explained startup items",
+  "startup.actionable.empty":
+    "No safe-to-disable or review-first startup items were reported.",
+  "startup.offLimits.title": "Off-limits startup items",
+  "startup.offLimits.description":
+    "Privileged sources are shown here with their reason. They are never offered for change.",
+  "startup.offLimits.empty": "No off-limits startup items were reported.",
+  "startup.empty.title": "No startup items were reported",
+  "startup.empty.body":
+    "The engine returned an empty startup inventory. That is an empty result, not a claim that nothing starts with this system.",
+  "startup.empty.next":
+    "A later build may be able to read startup sources on this platform.",
+
+  "unit.dnsCandidate.one": "{count} candidate",
+  "unit.dnsCandidate.other": "{count} candidates",
+  "unit.sample.one": "{count} sample",
+  "unit.sample.other": "{count} samples",
+  "dns.title": "DNS resolver ranking",
+  "dns.description":
+    "Measured candidates, their score components, and every candidate the engine excluded.",
+  "dns.loading": "Reading resolver measurements…",
+  "dns.warning.title": "CoreSight never switches DNS.",
+  "dns.warning.body":
+    "Changing DNS changes who can see every lookup you make. This panel is guidance only; no resolver is selected or applied here.",
+  "dns.basis.title": "How the score is weighted",
+  "dns.ranked.title": "Ranked candidates",
+  "dns.ranked.description":
+    "Each total is the weighted sum of the components below. Rank order comes from the engine.",
+  "dns.ranked.rank": "Rank {rank}",
+  "dns.ranked.empty": "No candidate met the ranking bar.",
+  "dns.score.total": "Total score",
+  "dns.score.value": "{value} / 100",
+  "dns.score.latency": "Latency score",
+  "dns.score.reliability": "Reliability score",
+  "dns.score.dnssec": "DNSSEC score",
+  "dns.score.privacy": "Documented privacy score",
+  "dns.score.latencyWeight": "Counts for 40% of the total score.",
+  "dns.score.reliabilityWeight": "Counts for 30% of the total score.",
+  "dns.score.dnssecWeight": "Counts for 15% of the total score.",
+  "dns.score.privacyWeight": "Counts for 15% of the total score.",
+  "dns.score.explanation":
+    "Each component runs from 0 to 100. The weighted sum produces the total; unknown components stay unknown.",
+  "dns.score.breakdownFor": "Score components for {name}",
+  "dns.operatorUnknown": "Operator not reported",
+  "dns.fact.medianLatency": "Median latency",
+  "dns.fact.p95Latency": "95th percentile latency",
+  "dns.fact.failureRate": "Failure rate",
+  "dns.fact.samples": "Samples",
+  "dns.fact.privacyPolicy": "Privacy policy",
+  "dns.fact.dnssec": "DNSSEC",
+  "dns.fact.filtering": "Filtering",
+  "dns.milliseconds": "{value} ms",
+  "dns.value.yes": "Yes",
+  "dns.value.no": "No",
+  "dns.privacyPolicy.documentedNoLogging": "Documented no-logging",
+  "dns.privacyPolicy.documentedRetention": "Documented retention",
+  "dns.privacyPolicy.undisclosed": "Undisclosed",
+  "dns.privacyPolicy.unknown": "Unknown",
+  "dns.excluded.title": "Excluded candidates",
+  "dns.excluded.description":
+    "Candidates the engine removed from ranking. They stay visible with the reason, so a rejection cannot hide.",
+  "dns.excluded.empty": "No candidates were excluded.",
+  "dns.exclusion.insufficientEvidence": "Insufficient evidence",
+  "dns.exclusion.tooUnreliable": "Too unreliable",
+  "dns.exclusion.undisclosedPrivacy": "Undisclosed privacy",
+  "dns.exclusion.notMeasured": "Not measured",
+  "dns.exclusion.code": "Reason code:",
+  "dns.empty.title": "No resolver measurements",
+  "dns.empty.body":
+    "The engine returned no ranked or excluded candidates. CoreSight will not guess a ranking.",
+  "dns.empty.next":
+    "Measurements appear here after a benchmark provides samples.",
+
+  "unit.blockEntry.one": "{count} entry",
+  "unit.blockEntry.other": "{count} entries",
+  "blocklist.title": "Block-list plan",
+  "blocklist.description":
+    "Planned host entries grouped by category, with every rejection and exclusion the engine reported.",
+  "blocklist.loading": "Reading the block-list plan…",
+  "blocklist.planNotice.title":
+    "This is a plan. Nothing was written to the hosts file.",
+  "blocklist.planNotice.body":
+    "No hosts file was changed. There is no apply, write, or enable action in this build.",
+  "blocklist.planNotice.reversible":
+    "The engine marks this plan reversible; nothing was written.",
+  "blocklist.engineNote": "Engine note:",
+  "blocklist.summary.total": "Reported total",
+  "blocklist.summary.shown": "Entries shown",
+  "blocklist.summary.duplicates": "Duplicates removed",
+  "blocklist.summary.invalid": "Rejected entries",
+  "blocklist.summary.whitelisted": "Whitelist exclusions",
+  "blocklist.summary.truncated": "Truncated",
+  "blocklist.value.total.one": "{count} planned entry",
+  "blocklist.value.total.other": "{count} planned entries",
+  "blocklist.value.duplicates.one": "{count} duplicate removed",
+  "blocklist.value.duplicates.other": "{count} duplicates removed",
+  "blocklist.value.invalid.one": "{count} rejected entry",
+  "blocklist.value.invalid.other": "{count} rejected entries",
+  "blocklist.value.whitelisted.one": "{count} whitelisted domain",
+  "blocklist.value.whitelisted.other": "{count} whitelisted domains",
+  "blocklist.value.truncated.one": "{count} omitted entry",
+  "blocklist.value.truncated.other": "{count} omitted entries",
+  "blocklist.groups.title": "Planned entries by category",
+  "blocklist.groups.description":
+    "Each category shows how many entries it contributes.",
+  "blocklist.groups.empty": "No planned entries were reported.",
+  "blocklist.entry.targets": "IPv4 {ipv4} · IPv6 {ipv6}",
+  "blocklist.invalid.title": "Rejected entries",
+  "blocklist.invalid.description": "Every rejected domain and its reason.",
+  "blocklist.invalid.empty": "No entries were rejected.",
+  "blocklist.invalid.kind": "Rejected",
+  "blocklist.whitelist.title": "Whitelist exclusions",
+  "blocklist.whitelist.description":
+    "These domains were excluded because they are on the whitelist. This plan never blocks them.",
+  "blocklist.whitelist.empty": "No whitelist exclusions were reported.",
+  "blocklist.whitelist.kind": "Whitelisted",
+  "blocklist.whitelist.item": "Excluded by the whitelist.",
+  "blocklist.empty.title": "No block-list plan",
+  "blocklist.empty.body":
+    "The plan is empty: no entries, rejections, or whitelist exclusions were reported. Nothing was written.",
+  "blocklist.empty.next": "Rules in a later build produce a plan here.",
+
+  "unit.finding.one": "{count} finding",
+  "unit.finding.other": "{count} findings",
+  "privacy.title": "Privacy findings",
+  "privacy.description":
+    "Evidence only. These findings describe browser traces; they are not a delete list.",
+  "privacy.loading": "Reading privacy findings…",
+  "privacy.summary.total": "Findings",
+  "privacy.summary.bytes": "Estimated bytes",
+  "privacy.summary.unknownKinds": "Unknown kinds present",
+  "privacy.value.yes": "Yes",
+  "privacy.value.no": "No",
+  "privacy.totalUnknownReason":
+    "The total is unknown because at least one finding has no size estimate.",
+  "privacy.estimateNote": "Byte figures are estimates, not exact sizes.",
+  "privacy.sessionWarning.title": "Session cookies keep you signed in.",
+  "privacy.sessionWarning.body":
+    "Removing session cookies would sign you out of websites. They are listed separately from tracking cookies and are not treated as a cleanup target.",
+  "privacy.unknownKinds.noticeTitle": "Unrecognised finding kinds",
+  "privacy.unknownKinds.notice":
+    "Some findings have an unrecognised kind. They are shown, but their effect on the totals is not assumed.",
+  "privacy.findings.title": "Findings by kind",
+  "privacy.findings.description":
+    "Counts and estimated bytes per kind. Unknown stays unknown.",
+  "privacy.finding.countUnknown": "Count unknown",
+  "privacy.finding.estimatedBytes": "Estimated bytes:",
+  "privacy.finding.estimateUnknown": "Estimate unknown",
+  "privacy.kind.trackingCookie": "Tracking cookies",
+  "privacy.kind.sessionCookie": "Session cookies",
+  "privacy.kind.browsingHistory": "Browsing history",
+  "privacy.kind.cacheEntry": "Cache entries",
+  "privacy.kind.siteStorage": "Site storage",
+  "privacy.kind.unknown": "Unrecognised kind",
+  "privacy.empty.title": "No privacy findings",
+  "privacy.empty.body":
+    "The engine reported no privacy findings for this session. That is an empty result, not proof that nothing is stored.",
+  "privacy.empty.next":
+    "Run a new scan or supply an inventory in a later build.",
+  "privacy.engineNote": "Engine note:"
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1107,6 +1319,9 @@ export const de: Record<MessageKey, string> = {
   "history.timeline.title": "Zeitleiste der Momentaufnahmen",
   "history.timeline.description":
     "Neueste zuerst. Jede Summe trägt ihre Abdeckung, damit ein teilweiser Scan nicht als vollständig gelesen wird.",
+  "history.records.title": "Systemaufzeichnungen",
+  "history.records.description":
+    "Schreibgeschützte Aufzeichnungen, die die Engine neben den Momentaufnahmen behält. Sie erklären; sie handeln nie.",
 
   // Drives
   "drives.eyebrow": "Laufwerke",
@@ -1151,7 +1366,213 @@ export const de: Record<MessageKey, string> = {
     "bedeutet, dass das Laufwerk zuvor gesehen wurde und jetzt getrennt ist. Seine Zahlen sind ausdrücklich zuletzt bekannt; auf diesem Laufwerk kann keine Aktion ausgeführt werden.",
   "drives.memory.unknownTerm": "Unbekannt bleibt unbekannt.",
   "drives.memory.unknownBody":
-    "Der freie Speicher eines getrennten Laufwerks wird nicht als null angezeigt, und ein veralteter Zustand wird nie als „In Ordnung“ bezeichnet."
+    "Der freie Speicher eines getrennten Laufwerks wird nicht als null angezeigt, und ein veralteter Zustand wird nie als „In Ordnung“ bezeichnet.",
+
+  // Read-only report panels
+  "panel.readOnly": "Schreibgeschützt",
+  "panel.loading.body":
+    "Der lokale Datensatz wird gelesen. Währenddessen wird nichts geändert.",
+  "panel.unavailable.eyebrow": "Nicht verfügbar",
+  "panel.unavailable.title": "In dieser Version nicht verfügbar",
+  "panel.unavailable.reason": "Grund:",
+  "panel.unavailable.body":
+    "Diese Version kann diesen Datensatz noch nicht lesen. Er wird als nicht verfügbar angezeigt, nicht als leeres oder Null-Ergebnis. Es wurde nichts geändert.",
+
+  "unit.startupItem.one": "{count} Autostart-Eintrag",
+  "unit.startupItem.other": "{count} Autostart-Einträge",
+  "startup.title": "Autostart-Inventar",
+  "startup.description":
+    "Schreibgeschützte Übersicht der Einträge, die mit dem System starten. Jeder Eintrag trägt die Begründung, die die Engine aufgezeichnet hat.",
+  "startup.loading": "Autostart-Einträge werden gelesen…",
+  "startup.notice.title": "Diese Version kann nichts deaktivieren.",
+  "startup.notice.body":
+    "Autostart-Einträge werden nur erklärt. Auf diesem Bildschirm gibt es keine Aktion zum Deaktivieren, Entfernen oder Bearbeiten, und die Stufen deuten auch keine an.",
+  "startup.summary.totalEnabled": "Gemeldete aktivierte Einträge",
+  "startup.summary.items": "Angezeigte Einträge",
+  "startup.summary.truncated": "Gekürzt",
+  "startup.truncated.title": "Diese Liste ist unvollständig.",
+  "startup.truncated.one":
+    "{count} Autostart-Eintrag wurde von der Engine ausgelassen. Diese Liste ist nicht vollständig.",
+  "startup.truncated.other":
+    "{count} Autostart-Einträge wurden von der Engine ausgelassen. Diese Liste ist nicht vollständig.",
+  "startup.item.source": "Quelle: {source}",
+  "startup.item.owner": "Eigentümer",
+  "startup.item.ownerUnknown": "Nicht gemeldet",
+  "startup.item.command": "Befehlsbezeichnung",
+  "startup.item.enabled": "Aktiviert",
+  "startup.item.disabled": "Nicht aktiviert",
+  "startup.item.sourceFamily": "Quellfamilie",
+  "startup.item.why": "Warum dieser Eintrag läuft",
+  "startup.item.explanationOnly":
+    "Nur Erklärung — in dieser Version ist keine Änderung möglich.",
+  "startup.item.offLimitsWhy": "Warum er ausgeschlossen ist:",
+  "startup.item.noAction":
+    "Für diesen Eintrag ist in dieser Version keine Aktion verfügbar.",
+  "startup.tier.safeToDisable": "Sicher deaktivierbar",
+  "startup.tier.reviewFirst": "Erst prüfen",
+  "startup.tier.offLimits": "Ausgeschlossen",
+  "startup.actionable.title": "Erklärte Autostart-Einträge",
+  "startup.actionable.empty":
+    "Es wurden keine sicheren oder zu prüfenden Autostart-Einträge gemeldet.",
+  "startup.offLimits.title": "Ausgeschlossene Autostart-Einträge",
+  "startup.offLimits.description":
+    "Privilegierte Quellen werden hier mit ihrem Grund gezeigt. Sie werden nie zur Änderung angeboten.",
+  "startup.offLimits.empty":
+    "Es wurden keine ausgeschlossenen Autostart-Einträge gemeldet.",
+  "startup.empty.title": "Keine Autostart-Einträge gemeldet",
+  "startup.empty.body":
+    "Die Engine hat ein leeres Autostart-Inventar zurückgegeben. Das ist ein leeres Ergebnis, nicht die Aussage, dass mit diesem System nichts startet.",
+  "startup.empty.next":
+    "Eine spätere Version kann Autostart-Quellen auf dieser Plattform möglicherweise lesen.",
+
+  "unit.dnsCandidate.one": "{count} Kandidat",
+  "unit.dnsCandidate.other": "{count} Kandidaten",
+  "unit.sample.one": "{count} Messprobe",
+  "unit.sample.other": "{count} Messproben",
+  "dns.title": "Rangfolge der DNS-Resolver",
+  "dns.description":
+    "Gemessene Kandidaten, ihre Teilbewertungen und jeder Kandidat, den die Engine ausgeschlossen hat.",
+  "dns.loading": "Resolver-Messungen werden gelesen…",
+  "dns.warning.title": "CoreSight wechselt DNS niemals.",
+  "dns.warning.body":
+    "Ein DNS-Wechsel ändert, wer jede deiner Abfragen sehen kann. Diese Übersicht ist nur eine Orientierung; hier wird kein Resolver ausgewählt oder angewendet.",
+  "dns.basis.title": "Wie die Bewertung gewichtet wird",
+  "dns.ranked.title": "Bewertete Kandidaten",
+  "dns.ranked.description":
+    "Jede Gesamtbewertung ist die gewichtete Summe der unten aufgeführten Teilbewertungen. Die Reihenfolge stammt von der Engine.",
+  "dns.ranked.rank": "Rang {rank}",
+  "dns.ranked.empty": "Kein Kandidat hat die Bewertungshürde erreicht.",
+  "dns.score.total": "Gesamtbewertung",
+  "dns.score.value": "{value} / 100",
+  "dns.score.latency": "Latenzbewertung",
+  "dns.score.reliability": "Zuverlässigkeitsbewertung",
+  "dns.score.dnssec": "DNSSEC-Bewertung",
+  "dns.score.privacy": "Bewertung des dokumentierten Datenschutzes",
+  "dns.score.latencyWeight": "Zählt zu 40 % der Gesamtbewertung.",
+  "dns.score.reliabilityWeight": "Zählt zu 30 % der Gesamtbewertung.",
+  "dns.score.dnssecWeight": "Zählt zu 15 % der Gesamtbewertung.",
+  "dns.score.privacyWeight": "Zählt zu 15 % der Gesamtbewertung.",
+  "dns.score.explanation":
+    "Jede Teilbewertung reicht von 0 bis 100. Die gewichtete Summe ergibt die Gesamtbewertung; unbekannte Teile bleiben unbekannt.",
+  "dns.score.breakdownFor": "Teilbewertungen für {name}",
+  "dns.operatorUnknown": "Betreiber nicht gemeldet",
+  "dns.fact.medianLatency": "Median-Latenz",
+  "dns.fact.p95Latency": "95-Perzentil-Latenz",
+  "dns.fact.failureRate": "Fehlerquote",
+  "dns.fact.samples": "Messproben",
+  "dns.fact.privacyPolicy": "Datenschutzrichtlinie",
+  "dns.fact.dnssec": "DNSSEC",
+  "dns.fact.filtering": "Filterung",
+  "dns.milliseconds": "{value} ms",
+  "dns.value.yes": "Ja",
+  "dns.value.no": "Nein",
+  "dns.privacyPolicy.documentedNoLogging": "Dokumentiert ohne Protokollierung",
+  "dns.privacyPolicy.documentedRetention": "Dokumentierte Aufbewahrung",
+  "dns.privacyPolicy.undisclosed": "Nicht offengelegt",
+  "dns.privacyPolicy.unknown": "Unbekannt",
+  "dns.excluded.title": "Ausgeschlossene Kandidaten",
+  "dns.excluded.description":
+    "Kandidaten, die die Engine aus der Bewertung entfernt hat. Sie bleiben mit dem Grund sichtbar, damit eine Ablehnung nicht verschwindet.",
+  "dns.excluded.empty": "Es wurden keine Kandidaten ausgeschlossen.",
+  "dns.exclusion.insufficientEvidence": "Unzureichende Belege",
+  "dns.exclusion.tooUnreliable": "Zu unzuverlässig",
+  "dns.exclusion.undisclosedPrivacy": "Nicht offengelegter Datenschutz",
+  "dns.exclusion.notMeasured": "Nicht gemessen",
+  "dns.exclusion.code": "Grundcode:",
+  "dns.empty.title": "Keine Resolver-Messungen",
+  "dns.empty.body":
+    "Die Engine hat weder bewertete noch ausgeschlossene Kandidaten zurückgegeben. CoreSight rät keine Rangfolge.",
+  "dns.empty.next":
+    "Messungen erscheinen hier, sobald ein Benchmark Messproben liefert.",
+
+  "unit.blockEntry.one": "{count} Eintrag",
+  "unit.blockEntry.other": "{count} Einträge",
+  "blocklist.title": "Sperrlisten-Plan",
+  "blocklist.description":
+    "Geplante Host-Einträge nach Kategorie, mit jeder Ablehnung und jedem Ausschluss, den die Engine gemeldet hat.",
+  "blocklist.loading": "Der Sperrlisten-Plan wird gelesen…",
+  "blocklist.planNotice.title":
+    "Dies ist ein Plan. Es wurde nichts in die hosts-Datei geschrieben.",
+  "blocklist.planNotice.body":
+    "Es wurde keine hosts-Datei geändert. In dieser Version gibt es keine Aktion zum Anwenden, Schreiben oder Aktivieren.",
+  "blocklist.planNotice.reversible":
+    "Die Engine kennzeichnet diesen Plan als umkehrbar; geschrieben wurde nichts.",
+  "blocklist.engineNote": "Hinweis der Engine:",
+  "blocklist.summary.total": "Gemeldete Gesamtzahl",
+  "blocklist.summary.shown": "Angezeigte Einträge",
+  "blocklist.summary.duplicates": "Entfernte Duplikate",
+  "blocklist.summary.invalid": "Abgelehnte Einträge",
+  "blocklist.summary.whitelisted": "Whitelist-Ausschlüsse",
+  "blocklist.summary.truncated": "Gekürzt",
+  "blocklist.value.total.one": "{count} geplanter Eintrag",
+  "blocklist.value.total.other": "{count} geplante Einträge",
+  "blocklist.value.duplicates.one": "{count} Duplikat entfernt",
+  "blocklist.value.duplicates.other": "{count} Duplikate entfernt",
+  "blocklist.value.invalid.one": "{count} abgelehnter Eintrag",
+  "blocklist.value.invalid.other": "{count} abgelehnte Einträge",
+  "blocklist.value.whitelisted.one": "{count} Whitelist-Domain",
+  "blocklist.value.whitelisted.other": "{count} Whitelist-Domains",
+  "blocklist.value.truncated.one": "{count} ausgelassener Eintrag",
+  "blocklist.value.truncated.other": "{count} ausgelassene Einträge",
+  "blocklist.groups.title": "Geplante Einträge nach Kategorie",
+  "blocklist.groups.description":
+    "Jede Kategorie zeigt, wie viele Einträge sie beiträgt.",
+  "blocklist.groups.empty": "Es wurden keine geplanten Einträge gemeldet.",
+  "blocklist.entry.targets": "IPv4 {ipv4} · IPv6 {ipv6}",
+  "blocklist.invalid.title": "Abgelehnte Einträge",
+  "blocklist.invalid.description": "Jede abgelehnte Domain mit ihrem Grund.",
+  "blocklist.invalid.empty": "Es wurden keine Einträge abgelehnt.",
+  "blocklist.invalid.kind": "Abgelehnt",
+  "blocklist.whitelist.title": "Whitelist-Ausschlüsse",
+  "blocklist.whitelist.description":
+    "Diese Domains wurden wegen der Whitelist ausgeschlossen. Dieser Plan blockiert sie nie.",
+  "blocklist.whitelist.empty": "Es wurden keine Whitelist-Ausschlüsse gemeldet.",
+  "blocklist.whitelist.kind": "Whitelist",
+  "blocklist.whitelist.item": "Durch die Whitelist ausgeschlossen.",
+  "blocklist.empty.title": "Kein Sperrlisten-Plan",
+  "blocklist.empty.body":
+    "Der Plan ist leer: Es wurden keine Einträge, Ablehnungen oder Whitelist-Ausschlüsse gemeldet. Es wurde nichts geschrieben.",
+  "blocklist.empty.next":
+    "Regeln in einer späteren Version erzeugen hier einen Plan.",
+
+  "unit.finding.one": "{count} Befund",
+  "unit.finding.other": "{count} Befunde",
+  "privacy.title": "Datenschutz-Befunde",
+  "privacy.description":
+    "Nur Belege. Diese Befunde beschreiben Browser-Spuren; sie sind keine Löschliste.",
+  "privacy.loading": "Datenschutz-Befunde werden gelesen…",
+  "privacy.summary.total": "Befunde",
+  "privacy.summary.bytes": "Geschätzte Bytes",
+  "privacy.summary.unknownKinds": "Unbekannte Arten vorhanden",
+  "privacy.value.yes": "Ja",
+  "privacy.value.no": "Nein",
+  "privacy.totalUnknownReason":
+    "Die Summe ist unbekannt, weil mindestens ein Befund keine Größenschätzung hat.",
+  "privacy.estimateNote": "Byte-Zahlen sind Schätzungen, keine exakten Größen.",
+  "privacy.sessionWarning.title": "Sitzungs-Cookies halten dich angemeldet.",
+  "privacy.sessionWarning.body":
+    "Das Entfernen von Sitzungs-Cookies würde dich auf Websites abmelden. Sie werden getrennt von Tracking-Cookies aufgeführt und nicht als Bereinigungsziel behandelt.",
+  "privacy.unknownKinds.noticeTitle": "Unbekannte Befundarten",
+  "privacy.unknownKinds.notice":
+    "Einige Befunde haben eine unbekannte Art. Sie werden angezeigt, aber ihre Wirkung auf die Summen wird nicht angenommen.",
+  "privacy.findings.title": "Befunde nach Art",
+  "privacy.findings.description":
+    "Anzahlen und geschätzte Bytes je Art. Unbekannt bleibt unbekannt.",
+  "privacy.finding.countUnknown": "Anzahl unbekannt",
+  "privacy.finding.estimatedBytes": "Geschätzte Bytes:",
+  "privacy.finding.estimateUnknown": "Schätzung unbekannt",
+  "privacy.kind.trackingCookie": "Tracking-Cookies",
+  "privacy.kind.sessionCookie": "Sitzungs-Cookies",
+  "privacy.kind.browsingHistory": "Browser-Verlauf",
+  "privacy.kind.cacheEntry": "Cache-Einträge",
+  "privacy.kind.siteStorage": "Website-Speicher",
+  "privacy.kind.unknown": "Unbekannte Art",
+  "privacy.empty.title": "Keine Datenschutz-Befunde",
+  "privacy.empty.body":
+    "Die Engine hat für diese Sitzung keine Datenschutz-Befunde gemeldet. Das ist ein leeres Ergebnis, kein Beweis, dass nichts gespeichert ist.",
+  "privacy.empty.next":
+    "Starte einen neuen Scan oder stelle in einer späteren Version ein Inventar bereit.",
+  "privacy.engineNote": "Hinweis der Engine:"
 };
 
 export const MESSAGES: Record<"en" | "de", Record<MessageKey, string>> = { en, de };

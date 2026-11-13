@@ -127,6 +127,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "coresight-collect"
+version = "0.0.0"
+dependencies = [
+ "coresight-systools",
+ "coresight-webtools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "coresight-core"
 version = "0.0.0"
 dependencies = [

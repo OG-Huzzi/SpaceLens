@@ -19,6 +19,8 @@ import {
   StatusPill,
   type PillTone
 } from "../components/ui";
+import { PrivacyPanel } from "./PrivacyPanel";
+import { PanelUnavailable, isUnavailableError } from "./PanelFrame";
 
 function driveStatus(drive: Drive): { label: MessageKey; tone: PillTone } {
   if (drive.connection === "remembered") {
@@ -38,7 +40,7 @@ function opportunityCount(value: number | null): string {
   return tCount(value, "unit.opportunityToReview.one", "unit.opportunityToReview.other");
 }
 
-function HomeContent({ home }: { home: HomeSummary }) {
+function HomeContent({ home, api }: { home: HomeSummary; api: CoreSightApi }) {
   const coverage = home.coverage;
   const partial = coverage.completeness !== "complete";
   const safeActionable = home.safeReclaimableBytes;
@@ -61,6 +63,14 @@ function HomeContent({ home }: { home: HomeSummary }) {
           description={t("home.empty.body")}
           nextStep={t("home.empty.next")}
         />
+        {/*
+          Privacy evidence stays available even when no drive summary exists:
+          an empty storage result is not a reason to hide what the session
+          knows about browser traces.
+        */}
+        <div style={{ marginTop: "24px" }}>
+          <PrivacyPanel api={api} />
+        </div>
       </div>
     );
   }
@@ -279,6 +289,16 @@ function HomeContent({ home }: { home: HomeSummary }) {
           <strong>{t("home.caveat.title")}</strong> {t("home.caveat.body")}
         </p>
       </section>
+
+      {/*
+        A privacy finding is evidence, not a cleanup proposal. It lives on the
+        overview screen because it describes how exposed the device is, and it
+        is read-only: removing session cookies would sign the user out, so this
+        build shows the warning instead of offering an action.
+      */}
+      <div style={{ marginTop: "24px" }}>
+        <PrivacyPanel api={api} />
+      </div>
     </div>
   );
 }
@@ -296,6 +316,21 @@ export function HomeScreen({ api }: { api: CoreSightApi }) {
     );
   }
   if (state.status === "error") {
+    if (isUnavailableError(state.error)) {
+      return (
+        <div className="screen">
+          <PageHeader
+            eyebrow={t("home.eyebrow")}
+            title={t("home.title")}
+            description={t("home.description")}
+          />
+          <PanelUnavailable error={state.error} />
+          <div style={{ marginTop: "24px" }}>
+            <PrivacyPanel api={api} />
+          </div>
+        </div>
+      );
+    }
     return (
       <ScreenError
         eyebrow={t("home.eyebrow")}
@@ -306,5 +341,5 @@ export function HomeScreen({ api }: { api: CoreSightApi }) {
     );
   }
 
-  return <HomeContent home={state.data} />;
+  return <HomeContent home={state.data} api={api} />;
 }
