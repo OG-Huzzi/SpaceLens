@@ -22,6 +22,7 @@ pub mod pathmatch;
 pub mod relationships;
 pub mod roots;
 pub mod sources;
+pub mod uninstall;
 pub mod windows_discovery;
 
 #[cfg(windows)]
@@ -113,6 +114,11 @@ pub use roots::{
 pub use sources::{
     parse_desktop_entry, parse_info_plist, record_from_bundle, record_from_desktop_entry,
     BundleMetadata, BundlePlistProvider, DesktopEntryMetadata, DesktopEntryProvider,
+};
+pub use uninstall::{
+    plan_action, plan_uninstall, LeftoverCandidate, LeftoverEvidence, UninstallAction,
+    UninstallItem, UninstallItemTier, UninstallPlan, UninstallRequest, UninstallScope,
+    VendorUninstallerStatus,
 };
 pub use windows_discovery::{
     decode_registry_string, offer_name, split_hive_path, RegistryHive, RegistryValue, RegistryView,

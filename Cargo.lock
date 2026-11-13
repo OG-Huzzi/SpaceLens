@@ -175,6 +175,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "coresight-ipc"
+version = "0.0.0"
+dependencies = [
+ "coresight-capabilities",
+ "coresight-classifier",
+ "coresight-cleanup",
+ "coresight-engine",
+ "coresight-filetools",
+ "coresight-history",
+ "coresight-insights",
+ "coresight-systools",
+ "coresight-webtools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "coresight-macos"
 version = "0.0.0"
 dependencies = [

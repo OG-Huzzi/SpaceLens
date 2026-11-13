@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   CONTRACT_VERSION,
-  createMockApi,
   isContractCompatible,
   type CoreSightApi,
   type MockScenario,
   type ScanStatus
 } from "./api";
+import { createApi, isTauriRuntime } from "./api/tauriApi";
 import { useApiData } from "./hooks/useApiData";
 import { formatCount, formatDateTime } from "./lib/format";
 import { HomeScreen } from "./screens/HomeScreen";
@@ -61,10 +61,12 @@ function scanSummary(scan: ScanStatus): string {
 function AppHeader({
   api,
   screen,
+  liveEngine,
   onNavigate
 }: {
   api: CoreSightApi;
   screen: ScreenId;
+  liveEngine: boolean;
   onNavigate: () => void;
 }) {
   const status = useApiData(() => api.getGlobalStatus(), [api]);
@@ -98,8 +100,15 @@ function AppHeader({
           </span>
         </div>
 
-        <span className="simulated-badge" title="Phase 8 renders deterministic local fixture data.">
-          Local preview
+        <span
+          className="simulated-badge"
+          title={
+            liveEngine
+              ? "Reading the local CoreSight engine through the coresight.v1 contract."
+              : "Rendering deterministic local fixture data; no engine is attached."
+          }
+        >
+          {liveEngine ? "Local engine" : "Local preview"}
         </span>
       </div>
 
@@ -148,7 +157,8 @@ function ContractMismatch({ received, expected }: { received: string; expected: 
 
 export default function App() {
   const scenario = useMemo(readMockScenario, []);
-  const api = useMemo(() => createMockApi({ scenario }), [scenario]);
+  const liveEngine = useMemo(isTauriRuntime, []);
+  const api = useMemo(() => createApi({ mock: { scenario } }), [scenario]);
   const [screen, setScreen] = useState<ScreenId>(readScreenFromHash);
   const [focusCategoryId, setFocusCategoryId] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement>(null);
@@ -220,7 +230,12 @@ export default function App() {
       <a className="skip-link" href="#content">
         Skip to content
       </a>
-      <AppHeader api={api} screen={screen} onNavigate={handleNavigate} />
+      <AppHeader
+        api={api}
+        screen={screen}
+        liveEngine={liveEngine}
+        onNavigate={handleNavigate}
+      />
       <main id="content" ref={mainRef} tabIndex={-1}>
         {content}
       </main>
@@ -229,7 +244,8 @@ export default function App() {
           CoreSight analyses storage locally. No paths, names, or hashes leave this device.
         </p>
         <p>
-          Phase 8 UI shell · contract {CONTRACT_VERSION} · deterministic mock data
+          Phase 8 UI shell · contract {CONTRACT_VERSION} ·{" "}
+          {liveEngine ? "live local engine" : "deterministic mock data"}
         </p>
       </footer>
     </>

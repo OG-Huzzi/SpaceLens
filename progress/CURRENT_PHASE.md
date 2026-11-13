@@ -19,6 +19,85 @@ spent runner minutes proving portability nobody consumes.
   **Historical run records elsewhere in `progress/` are unchanged** — they are
   evidence of what actually ran and must not be rewritten.
 
+PHASE 9 — Typed IPC Layer, Desktop Shell, Uninstall Planning, and Frontend Honesty Tests
+
+**Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` 0,
+`cargo test --workspace` **1308 passed / 0 failed / 11 ignored**,
+`npm test` **26 passed**, `npm run build` 0, `npm audit --audit-level=high`
+**0 vulnerabilities**. Schema version stays 6.
+
+### New crate: `coresight-ipc`
+
+The platform-neutral `coresight.v1.*` command layer, with no Tauri dependency.
+It defines `Command` (the ten documented commands, serde-renamed to their
+dotted contract names), a private-field `Envelope` so "both ok and error" and
+"neither" are unrepresentable, a stable `ApiError` code set, and
+`dispatch(session, command)`.
+
+**Commands that this build cannot genuinely serve return a typed error, never
+sample data.** `startScan`/`cancelScan` report `SCAN_UNAVAILABLE` (no scan
+backend is attached), `getHistory` reports `HISTORY_UNAVAILABLE` (no store is
+attached), and `executePlan` is refused because the current `ExecutionPolicy`
+authorizes read-only actions only. That refusal is the correct behaviour and
+is asserted by tests.
+
+### Desktop shell: `src-tauri` now type-checks
+
+`cargo check --manifest-path src-tauri/Cargo.toml` **passes**. The shell
+registers ten `#[tauri::command]` handlers that each forward into
+`coresight_ipc::dispatch` and return the envelope untouched — no business
+logic, no path handling. `src-tauri` is its own workspace root via an empty
+`[workspace]` table, so it stays out of the engine workspace.
+
+A CI step now type-checks it on Windows (`cargo check --manifest-path
+src-tauri/Cargo.toml`), because `--workspace` cannot reach a separate root and
+an ungated shell would rot. It is **checked, not linked or bundled** — real
+packaging still needs the Tauri bundler toolchain.
+
+### Transport fix (defect found during integration, then closed)
+
+The frontend transport originally invoked dotted commands like
+`coresight.v1.previewPlan`. Tauri command names must be Rust identifiers, so
+the shell registers `preview_plan` and carries the dotted name in the envelope
+as `ok.kind`. Every live call would have failed. Fixed:
+
+- `TAURI_HANDLERS` maps each contract command to the handler the shell
+  actually registers.
+- `unwrapTransportEnvelope` now **verifies** `ok.kind` equals the command that
+  was asked for; a shell answering a different question is rejected with
+  `INVALID_RESPONSE` instead of having its payload parsed.
+- A contract command with no shell handler fails with
+  `UNSUPPORTED_IN_THIS_BUILD` **before invoking**, rather than calling a name
+  the shell would reject.
+
+**Remaining Phase 9 gap:** the aggregate view-model commands the screens read
+(`getHomeSummary`, `getStorage`, `getCleanup`, `getDuplicateReport`,
+`getBigFileReport`, `getStartupReport`, `getDnsRanking`, `getBlockListPlan`,
+`getPrivacySummary`) have no IPC endpoint yet, so in live mode those panels
+report "not available in this build" while the mock still drives them. Wire
+those next, or the live app is only half-connected.
+
+### `coresight-apps`: Software Uninstaller planning
+
+`crates/coresight-apps/src/uninstall.rs` reconstructs what an uninstall would
+leave behind from recorded evidence. Tiering: a strict child of the recorded
+install root is `Safe`; the root itself is `Review`; bundle-id / uninstall-key /
+app-data matches are `Review`; a contended path is always `OffLimits`; a
+name-only match is `Review` and its `why` admits it is not recorded evidence.
+`total_bytes` is `None` if any item's size is unknown. `plan_action` is always
+`InspectOnly` — this build removes nothing and never claims a vendor uninstaller
+ran. 22 new tests (182 total in the crate).
+
+### Frontend honesty tests
+
+26 Vitest tests now lock the product's promises: `null` renders "Unknown" and
+never bare `0` (with `0` tested separately as a real zero); Home, Storage,
+History and Drives expose zero state-changing controls; off-limits categories
+render with a reason; a partial scan announces itself and states the unreadable
+count; no execute affordance appears before a preview exists; there is no
+bulk/select-all control; and a failed live call never resolves to mock data.
+
 PHASE 4.3 + 8.0 — Resolved Plan Targets, Remaining Diagnostics, Finder, and the Five-Screen UI
 
 **Status: IMPLEMENTED — local gates green.** `cargo fmt --all --check` 0,

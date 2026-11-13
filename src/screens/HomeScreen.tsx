@@ -44,6 +44,7 @@ function HomeContent({ home }: { home: HomeSummary }) {
           title="How is your storage doing?"
           description="One calm summary of the drives CoreSight can see, with every number tied to its context."
         />
+        <CoverageBanner coverage={coverage} context="storage scan" />
         <EmptyState
           title="No drive summary yet"
           description="CoreSight has not completed a storage scan on this device. Nothing is being measured in the background."
@@ -95,7 +96,7 @@ function HomeContent({ home }: { home: HomeSummary }) {
             <DataValue partial={partial}>
               {home.reviewReclaimableBytes === null
                 ? "review amount unknown"
-                : `${formatBytes(home.reviewReclaimableBytes)} more needs your review`}
+                : `${formatBytes(home.reviewReclaimableBytes)} in review-only opportunities`}
             </DataValue>
             {" · "}
             based on the {partial ? "partial " : ""}scan completed{" "}

@@ -435,6 +435,22 @@ function StorageContent({
               a verified content hash and is excluded from every duplicate claim.
             </p>
           ) : null}
+          {data.duplicateReport.unknownSizeEntries !== null &&
+          data.duplicateReport.unknownSizeEntries > 0 ? (
+            <p className="microcopy">
+              <DataValue
+                partial={data.duplicateReport.coverage.completeness !== "complete"}
+              >
+                {formatCount(
+                  data.duplicateReport.unknownSizeEntries,
+                  "entry has",
+                  "entries have"
+                )}
+              </DataValue>{" "}
+              a verified hash but no observed size; size equality cannot be proven, so they are
+              never grouped.
+            </p>
+          ) : null}
         </section>
 
         <section className="panel evidence-panel" aria-labelledby="big-files-heading">

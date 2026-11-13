@@ -65,6 +65,14 @@ jobs:
       - name: Phase 3 >4 GiB streaming proof (release mode, real-speed SHA-256 over 10 GiB virtual content)
         run: cargo test -j 2 -p coresight-identity --release --test perf_tests huge_file_streams_beyond_4gib -- --ignored --nocapture
 
+      # The desktop shell is its own workspace root (src-tauri/Cargo.toml), so
+      # `--workspace` above does not reach it. Type-check it explicitly or it
+      # rots silently. This checks only — it does not link or bundle, which
+      # needs the full Tauri packaging toolchain.
+      - name: Desktop shell type-check (Tauri 2, not linked)
+        if: runner.os == 'Windows'
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
   frontend:
     runs-on: ubuntu-latest
     steps:

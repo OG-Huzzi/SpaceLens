@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Phase 0: minimum capability set. Expanded per docs/API_CONTRACTS.md in Phase 1+.",
+  "description": "Main window. The shell exposes only app commands (which need no capability entry) and Rust-to-UI events, so the UI's only core API is the event listener: listen for scanProgress/scanComplete/planVerified and unlisten on unmount. The rest of core:default — app, window, webview, menu, tray, image, resources and path — and the event bundle's emit/emit-to are deliberately not granted, because nothing in the shell calls them.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

@@ -114,8 +114,16 @@ export interface StorageLocation {
   bytes: number | null;
 }
 
-/** A category plus the evidence needed for progressive disclosure. */
+/**
+ * A category plus the evidence needed for progressive disclosure. The four
+ * count/size fields mirror the Rust `UsageReport` totals; null means the engine
+ * could not establish the fact, not zero.
+ */
 export interface CategoryTotals extends Category {
+  entries: number | null;
+  files: number | null;
+  directories: number | null;
+  logicalSize: number | null;
   children: CategoryTotals[];
   entriesWithoutSize: number | null;
   observationErrors: number | null;
@@ -564,6 +572,10 @@ function makeCategory(
     shareOfParent,
     deltaSinceLast,
     itemCount,
+    entries: itemCount,
+    files: null,
+    directories: null,
+    logicalSize: bytes,
     children,
     entriesWithoutSize: extra.entriesWithoutSize ?? 0,
     observationErrors: extra.observationErrors ?? 0,
@@ -1596,7 +1608,13 @@ class MockCoreSightApi implements CoreSightApi {
       });
     }
     if (this.scenario === "error") {
-      return this.respond({} as CleanupPreview);
+      return this.respond(() => {
+        throw {
+          code: "SNAPSHOT_UNAVAILABLE",
+          message: "CoreSight could not read the local snapshot for this screen.",
+          detail: "The mock API is simulating a recoverable read failure. No files were touched."
+        } satisfies ApiError;
+      });
     }
 
     const allItems = [...CLEANUP_ITEMS, ...OFF_LIMITS_ITEMS];
@@ -1608,7 +1626,9 @@ class MockCoreSightApi implements CoreSightApi {
         detail: "Refresh the cleanup list and choose another item."
       } satisfies ApiError;
     }
-    const items = selected as CleanupItem[];
+    const items: CleanupItem[] = selected.filter(
+      (item): item is CleanupItem => item !== undefined
+    );
     if (items.some((item) => item.tier === "OFF_LIMITS" || !item.previewable)) {
       throw {
         code: "OFF_LIMITS_CATEGORY",
@@ -1653,7 +1673,13 @@ class MockCoreSightApi implements CoreSightApi {
 
   public async executeCleanup(confirmation: CleanupConfirmation): Promise<CleanupExecution> {
     if (this.scenario === "error") {
-      return this.respond({} as CleanupExecution);
+      return this.respond(() => {
+        throw {
+          code: "SNAPSHOT_UNAVAILABLE",
+          message: "CoreSight could not read the local snapshot for this screen.",
+          detail: "The mock API is simulating a recoverable read failure. No files were touched."
+        } satisfies ApiError;
+      });
     }
     const preview = this.previews.get(confirmation.planId);
     if (preview === undefined || !confirmation.confirmed) {

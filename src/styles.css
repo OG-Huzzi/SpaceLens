@@ -420,7 +420,7 @@ main {
    -------------------------------------------------------------------------- */
 
 .screen {
-  animation: settle-in 220ms ease-out both;
+  min-width: 0;
 }
 
 .page-header {
@@ -639,9 +639,9 @@ main {
   border-radius: 3px;
   background: var(--review-soft);
   color: var(--review);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.06em;
   line-height: 1.5;
   text-transform: uppercase;
   white-space: nowrap;
@@ -1312,11 +1312,11 @@ main {
 
 .category-columns {
   display: grid;
-  grid-template-columns: 14px minmax(145px, 1.15fr) minmax(82px, 0.9fr) 82px 44px 86px;
+  grid-template-columns: 14px minmax(145px, 1.15fr) minmax(82px, 0.9fr) 108px 48px 92px;
   gap: 12px;
   padding: 8px 6px 6px;
   color: var(--text-faint);
-  font-size: 9px;
+  font-size: 9.5px;
   font-weight: 650;
   letter-spacing: 0.055em;
   text-transform: uppercase;
@@ -1341,7 +1341,7 @@ main {
 
 .category-summary {
   display: grid;
-  grid-template-columns: 14px minmax(145px, 1.15fr) minmax(82px, 0.9fr) 82px 44px 86px;
+  grid-template-columns: 14px minmax(145px, 1.15fr) minmax(82px, 0.9fr) 108px 48px 92px;
   align-items: center;
   gap: 12px;
   padding: 13px 6px;
@@ -1407,6 +1407,7 @@ main {
   font-size: 13px;
   font-weight: 580;
   text-align: right;
+  white-space: nowrap;
 }
 
 .category-summary__share,
@@ -1415,6 +1416,7 @@ main {
   font-size: 10.5px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .category-summary__delta.delta--up {
@@ -2838,13 +2840,4 @@ a.delta-row:hover {
   }
 }
 
-@keyframes settle-in {
-  from {
-    opacity: 0.6;
-    transform: translateY(3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
+

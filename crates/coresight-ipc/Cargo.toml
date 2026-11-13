@@ -1,0 +1,26 @@
+[package]
+name = "coresight-ipc"
+version = "0.0.0"
+edition = "2021"
+description = "CoreSight IPC command layer — the typed `coresight.v1.*` request/response contract and a platform-neutral dispatcher. Contains no Tauri dependency: the desktop shell forwards invokes into `dispatch`. Performs no filesystem access of its own; every fact comes from the engine crates."
+license = "UNLICENSED"
+
+[lib]
+name = "coresight_ipc"
+crate-type = ["lib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+coresight-classifier = { path = "../coresight-classifier" }
+coresight-history = { path = "../coresight-history" }
+coresight-insights = { path = "../coresight-insights" }
+coresight-cleanup = { path = "../coresight-cleanup" }
+coresight-capabilities = { path = "../coresight-capabilities" }
+coresight-filetools = { path = "../coresight-filetools" }
+coresight-systools = { path = "../coresight-systools" }
+coresight-webtools = { path = "../coresight-webtools" }
+
+[dev-dependencies]
+serde_json = "1"
+coresight-engine = { path = "../coresight-engine" }
